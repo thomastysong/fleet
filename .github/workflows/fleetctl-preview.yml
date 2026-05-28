@@ -19,6 +19,7 @@ permissions:
 
 jobs:
   test-preview:
+    if: ${{ github.repository == 'fleetdm/fleet' }}
     timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:

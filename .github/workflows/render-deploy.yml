@@ -35,6 +35,7 @@ permissions:
 
 jobs:
   render-deploy:
+    if: ${{ github.repository == 'fleetdm/fleet' }}
     runs-on: ubuntu-latest
     steps:
       - name: Harden Runner
