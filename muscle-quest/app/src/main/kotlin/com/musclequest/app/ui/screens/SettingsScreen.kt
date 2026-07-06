@@ -82,8 +82,9 @@ fun SettingsScreen(
                 Column(Modifier.padding(14.dp)) {
                     Text("Active cycle length", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "4 weeks is the conservative first run. 8 weeks is the maximum, " +
-                            "for experienced users monitoring tolerance only.",
+                        "4 weeks is the conservative first run, 6 a middle path once " +
+                            "you know your tolerance, 8 the maximum for experienced " +
+                            "users monitoring tolerance only.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -108,7 +109,8 @@ fun SettingsScreen(
                     Column(Modifier.weight(1f)) {
                         Text("Daily reminders", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            "4:30 AM dose + wake-up, 4:30 PM dose window, 8:45 PM wind-down.",
+                            "Dose + wake-up, PM dose window, evening wind-down. " +
+                                "Phase-aware; weekend times shift later.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -123,7 +125,7 @@ fun SettingsScreen(
                     Text("Your stats", style = MaterialTheme.typography.titleMedium)
                     Text(
                         "31 y · 6'0\" · ~170 lb start — target ~3,100–3,300 kcal/day, " +
-                            "180 g+ protein, rice-heavy carbs around training.",
+                            "200–240 g protein, rice-heavy carbs around training.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

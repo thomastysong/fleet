@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.MuscleQuest" parent="android:Theme.Material.NoActionBar">
-        <item name="android:windowBackground">@color/iron_900</item>
+    <!-- Light by default; values-night overrides. The window background must
+         match the Compose scheme or every cold start flashes the wrong one. -->
+    <style name="Theme.MuscleQuest" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/paper_50</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
     </style>
 </resources>

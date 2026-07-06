@@ -34,7 +34,6 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import com.musclequest.app.notifications.ReminderScheduler
 import com.musclequest.app.ui.MainViewModel
 import com.musclequest.app.ui.screens.CycleScreen
 import com.musclequest.app.ui.screens.ProgressScreen
@@ -42,6 +41,7 @@ import com.musclequest.app.ui.screens.SettingsScreen
 import com.musclequest.app.ui.screens.TodayScreen
 import com.musclequest.app.ui.screens.WorkoutScreen
 import com.musclequest.app.ui.theme.MuscleQuestTheme
+import kotlinx.coroutines.flow.collectLatest
 
 private data class Tab(val route: String, val label: String, val icon: ImageVector)
 
@@ -71,7 +71,9 @@ class MainActivity : ComponentActivity() {
                 val snackbarHostState = remember { SnackbarHostState() }
 
                 LaunchedEffect(Unit) {
-                    viewModel.events.collect { snackbarHostState.showSnackbar(it) }
+                    // collectLatest: a new event preempts the one on screen, so
+                    // bulk check-offs don't queue a minute of stale toasts.
+                    viewModel.events.collectLatest { snackbarHostState.showSnackbar(it) }
                 }
 
                 Scaffold(
@@ -116,9 +118,11 @@ class MainActivity : ComponentActivity() {
                                 onLogSet = viewModel::logSet,
                                 onDeleteSet = viewModel::deleteSet,
                                 onFinishWorkout = {
+                                    // completeTask is check-only, so a double-tap
+                                    // racing this stale snapshot can't un-check.
                                     todayState.tasks
-                                        .firstOrNull { it.task.id == "workout" && !it.done }
-                                        ?.let(viewModel::toggleTask)
+                                        .firstOrNull { it.task.id == "workout" }
+                                        ?.let(viewModel::completeTask)
                                 },
                             )
                         }
@@ -138,12 +142,11 @@ class MainActivity : ComponentActivity() {
                                 onSetCycleStart = viewModel::setCycleStart,
                                 onSetActiveWeeks = viewModel::setActiveWeeks,
                                 onSetReminders = { enabled ->
+                                    // Re-prompt when turning reminders on after an
+                                    // earlier denial; otherwise the alarms fire into
+                                    // a void with the toggle claiming otherwise.
+                                    if (enabled) requestNotificationPermissionIfNeeded()
                                     viewModel.setRemindersEnabled(enabled)
-                                    if (enabled) {
-                                        ReminderScheduler.scheduleDaily(this@MainActivity)
-                                    } else {
-                                        ReminderScheduler.cancelAll(this@MainActivity)
-                                    }
                                 },
                             )
                         }

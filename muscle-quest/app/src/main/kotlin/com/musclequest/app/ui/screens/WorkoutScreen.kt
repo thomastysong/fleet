@@ -41,7 +41,7 @@ import com.musclequest.app.ui.WorkoutUiState
 fun WorkoutScreen(
     state: WorkoutUiState,
     onLogSet: (exercise: String, weightLbs: Double, reps: Int) -> Unit,
-    onDeleteSet: (Long) -> Unit,
+    onDeleteSet: (WorkoutSet) -> Unit,
     onFinishWorkout: () -> Unit,
 ) {
     val workout = state.workout
@@ -117,7 +117,7 @@ private fun ExerciseCard(
     exercise: ExercisePlan,
     sets: List<WorkoutSet>,
     onLogSet: (String, Double, Int) -> Unit,
-    onDeleteSet: (Long) -> Unit,
+    onDeleteSet: (WorkoutSet) -> Unit,
 ) {
     var weightText by rememberSaveable(exercise.name) { mutableStateOf("") }
     var repsText by rememberSaveable(exercise.name) { mutableStateOf("") }
@@ -149,7 +149,7 @@ private fun ExerciseCard(
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.weight(1f),
                     )
-                    IconButton(onClick = { onDeleteSet(set.id) }) {
+                    IconButton(onClick = { onDeleteSet(set) }) {
                         Icon(
                             Icons.Filled.Delete,
                             contentDescription = "Delete set",

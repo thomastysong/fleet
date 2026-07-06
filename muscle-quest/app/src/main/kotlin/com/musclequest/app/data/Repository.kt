@@ -42,24 +42,56 @@ class Repository(private val db: AppDatabase) {
             completionDao.delete(epochDay, DailyPlanner.PERFECT_DAY_TASK_ID)
             ToggleResult.UNCHECKED
         } else {
+            check(epochDay, task, plannedTasks, existing, streakBeforeToday, nowMillis)
+        }
+    }
+
+    /**
+     * Marks a task done, never un-done: a repeat call (e.g. a double-tapped
+     * "Finish workout" button racing stale UI state) is a no-op (null) instead
+     * of a toggle that would silently revoke the completion.
+     */
+    suspend fun completeTask(
+        date: LocalDate,
+        task: PlannedTask,
+        plannedTasks: List<PlannedTask>,
+        streakBeforeToday: Int,
+        nowMillis: Long,
+    ): ToggleResult? = db.withTransaction {
+        val epochDay = date.toEpochDay()
+        val existing = completionDao.forDayOnce(epochDay).map { it.taskId }.toSet()
+        if (task.id in existing) {
+            null
+        } else {
+            check(epochDay, task, plannedTasks, existing, streakBeforeToday, nowMillis)
+        }
+    }
+
+    private suspend fun check(
+        epochDay: Long,
+        task: PlannedTask,
+        plannedTasks: List<PlannedTask>,
+        existing: Set<String>,
+        streakBeforeToday: Int,
+        nowMillis: Long,
+    ): ToggleResult {
+        completionDao.insert(
+            Completion(epochDay = epochDay, taskId = task.id, xp = task.xp, completedAtMillis = nowMillis),
+        )
+        val doneNow = existing + task.id
+        return if (plannedTasks.all { it.id in doneNow }) {
+            val bonus = DailyPlanner.PERFECT_DAY_BONUS + Xp.streakBonus(streakBeforeToday + 1)
             completionDao.insert(
-                Completion(epochDay = epochDay, taskId = task.id, xp = task.xp, completedAtMillis = nowMillis),
+                Completion(
+                    epochDay = epochDay,
+                    taskId = DailyPlanner.PERFECT_DAY_TASK_ID,
+                    xp = bonus,
+                    completedAtMillis = nowMillis,
+                ),
             )
-            val doneNow = existing + task.id
-            if (plannedTasks.all { it.id in doneNow }) {
-                val bonus = DailyPlanner.PERFECT_DAY_BONUS + Xp.streakBonus(streakBeforeToday + 1)
-                completionDao.insert(
-                    Completion(
-                        epochDay = epochDay,
-                        taskId = DailyPlanner.PERFECT_DAY_TASK_ID,
-                        xp = bonus,
-                        completedAtMillis = nowMillis,
-                    ),
-                )
-                ToggleResult.CHECKED_PERFECT
-            } else {
-                ToggleResult.CHECKED
-            }
+            ToggleResult.CHECKED_PERFECT
+        } else {
+            ToggleResult.CHECKED
         }
     }
 
@@ -88,19 +120,42 @@ class Repository(private val db: AppDatabase) {
             isPr
         }
 
+    /**
+     * Deletes a logged set and, when it was a PR, one banked PR-bonus
+     * completion for that exercise/day — otherwise re-logging the same weight
+     * would mint a fresh +30 XP bonus every round trip.
+     */
+    suspend fun deleteSet(set: WorkoutSet) = db.withTransaction {
+        workoutSetDao.delete(set.id)
+        if (set.isPr) {
+            completionDao.deleteLatestMatching(
+                set.epochDay,
+                "${DailyPlanner.PR_TASK_PREFIX}${set.exercise}:%",
+            )
+        }
+    }
+
     suspend fun logWeight(date: LocalDate, weightLbs: Double) {
         weightDao.upsert(WeightEntry(epochDay = date.toEpochDay(), weightLbs = weightLbs))
     }
 
-    suspend fun unlock(achievement: Achievement, date: LocalDate, nowMillis: Long) {
-        achievementDao.insert(UnlockedAchievement(achievement.id, nowMillis))
-        completionDao.insert(
-            Completion(
-                epochDay = date.toEpochDay(),
-                taskId = "achievement:${achievement.id}",
-                xp = achievement.xpReward,
-                completedAtMillis = nowMillis,
-            ),
-        )
+    /**
+     * Returns true when this call actually unlocked the achievement. The XP
+     * reward is only banked on a real insert, so racing callers (or a stale
+     * UI snapshot at startup) can't award it twice.
+     */
+    suspend fun unlock(achievement: Achievement, date: LocalDate, nowMillis: Long): Boolean = db.withTransaction {
+        val inserted = achievementDao.insert(UnlockedAchievement(achievement.id, nowMillis)) != -1L
+        if (inserted) {
+            completionDao.insert(
+                Completion(
+                    epochDay = date.toEpochDay(),
+                    taskId = "achievement:${achievement.id}",
+                    xp = achievement.xpReward,
+                    completedAtMillis = nowMillis,
+                ),
+            )
+        }
+        inserted
     }
 }

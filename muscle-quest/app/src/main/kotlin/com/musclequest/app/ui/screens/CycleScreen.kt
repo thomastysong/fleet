@@ -134,7 +134,8 @@ private fun RulesCard() {
                 "Doses 10–12 h apart, every day — rest days included.",
                 "Every dose on an empty stomach; wait 30–60 min before eating.",
                 "PCT starts the day after the last active dose: Alpha-AF, 3 caps with the first meal, 30 days straight.",
-                "After PCT: minimum 4–8 weeks with zero andro products.",
+                "After PCT: 8 full weeks with zero andro products — next cycle " +
+                    "only after blood work is back to baseline.",
                 "Calorie surplus every day — never cut on cycle.",
                 "Zero alcohol during the cycle and PCT.",
                 "1 gallon of water daily; keep sodium, potassium, magnesium up.",

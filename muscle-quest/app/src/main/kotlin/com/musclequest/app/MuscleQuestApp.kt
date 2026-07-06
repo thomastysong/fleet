@@ -16,15 +16,18 @@ class MuscleQuestApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        appScope.launch { syncReminders(this@MuscleQuestApp) }
+        appScope.launch {
+            SettingsStore(this@MuscleQuestApp).ensureInitialized()
+            syncReminders(this@MuscleQuestApp)
+        }
     }
 
     companion object {
-        /** Arms or disarms the daily reminder alarms based on the saved setting. */
+        /** Arms or disarms the daily reminder alarms based on the saved settings. */
         suspend fun syncReminders(context: Context) {
-            val enabled = SettingsStore(context).settings.first().remindersEnabled
-            if (enabled) {
-                ReminderScheduler.scheduleDaily(context)
+            val settings = SettingsStore(context).settings.first()
+            if (settings.remindersEnabled) {
+                ReminderScheduler.scheduleNext(context, settings)
             } else {
                 ReminderScheduler.cancelAll(context)
             }

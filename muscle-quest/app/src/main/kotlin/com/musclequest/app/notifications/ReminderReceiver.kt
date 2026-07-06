@@ -13,7 +13,11 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.musclequest.app.MainActivity
+import com.musclequest.app.MuscleQuestApp
 import com.musclequest.app.R
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class ReminderReceiver : BroadcastReceiver() {
 
@@ -25,6 +29,18 @@ class ReminderReceiver : BroadcastReceiver() {
     }
 
     override fun onReceive(context: Context, intent: Intent) {
+        // One-shot alarms: re-arm all slots for their next occurrence before
+        // anything else, so a missing notification permission can't stop the
+        // reminder chain.
+        val pending = goAsync()
+        CoroutineScope(Dispatchers.Default).launch {
+            try {
+                MuscleQuestApp.syncReminders(context.applicationContext)
+            } finally {
+                pending.finish()
+            }
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED

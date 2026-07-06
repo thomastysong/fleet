@@ -100,10 +100,14 @@ private fun StatsRow(progress: ProgressUiState, today: TodayUiState) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         StatCard("Workouts", "${progress.workoutsCompleted}", Modifier.weight(1f))
         StatCard("PRs", "${progress.prCount}", Modifier.weight(1f))
-        StatCard("Volume", "${progress.totalVolume / 1000}k lb", Modifier.weight(1f))
+        StatCard("Volume", formatVolume(progress.totalVolume), Modifier.weight(1f))
         StatCard("Streak", "${today.streak}🔥", Modifier.weight(1f))
     }
 }
+
+/** Exact pounds while the number is small; rounded thousands once it isn't. */
+private fun formatVolume(lbs: Long): String =
+    if (lbs < 10_000) "%,d lb".format(lbs) else "%,dk lb".format((lbs + 500) / 1000)
 
 @Composable
 private fun StatCard(label: String, value: String, modifier: Modifier = Modifier) {

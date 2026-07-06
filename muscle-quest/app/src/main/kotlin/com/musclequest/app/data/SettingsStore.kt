@@ -37,6 +37,19 @@ class SettingsStore(private val context: Context) {
         )
     }
 
+    /**
+     * The cycle-start default must be made durable on first launch: a value
+     * synthesized at read time re-anchors to "today" on every process start,
+     * so the cycle would sit on Day 1 forever and never reach PCT.
+     */
+    suspend fun ensureInitialized() {
+        context.dataStore.edit { prefs ->
+            if (prefs[Keys.CYCLE_START] == null) {
+                prefs[Keys.CYCLE_START] = LocalDate.now().toEpochDay()
+            }
+        }
+    }
+
     suspend fun setCycleStart(date: LocalDate) {
         context.dataStore.edit { it[Keys.CYCLE_START] = date.toEpochDay() }
     }

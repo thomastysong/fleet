@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="iron_900">#15171B</color>
+    <!-- Mirrors the Compose light background (Theme.kt). -->
+    <color name="paper_50">#F7F8F5</color>
     <color name="volt">#B6F34C</color>
 </resources>

@@ -13,7 +13,9 @@ Alpha-AF PCT.
 
 ## 1. The Cycle Calendar
 
-Two options — the app defaults to the conservative 4-week run, which is the
+Two calendars below — the app also supports a 6-week middle path (pick it in
+Settings; the phases scale the same way: 42 active days → 30-day PCT →
+8-week recovery). It defaults to the conservative 4-week run, which is the
 right call for a first run of this stack.
 
 ### Option A — 4-week cycle (recommended first run)
@@ -71,7 +73,7 @@ right call for a first run of this stack.
 | 2:30 PM | Meal 3: steak/chicken + rice — last food before dose window |
 | **6:30 PM** | **PM dose** (12 h after AM, empty stomach) |
 | 7:15 PM | Dinner: steak + rice + veg |
-| 10:00 PM | Lights out (you get to sleep in — keep it to ~7.5–8 h) |
+| 10:00 PM | Lights out (10:00 PM → 6:30 AM is a full 8.5 h — extra recovery is free gains) |
 
 **During PCT:** delete the two andro dose rows; add **Alpha-AF 3 caps at
 Meal 1** (7:15 AM weekdays / 9:15 AM weekends). Everything else — training,
@@ -138,6 +140,9 @@ into a daily game: every dose, meal, workout, water goal and bedtime is a
 checkbox worth XP; workouts pay 50 XP; PRs pay 30; perfect days pay a bonus
 that grows with your streak; achievements pay out up to 300. It knows which
 phase you're in from the calendar, swaps andro doses for Alpha-AF
-automatically on PCT day 1, shifts the schedule on weekends, and fires
-reminders at 4:30 AM, 4:30 PM and 8:45 PM. Set your cycle start date in
-Settings and it builds this entire plan for you, every day, for the full run.
+automatically on PCT day 1, and shifts the schedule on weekends. Reminders
+are phase-aware too: dose + wake-up (4:30 AM weekdays / 6:30 AM weekends on
+cycle, Alpha-AF at breakfast during PCT), the PM dose window (4:30 / 6:30 PM,
+on-cycle only), and an evening wind-down — scheduled as exact alarms so Doze
+can't hold them past the dose window. Set your cycle start date in Settings
+and it builds this entire plan for you, every day, for the full run.

@@ -3,6 +3,7 @@ package com.musclequest.app.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.musclequest.app.MuscleQuestApp
 import com.musclequest.app.data.AppDatabase
 import com.musclequest.app.data.Completion
 import com.musclequest.app.data.Repository
@@ -161,13 +162,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 streakBeforeToday = if (t.perfectDay) (t.streak - 1).coerceAtLeast(0) else t.streak,
                 nowMillis = System.currentTimeMillis(),
             )
-            when (result) {
-                ToggleResult.CHECKED_PERFECT ->
-                    _events.send("PERFECT DAY! +${taskUi.task.xp} XP + bonus 🏆")
-                ToggleResult.CHECKED ->
-                    _events.send("+${taskUi.task.xp} XP — ${taskUi.task.title}")
-                ToggleResult.UNCHECKED -> Unit
-            }
+            announce(result, taskUi)
+        }
+    }
+
+    /** Check-only variant for buttons like "Finish workout": never un-checks. */
+    fun completeTask(taskUi: TaskUi) {
+        val t = todayState.value
+        viewModelScope.launch {
+            val result = repo.completeTask(
+                date = t.date,
+                task = taskUi.task,
+                plannedTasks = t.tasks.map { it.task },
+                streakBeforeToday = if (t.perfectDay) (t.streak - 1).coerceAtLeast(0) else t.streak,
+                nowMillis = System.currentTimeMillis(),
+            ) ?: return@launch
+            announce(result, taskUi)
+        }
+    }
+
+    private suspend fun announce(result: ToggleResult, taskUi: TaskUi) {
+        when (result) {
+            ToggleResult.CHECKED_PERFECT ->
+                _events.send("PERFECT DAY! +${taskUi.task.xp} XP + bonus 🏆")
+            ToggleResult.CHECKED ->
+                _events.send("+${taskUi.task.xp} XP — ${taskUi.task.title}")
+            ToggleResult.UNCHECKED -> Unit
         }
     }
 
@@ -184,8 +204,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun deleteSet(id: Long) {
-        viewModelScope.launch { repo.workoutSetDao.delete(id) }
+    fun deleteSet(set: WorkoutSet) {
+        viewModelScope.launch { repo.deleteSet(set) }
     }
 
     fun logWeight(weightLbs: Double) {
@@ -195,9 +215,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun setCycleStart(date: LocalDate) = viewModelScope.launch { settingsStore.setCycleStart(date) }
-    fun setActiveWeeks(weeks: Int) = viewModelScope.launch { settingsStore.setActiveWeeks(weeks) }
-    fun setRemindersEnabled(enabled: Boolean) = viewModelScope.launch { settingsStore.setRemindersEnabled(enabled) }
+    // Cycle changes move phase boundaries, so reminder alarms are re-derived
+    // after every write (sequentially, to avoid racing the DataStore read).
+    fun setCycleStart(date: LocalDate) = viewModelScope.launch {
+        settingsStore.setCycleStart(date)
+        MuscleQuestApp.syncReminders(getApplication())
+    }
+
+    fun setActiveWeeks(weeks: Int) = viewModelScope.launch {
+        settingsStore.setActiveWeeks(weeks)
+        MuscleQuestApp.syncReminders(getApplication())
+    }
+
+    fun setRemindersEnabled(enabled: Boolean) = viewModelScope.launch {
+        settingsStore.setRemindersEnabled(enabled)
+        MuscleQuestApp.syncReminders(getApplication())
+    }
 
     /**
      * Streak = consecutive perfect days ending yesterday (plus today when
@@ -259,11 +292,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         cycleCompleted = pastActive && p.workoutsCompleted > 0,
                         pctCompleted = pastPct && p.workoutsCompleted > 0,
                     )
+                    // Unlock state is read from the DAO, not the progressState
+                    // snapshot: at startup that StateFlow still holds its empty
+                    // default and would re-award everything already unlocked.
+                    val unlockedNow = repo.achievementDao.all().first()
+                        .map { it.achievementId }
+                        .toSet()
                     val fresh = Achievements.earned(stats)
-                        .filter { it.id !in p.unlockedIds && announced.add(it.id) }
+                        .filter { it.id !in unlockedNow && announced.add(it.id) }
                     fresh.forEach { a ->
-                        repo.unlock(a, today.value, System.currentTimeMillis())
-                        _events.send("${a.emoji} Achievement unlocked: ${a.title}! +${a.xpReward} XP")
+                        if (repo.unlock(a, today.value, System.currentTimeMillis())) {
+                            _events.send("${a.emoji} Achievement unlocked: ${a.title}! +${a.xpReward} XP")
+                        }
                     }
                 }
         }

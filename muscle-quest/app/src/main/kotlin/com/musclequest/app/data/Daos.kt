@@ -14,6 +14,13 @@ interface CompletionDao {
     @Query("DELETE FROM completions WHERE epochDay = :epochDay AND taskId = :taskId")
     suspend fun delete(epochDay: Long, taskId: String)
 
+    @Query(
+        "DELETE FROM completions WHERE id = (SELECT id FROM completions " +
+            "WHERE epochDay = :epochDay AND taskId LIKE :taskIdPattern " +
+            "ORDER BY completedAtMillis DESC LIMIT 1)",
+    )
+    suspend fun deleteLatestMatching(epochDay: Long, taskIdPattern: String)
+
     @Query("SELECT * FROM completions WHERE epochDay = :epochDay")
     fun forDay(epochDay: Long): Flow<List<Completion>>
 
@@ -82,8 +89,9 @@ interface WeightDao {
 
 @Dao
 interface AchievementDao {
+    /** Returns -1 when the achievement was already unlocked (conflict ignored). */
     @Insert(onConflict = OnConflictStrategy.IGNORE)
-    suspend fun insert(unlocked: UnlockedAchievement)
+    suspend fun insert(unlocked: UnlockedAchievement): Long
 
     @Query("SELECT * FROM unlocked_achievements")
     fun all(): Flow<List<UnlockedAchievement>>

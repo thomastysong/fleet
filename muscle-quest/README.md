@@ -18,8 +18,10 @@ plan into a daily game.
   real dates, live progress, and the non-negotiable rules.
 - **Progress** — level + rank (Rookie → Living Legend), body-weight chart,
   lifetime volume, and 11 unlockable achievements worth up to 300 XP each.
-- **Reminders** — 4:30 AM dose/wake-up, 4:30 PM dose window, 8:45 PM wind-down.
-  Survives reboots; toggleable in Settings.
+- **Reminders** — dose + wake-up, PM dose window, and wind-down notifications,
+  scheduled as exact alarms (Doze-proof), phase-aware (Alpha-AF copy during
+  PCT, no dose prompts off-cycle) and weekend-shifted. Survives reboots and
+  timezone changes; toggleable in Settings.
 - **Phase-aware** — on PCT day 1 the andro dose tasks disappear and
   Alpha-AF (3 caps with first meal) appears, automatically. Weekends shift
   the schedule later and swap training for active recovery.
@@ -55,13 +57,15 @@ cd muscle-quest
 ./gradlew installDebug           # install to a connected device
 ```
 
-> Note: this project was authored in a sandboxed environment where
-> `dl.google.com`/`maven.google.com` are blocked, so it has not been
-> compiled here. Open it in Android Studio (or run the commands above on a
-> normal network) — dependency versions are pinned to the same catalog as a
-> known-building sibling project.
+> Verified: `assembleDebug` + all unit tests pass with AGP 8.13.2 /
+> Gradle 8.13 / JDK 17, and the app has been smoke-tested end to end on an
+> Android 16 (API 36) Pixel 7 emulator.
 
 ## Publishing to Google Play
+
+> The complete human-side checklist (account setup, identity verification,
+> the mandatory closed test, listing assets, timelines) lives in
+> [PLAYSTORE.md](PLAYSTORE.md). The steps below are just the technical core.
 
 1. **Create a signing key** (once, keep it safe):
    ```bash
@@ -84,8 +88,12 @@ cd muscle-quest
    - **Content rating questionnaire:** note that the app references dietary
      supplements; expect an adult/parental-guidance rating.
    - Add store listing (title, description, screenshots from a device or
-     emulator, 512×512 icon, feature graphic), privacy policy URL, then
-     promote to production after testing.
+     emulator, 512×512 icon, feature graphic) and a privacy policy URL.
+   - **Closed test (mandatory for new personal accounts):** run a closed
+     testing release with at least 12 testers opted in continuously for
+     14 days, then apply for production access — internal testing alone
+     does not unlock the production track. Organization accounts are exempt.
+   - Promote to production once access is granted.
 5. Bump `versionCode`/`versionName` in `app/build.gradle.kts` for each release.
 
 ## Health notice
