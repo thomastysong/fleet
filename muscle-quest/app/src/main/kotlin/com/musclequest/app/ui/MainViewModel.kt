@@ -8,6 +8,7 @@ import com.musclequest.app.data.Completion
 import com.musclequest.app.data.Repository
 import com.musclequest.app.data.Settings
 import com.musclequest.app.data.SettingsStore
+import com.musclequest.app.data.ToggleResult
 import com.musclequest.app.data.WeightEntry
 import com.musclequest.app.data.WorkoutSet
 import com.musclequest.app.domain.Achievement
@@ -22,14 +23,20 @@ import com.musclequest.app.domain.PlannedTask
 import com.musclequest.app.domain.StatsSnapshot
 import com.musclequest.app.domain.WorkoutPlan
 import com.musclequest.app.domain.Xp
+import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneId
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -71,7 +78,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val today = MutableStateFlow(LocalDate.now())
 
     /** One-shot celebration messages (XP toasts, PRs, achievement unlocks). */
-    val events = MutableStateFlow<String?>(null)
+    private val _events = Channel<String>(Channel.BUFFERED)
+    val events: Flow<String> = _events.receiveAsFlow()
 
     val settings: StateFlow<Settings?> = settingsStore.settings
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
@@ -80,8 +88,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         Triple(date, s, CycleEngine.status(date, s.cycleStart, s.activeWeeks))
     }
 
+    // 366-day window so computeStreak's year-long walk never runs out of data.
     private val recentCompletions = today.flatMapLatest { date ->
-        repo.completionDao.since(date.minusDays(60).toEpochDay())
+        repo.completionDao.since(date.minusDays(366).toEpochDay())
     }
 
     val todayState: StateFlow<TodayUiState> = combine(
@@ -145,21 +154,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleTask(taskUi: TaskUi) {
         val t = todayState.value
         viewModelScope.launch {
-            repo.toggleTask(
+            val result = repo.toggleTask(
                 date = t.date,
                 task = taskUi.task,
                 plannedTasks = t.tasks.map { it.task },
-                completedIds = t.tasks.filter { it.done }.map { it.task.id }.toSet(),
                 streakBeforeToday = if (t.perfectDay) (t.streak - 1).coerceAtLeast(0) else t.streak,
                 nowMillis = System.currentTimeMillis(),
             )
-            if (!taskUi.done) {
-                val wasLast = t.tasks.count { !it.done } == 1
-                events.value = if (wasLast) {
-                    "PERFECT DAY! +${taskUi.task.xp} XP + bonus 🏆"
-                } else {
-                    "+${taskUi.task.xp} XP — ${taskUi.task.title}"
-                }
+            when (result) {
+                ToggleResult.CHECKED_PERFECT ->
+                    _events.send("PERFECT DAY! +${taskUi.task.xp} XP + bonus 🏆")
+                ToggleResult.CHECKED ->
+                    _events.send("+${taskUi.task.xp} XP — ${taskUi.task.title}")
+                ToggleResult.UNCHECKED -> Unit
             }
         }
     }
@@ -167,11 +174,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun logSet(exercise: String, weightLbs: Double, reps: Int) {
         viewModelScope.launch {
             val pr = repo.logSet(today.value, exercise, weightLbs, reps, System.currentTimeMillis())
-            events.value = if (pr) {
-                "NEW PR on $exercise — ${weightLbs.trimZeros()} lb! +${DailyPlanner.PR_XP} XP 🎉"
-            } else {
-                "Set logged: $exercise ${weightLbs.trimZeros()} lb × $reps"
-            }
+            _events.send(
+                if (pr) {
+                    "NEW PR on $exercise — ${weightLbs.trimZeros()} lb! +${DailyPlanner.PR_XP} XP 🎉"
+                } else {
+                    "Set logged: $exercise ${weightLbs.trimZeros()} lb × $reps"
+                },
+            )
         }
     }
 
@@ -182,17 +191,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun logWeight(weightLbs: Double) {
         viewModelScope.launch {
             repo.logWeight(today.value, weightLbs)
-            events.value = "Body weight logged: ${weightLbs.trimZeros()} lb"
+            _events.send("Body weight logged: ${weightLbs.trimZeros()} lb")
         }
     }
 
     fun setCycleStart(date: LocalDate) = viewModelScope.launch { settingsStore.setCycleStart(date) }
     fun setActiveWeeks(weeks: Int) = viewModelScope.launch { settingsStore.setActiveWeeks(weeks) }
     fun setRemindersEnabled(enabled: Boolean) = viewModelScope.launch { settingsStore.setRemindersEnabled(enabled) }
-
-    fun consumeEvent() {
-        events.value = null
-    }
 
     /**
      * Streak = consecutive perfect days ending yesterday (plus today when
@@ -224,6 +229,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun watchAchievements() {
         viewModelScope.launch {
+            // Guards against re-announcing an unlock while progressState is
+            // still catching up to the freshly inserted row.
+            val announced = mutableSetOf<String>()
             combine(todayState, progressState) { t, p -> t to p }
                 .collect { (t, p) ->
                     val status = t.status ?: return@collect
@@ -231,8 +239,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     val pastActive = started && status.phase != Phase.ON_CYCLE
                     val pastPct = started &&
                         (status.phase == Phase.RECOVERY || status.phase == Phase.MAINTENANCE)
+                    val zone = ZoneId.systemDefault()
+                    val sixAm = LocalTime.of(6, 0)
+                    val earlyWorkouts = repo.completionDao.workoutCompletionTimes().count {
+                        Instant.ofEpochMilli(it).atZone(zone).toLocalTime().isBefore(sixAm)
+                    }
                     val stats = StatsSnapshot(
                         workoutsCompleted = p.workoutsCompleted,
+                        earlyWorkouts = earlyWorkouts,
                         currentStreak = t.streak,
                         bothDoseDays = repo.completionDao.bothDoseDays().first(),
                         prCount = p.prCount,
@@ -245,10 +259,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         cycleCompleted = pastActive && p.workoutsCompleted > 0,
                         pctCompleted = pastPct && p.workoutsCompleted > 0,
                     )
-                    val fresh = Achievements.earned(stats).filter { it.id !in p.unlockedIds }
+                    val fresh = Achievements.earned(stats)
+                        .filter { it.id !in p.unlockedIds && announced.add(it.id) }
                     fresh.forEach { a ->
                         repo.unlock(a, today.value, System.currentTimeMillis())
-                        events.value = "${a.emoji} Achievement unlocked: ${a.title}! +${a.xpReward} XP"
+                        _events.send("${a.emoji} Achievement unlocked: ${a.title}! +${a.xpReward} XP")
                     }
                 }
         }

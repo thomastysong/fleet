@@ -17,6 +17,12 @@ interface CompletionDao {
     @Query("SELECT * FROM completions WHERE epochDay = :epochDay")
     fun forDay(epochDay: Long): Flow<List<Completion>>
 
+    @Query("SELECT * FROM completions WHERE epochDay = :epochDay")
+    suspend fun forDayOnce(epochDay: Long): List<Completion>
+
+    @Query("SELECT completedAtMillis FROM completions WHERE taskId = 'workout'")
+    suspend fun workoutCompletionTimes(): List<Long>
+
     @Query("SELECT * FROM completions WHERE epochDay >= :sinceEpochDay ORDER BY epochDay DESC")
     fun since(sinceEpochDay: Long): Flow<List<Completion>>
 

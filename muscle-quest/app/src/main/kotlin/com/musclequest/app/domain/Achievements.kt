@@ -11,6 +11,8 @@ data class Achievement(
 /** Snapshot of lifetime stats used to evaluate achievement conditions. */
 data class StatsSnapshot(
     val workoutsCompleted: Int,
+    /** Workouts whose completion was checked off before 6:00 AM local time. */
+    val earlyWorkouts: Int,
     val currentStreak: Int,
     val bothDoseDays: Int,
     val prCount: Int,
@@ -44,7 +46,7 @@ object Achievements {
     fun earned(stats: StatsSnapshot): List<Achievement> = ALL.filter { a ->
         when (a.id) {
             "first_blood" -> stats.workoutsCompleted >= 1
-            "early_bird" -> stats.workoutsCompleted >= 5
+            "early_bird" -> stats.earlyWorkouts >= 5
             "week_warrior" -> stats.currentStreak >= 7
             "iron_month" -> stats.currentStreak >= 30
             "dose_discipline" -> stats.bothDoseDays >= 14

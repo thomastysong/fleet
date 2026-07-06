@@ -69,13 +69,9 @@ class MainActivity : ComponentActivity() {
             MuscleQuestTheme {
                 val navController = rememberNavController()
                 val snackbarHostState = remember { SnackbarHostState() }
-                val event by viewModel.events.collectAsState()
 
-                LaunchedEffect(event) {
-                    event?.let {
-                        snackbarHostState.showSnackbar(it)
-                        viewModel.consumeEvent()
-                    }
+                LaunchedEffect(Unit) {
+                    viewModel.events.collect { snackbarHostState.showSnackbar(it) }
                 }
 
                 Scaffold(
