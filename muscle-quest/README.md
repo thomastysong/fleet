@@ -12,12 +12,24 @@ plan into a daily game.
 - **Today** — the day's full checklist (doses, meals, training, water, sleep),
   generated from your cycle phase and day of week. Every check-off pays XP;
   finishing everything pays a perfect-day bonus that scales with your streak 🔥.
-- **Train** — the 5-day split with per-exercise set logging. All-time weight
-  PRs are detected automatically and pay +30 XP.
-- **Cycle** — the full map: active weeks → 30-day PCT → 8-week recovery, with
-  real dates, live progress, and the non-negotiable rules.
-- **Progress** — level + rank (Rookie → Living Legend), body-weight chart,
-  lifetime volume, and 11 unlockable achievements worth up to 300 XP each.
+  Plus a **daily coach**: up to three science-based insight cards computed from
+  your actual data (weight trend vs the lean-bulk band, protein gap, sleep
+  debt, creatine saturation, phase-specific guidance, blood-work timing).
+- **Fuel** — calorie & macro tracking with targets computed from *your* body
+  (Mifflin-St Jeor BMR × activity + surplus; protein 1.2 g/lb, fat 0.35 g/lb,
+  carbs fill the rest), live-updated as your logged weight changes. One-tap
+  presets for the rice/chicken/steak/whey plan, custom entries, and +20 XP
+  the moment the day's protein target is banked.
+- **Train** — the 5-day split with per-exercise set logging, automatic PR
+  detection (+30 XP), progressive-overload cues (all-time best, last session's
+  top set, estimated 1RM), a per-exercise **rest timer**, and a
+  beat-last-week volume target.
+- **Cycle** — a visual timeline: active weeks → 30-day PCT → 8-week recovery →
+  next-cycle eligibility, with real dates, live progress, blood-work
+  checkpoints, and the non-negotiable rules.
+- **Progress** — level + rank (Rookie → Living Legend), body-weight chart with
+  least-squares trend line vs your lean-bulk band (0.25–0.5% BW/week),
+  lifetime volume, and 13 unlockable achievements.
 - **Reminders** — dose + wake-up, PM dose window, and wind-down notifications,
   scheduled as exact alarms (Doze-proof), phase-aware (Alpha-AF copy during
   PCT, no dose prompts off-cycle) and weekend-shifted. Survives reboots and

@@ -33,6 +33,8 @@ object DailyPlanner {
     const val PERFECT_DAY_TASK_ID = "bonus_perfect_day"
     const val PR_TASK_PREFIX = "pr_bonus:"
     const val PR_XP = 30
+    const val FUEL_PROTEIN_TASK_ID = "fuel_protein"
+    const val FUEL_PROTEIN_XP = 20
 
     fun tasksFor(date: LocalDate, status: CycleStatus): List<PlannedTask> {
         val weekend = date.dayOfWeek == DayOfWeek.SATURDAY || date.dayOfWeek == DayOfWeek.SUNDAY

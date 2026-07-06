@@ -138,7 +138,11 @@ andro compounds.
 The **MuscleQuest** Android app (in `muscle-quest/`) turns all of the above
 into a daily game: every dose, meal, workout, water goal and bedtime is a
 checkbox worth XP; workouts pay 50 XP; PRs pay 30; perfect days pay a bonus
-that grows with your streak; achievements pay out up to 300. It knows which
+that grows with your streak; achievements pay out up to 300. The Fuel tab
+tracks calories and macros against targets computed from your own body
+(Mifflin-St Jeor BMR, live-updated as your weight changes), and a daily coach
+turns your data into science-based nudges — weight-trend vs the lean-bulk
+band, protein pacing, sleep debt, blood-work timing. It knows which
 phase you're in from the calendar, swaps andro doses for Alpha-AF
 automatically on PCT day 1, and shifts the schedule on weekends. Reminders
 are phase-aware too: dose + wake-up (4:30 AM weekdays / 6:30 AM weekends on

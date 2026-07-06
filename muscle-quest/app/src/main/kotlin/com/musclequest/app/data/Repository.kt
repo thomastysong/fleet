@@ -20,6 +20,7 @@ class Repository(private val db: AppDatabase) {
     val workoutSetDao get() = db.workoutSetDao()
     val weightDao get() = db.weightDao()
     val achievementDao get() = db.achievementDao()
+    val foodDao get() = db.foodDao()
 
     /**
      * Toggles a checklist task. Completion state is re-read from the database
@@ -137,6 +138,37 @@ class Repository(private val db: AppDatabase) {
 
     suspend fun logWeight(date: LocalDate, weightLbs: Double) {
         weightDao.upsert(WeightEntry(epochDay = date.toEpochDay(), weightLbs = weightLbs))
+    }
+
+    /**
+     * Logs food and banks the once-per-day protein bonus the moment the day's
+     * total crosses the target. Returns true when this entry earned it.
+     */
+    suspend fun logFood(entry: FoodEntry, proteinTargetG: Int): Boolean = db.withTransaction {
+        foodDao.insert(entry)
+        val proteinNow = foodDao.proteinForDay(entry.epochDay)
+        val alreadyBanked = completionDao.existsForDay(entry.epochDay, DailyPlanner.FUEL_PROTEIN_TASK_ID) > 0
+        if (!alreadyBanked && proteinNow >= proteinTargetG && proteinTargetG > 0) {
+            completionDao.insert(
+                Completion(
+                    epochDay = entry.epochDay,
+                    taskId = DailyPlanner.FUEL_PROTEIN_TASK_ID,
+                    xp = DailyPlanner.FUEL_PROTEIN_XP,
+                    completedAtMillis = entry.loggedAtMillis,
+                ),
+            )
+            true
+        } else {
+            false
+        }
+    }
+
+    /** Deleting food revokes the protein bonus if the day drops below target. */
+    suspend fun deleteFood(entry: FoodEntry, proteinTargetG: Int) = db.withTransaction {
+        foodDao.delete(entry.id)
+        if (foodDao.proteinForDay(entry.epochDay) < proteinTargetG) {
+            completionDao.delete(entry.epochDay, DailyPlanner.FUEL_PROTEIN_TASK_ID)
+        }
     }
 
     /**

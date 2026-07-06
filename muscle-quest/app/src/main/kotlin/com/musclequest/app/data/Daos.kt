@@ -47,6 +47,30 @@ interface CompletionDao {
 
     @Query("SELECT COUNT(*) FROM completions WHERE taskId = 'water_goal'")
     fun waterGoalDays(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM completions WHERE taskId = :taskId")
+    suspend fun countForTask(taskId: String): Int
+
+    @Query("SELECT COUNT(*) FROM completions WHERE epochDay = :epochDay AND taskId = :taskId")
+    suspend fun existsForDay(epochDay: Long, taskId: String): Int
+}
+
+@Dao
+interface FoodDao {
+    @Insert
+    suspend fun insert(entry: FoodEntry)
+
+    @Query("DELETE FROM food_entries WHERE id = :id")
+    suspend fun delete(id: Long)
+
+    @Query("SELECT * FROM food_entries WHERE epochDay = :epochDay ORDER BY loggedAtMillis")
+    fun forDay(epochDay: Long): Flow<List<FoodEntry>>
+
+    @Query("SELECT COALESCE(SUM(proteinG), 0) FROM food_entries WHERE epochDay = :epochDay")
+    suspend fun proteinForDay(epochDay: Long): Int
+
+    @Query("SELECT COUNT(DISTINCT epochDay) FROM food_entries")
+    fun daysLogged(): Flow<Int>
 }
 
 @Dao
@@ -74,6 +98,12 @@ interface WorkoutSetDao {
             "WHERE epochDay >= :sinceEpochDay GROUP BY epochDay ORDER BY epochDay",
     )
     fun dailyVolumeSince(sinceEpochDay: Long): Flow<List<DailyVolume>>
+
+    @Query("SELECT * FROM workout_sets WHERE exercise IN (:exercises) AND epochDay < :beforeEpochDay")
+    suspend fun historyFor(exercises: List<String>, beforeEpochDay: Long): List<WorkoutSet>
+
+    @Query("SELECT COALESCE(SUM(weightLbs * reps), 0) FROM workout_sets WHERE epochDay = :epochDay")
+    suspend fun volumeForDay(epochDay: Long): Double
 }
 
 data class DailyVolume(val epochDay: Long, val volume: Double)

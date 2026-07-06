@@ -40,3 +40,16 @@ data class UnlockedAchievement(
     @PrimaryKey val achievementId: String,
     val unlockedAtMillis: Long,
 )
+
+/** One logged food/meal with its macros. */
+@Entity(tableName = "food_entries", indices = [Index("epochDay")])
+data class FoodEntry(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val epochDay: Long,
+    val name: String,
+    val kcal: Int,
+    val proteinG: Int,
+    val carbsG: Int,
+    val fatG: Int,
+    val loggedAtMillis: Long,
+)

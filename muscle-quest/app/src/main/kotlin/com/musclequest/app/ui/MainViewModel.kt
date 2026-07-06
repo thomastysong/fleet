@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.musclequest.app.MuscleQuestApp
 import com.musclequest.app.data.AppDatabase
 import com.musclequest.app.data.Completion
+import com.musclequest.app.data.FoodEntry
 import com.musclequest.app.data.Repository
 import com.musclequest.app.data.Settings
 import com.musclequest.app.data.SettingsStore
@@ -14,11 +15,20 @@ import com.musclequest.app.data.WeightEntry
 import com.musclequest.app.data.WorkoutSet
 import com.musclequest.app.domain.Achievement
 import com.musclequest.app.domain.Achievements
+import com.musclequest.app.domain.ActivityLevel
+import com.musclequest.app.domain.BodyProfile
 import com.musclequest.app.domain.CycleEngine
 import com.musclequest.app.domain.CycleStatus
 import com.musclequest.app.domain.DailyPlanner
 import com.musclequest.app.domain.DayWorkout
+import com.musclequest.app.domain.FoodPreset
+import com.musclequest.app.domain.FoodPresets
+import com.musclequest.app.domain.Insight
+import com.musclequest.app.domain.InsightData
+import com.musclequest.app.domain.InsightEngine
 import com.musclequest.app.domain.LevelInfo
+import com.musclequest.app.domain.MacroTargets
+import com.musclequest.app.domain.NutritionEngine
 import com.musclequest.app.domain.Phase
 import com.musclequest.app.domain.PlannedTask
 import com.musclequest.app.domain.StatsSnapshot
@@ -37,6 +47,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -54,11 +65,37 @@ data class TodayUiState(
     val xpEarnedToday: Int = 0,
 )
 
+/** Historical context for one exercise, for progressive-overload hints. */
+data class ExerciseStats(
+    val allTimeBestLbs: Double? = null,
+    val lastTopSet: WorkoutSet? = null,
+    val est1RmLbs: Double? = null,
+)
+
 data class WorkoutUiState(
     val workout: DayWorkout? = null,
     val sets: List<WorkoutSet> = emptyList(),
     val todayVolume: Double = 0.0,
     val workoutDone: Boolean = false,
+    val stats: Map<String, ExerciseStats> = emptyMap(),
+    /** Total volume from the same weekday last week, if any was logged. */
+    val lastWeekVolume: Double? = null,
+)
+
+data class MacroTotals(
+    val kcal: Int = 0,
+    val proteinG: Int = 0,
+    val carbsG: Int = 0,
+    val fatG: Int = 0,
+)
+
+data class FuelUiState(
+    val entries: List<FoodEntry> = emptyList(),
+    val totals: MacroTotals = MacroTotals(),
+    val targets: MacroTargets =
+        NutritionEngine.targets(BodyProfile(31, 72, 170.0, true, ActivityLevel.MODERATE, 400)),
+    val presets: List<FoodPreset> = FoodPresets.ALL,
+    val proteinHit: Boolean = false,
 )
 
 data class ProgressUiState(
@@ -119,14 +156,94 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val todaySets = today.flatMapLatest { date -> repo.workoutSetDao.forDay(date.toEpochDay()) }
 
-    val workoutState: StateFlow<WorkoutUiState> = combine(today, todaySets, todayState) { date, sets, t ->
+    private val exerciseStats = combine(today, todaySets) { date, _ ->
+        val workout = WorkoutPlan.forDay(date.dayOfWeek)
+            ?: return@combine emptyMap<String, ExerciseStats>()
+        val names = workout.exercises.map { it.name }
+        val history = repo.workoutSetDao.historyFor(names, date.toEpochDay()).filter { it.reps > 0 }
+        names.associateWith { name ->
+            val h = history.filter { it.exercise == name }
+            val lastDay = h.maxOfOrNull { it.epochDay }
+            ExerciseStats(
+                allTimeBestLbs = h.maxOfOrNull { it.weightLbs },
+                lastTopSet = h.filter { it.epochDay == lastDay }.maxByOrNull { it.weightLbs },
+                est1RmLbs = h.mapNotNull { NutritionEngine.estimate1Rm(it.weightLbs, it.reps) }.maxOrNull(),
+            )
+        }
+    }
+
+    val workoutState: StateFlow<WorkoutUiState> = combine(
+        today, todaySets, todayState, exerciseStats,
+    ) { date, sets, t, stats ->
         WorkoutUiState(
             workout = WorkoutPlan.forDay(date.dayOfWeek),
             sets = sets,
             todayVolume = sets.sumOf { it.weightLbs * it.reps },
             workoutDone = t.tasks.any { it.task.id == "workout" && it.done },
+            stats = stats,
+            lastWeekVolume = repo.workoutSetDao.volumeForDay(date.toEpochDay() - 7).takeIf { it > 0 },
         )
     }.stateIn(viewModelScope, SharingStarted.Eagerly, WorkoutUiState())
+
+    private val latestWeight = repo.weightDao.all().map { it.lastOrNull()?.weightLbs }
+
+    /** Live science targets — recomputed whenever profile or weight changes. */
+    val targetsState: StateFlow<MacroTargets> = combine(settingsStore.settings, latestWeight) { s, w ->
+        NutritionEngine.targets(s.profile(w))
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, FuelUiState().targets)
+
+    private val todayFood = today.flatMapLatest { repo.foodDao.forDay(it.toEpochDay()) }
+
+    val fuelState: StateFlow<FuelUiState> = combine(todayFood, targetsState) { entries, targets ->
+        val totals = MacroTotals(
+            kcal = entries.sumOf { it.kcal },
+            proteinG = entries.sumOf { it.proteinG },
+            carbsG = entries.sumOf { it.carbsG },
+            fatG = entries.sumOf { it.fatG },
+        )
+        FuelUiState(
+            entries = entries,
+            totals = totals,
+            targets = targets,
+            presets = FoodPresets.ALL,
+            proteinHit = targets.proteinG > 0 && totals.proteinG >= targets.proteinG,
+        )
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, FuelUiState())
+
+    /** Top-3 coach cards for today, recomputed as the day's data changes. */
+    val insights: StateFlow<List<Insight>> = combine(
+        todayState, fuelState, repo.weightDao.all(), recentCompletions, todaySets,
+    ) { t, f, weightsAll, recent, sets ->
+        val status = t.status ?: return@combine emptyList()
+        val epoch = t.date.toEpochDay()
+        val byDay = recent.groupBy({ it.epochDay }, { it.taskId })
+        // Only days that have activity at all count as trackable misses.
+        val sleepMisses = (1..7).count { d ->
+            byDay[epoch - d]?.let { "sleep" !in it } == true
+        }
+        val creatineDays = recent
+            .filter { it.taskId == "pwo_shake" || it.taskId == "creatine_rest" }
+            .map { it.epochDay }.distinct().size
+        InsightEngine.insightsFor(
+            t.date,
+            InsightData(
+                status = status,
+                weights = weightsAll.filter { it.epochDay >= epoch - 30 }
+                    .map { it.epochDay to it.weightLbs },
+                currentWeightLbs = weightsAll.lastOrNull()?.weightLbs
+                    ?: (f.targets.proteinG / 1.2), // protein target is 1.2 g/lb, so this recovers profile weight
+                proteinTodayG = f.totals.proteinG,
+                kcalToday = f.totals.kcal,
+                targets = f.targets,
+                foodLoggedToday = f.entries.isNotEmpty(),
+                sleepMisses7d = sleepMisses,
+                creatineDays = creatineDays,
+                todayVolumeLbs = sets.sumOf { it.weightLbs * it.reps },
+                lastSameWeekdayVolumeLbs = repo.workoutSetDao.volumeForDay(epoch - 7).takeIf { it > 0 },
+                streak = t.streak,
+            ),
+        )
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val progressState: StateFlow<ProgressUiState> = combine(
         repo.weightDao.all(),
@@ -215,6 +332,41 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun logFood(preset: FoodPreset) =
+        logCustomFood(preset.name, preset.kcal, preset.proteinG, preset.carbsG, preset.fatG)
+
+    fun logCustomFood(name: String, kcal: Int, proteinG: Int, carbsG: Int, fatG: Int) {
+        viewModelScope.launch {
+            val entry = FoodEntry(
+                epochDay = today.value.toEpochDay(),
+                name = name,
+                kcal = kcal,
+                proteinG = proteinG,
+                carbsG = carbsG,
+                fatG = fatG,
+                loggedAtMillis = System.currentTimeMillis(),
+            )
+            val hitTarget = repo.logFood(entry, fuelState.value.targets.proteinG)
+            _events.send(
+                if (hitTarget) {
+                    "🎯 Protein target hit! +${DailyPlanner.FUEL_PROTEIN_XP} XP"
+                } else {
+                    "Logged: $name"
+                },
+            )
+        }
+    }
+
+    fun deleteFood(entry: FoodEntry) {
+        viewModelScope.launch { repo.deleteFood(entry, fuelState.value.targets.proteinG) }
+    }
+
+    fun setAge(years: Int) = viewModelScope.launch { settingsStore.setAge(years) }
+    fun setHeightInches(inches: Int) = viewModelScope.launch { settingsStore.setHeightInches(inches) }
+    fun setIsMale(male: Boolean) = viewModelScope.launch { settingsStore.setIsMale(male) }
+    fun setActivity(level: ActivityLevel) = viewModelScope.launch { settingsStore.setActivity(level) }
+    fun setSurplus(kcal: Int) = viewModelScope.launch { settingsStore.setSurplus(kcal) }
+
     // Cycle changes move phase boundaries, so reminder alarms are re-derived
     // after every write (sequentially, to avoid racing the DataStore read).
     fun setCycleStart(date: LocalDate) = viewModelScope.launch {
@@ -291,6 +443,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         // so a fresh install dated in the past doesn't auto-unlock.
                         cycleCompleted = pastActive && p.workoutsCompleted > 0,
                         pctCompleted = pastPct && p.workoutsCompleted > 0,
+                        proteinTargetDays =
+                            repo.completionDao.countForTask(DailyPlanner.FUEL_PROTEIN_TASK_ID),
+                        foodLoggedDays = repo.foodDao.daysLogged().first(),
                     )
                     // Unlock state is read from the DAO, not the progressState
                     // snapshot: at startup that StateFlow still holds its empty

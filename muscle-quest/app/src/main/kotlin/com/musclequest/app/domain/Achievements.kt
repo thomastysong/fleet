@@ -22,6 +22,10 @@ data class StatsSnapshot(
     val phase: Phase,
     val cycleCompleted: Boolean,
     val pctCompleted: Boolean,
+    /** Days the protein target was hit (fuel_protein bonus banked). */
+    val proteinTargetDays: Int = 0,
+    /** Distinct days with at least one food entry logged. */
+    val foodLoggedDays: Int = 0,
 )
 
 object Achievements {
@@ -38,6 +42,8 @@ object Achievements {
         Achievement("level_10", "Double Digits", "Reach level 10", "🔟", 100),
         Achievement("cycle_complete", "Full Send", "Complete the active cycle", "🏁", 250),
         Achievement("pct_complete", "Landed the Plane", "Finish all 30 days of PCT", "🛬", 300),
+        Achievement("protein_pro", "Protein Pro", "Hit your protein target 7 days", "🍗", 75),
+        Achievement("fuel_accountant", "Fuel Accountant", "Log food on 14 different days", "📒", 50),
     )
 
     fun byId(id: String): Achievement? = ALL.firstOrNull { it.id == id }
@@ -56,6 +62,8 @@ object Achievements {
             "level_10" -> stats.level >= 10
             "cycle_complete" -> stats.cycleCompleted
             "pct_complete" -> stats.pctCompleted
+            "protein_pro" -> stats.proteinTargetDays >= 7
+            "fuel_accountant" -> stats.foodLoggedDays >= 14
             else -> false
         }
     }
