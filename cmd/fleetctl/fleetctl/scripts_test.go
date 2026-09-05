@@ -42,6 +42,9 @@ func TestRunScriptCommand(t *testing.T) {
 	ds.ListPoliciesForHostFunc = func(ctx context.Context, host *fleet.Host) ([]*fleet.HostPolicy, error) {
 		return nil, nil
 	}
+	ds.GetHostCustomHostVitalsFunc = func(ctx context.Context, hostID uint) ([]fleet.HostCustomHostVital, error) {
+		return nil, nil
+	}
 	ds.ListHostBatteriesFunc = func(ctx context.Context, hid uint) ([]*fleet.HostBattery, error) {
 		return nil, nil
 	}
@@ -113,12 +116,12 @@ hello world
 		{
 			name:         "invalid hashbang",
 			scriptPath:   func() string { return writeTmpScriptContents(t, "#! /foo/bar", ".sh") },
-			expectErrMsg: `Interpreter not supported. Shell scripts must run in "#!/bin/sh", "#!/bin/bash", or "#!/bin/zsh."`,
+			expectErrMsg: `Interpreter not supported. Supported interpreters are "#!/bin/sh", "#!/bin/bash", "#!/bin/zsh", "#!/usr/bin/env python3", or an absolute path to "python" / "python3".`,
 		},
 		{
 			name:         "unsupported hashbang",
 			scriptPath:   func() string { return writeTmpScriptContents(t, "#!/bin/ksh", ".sh") },
-			expectErrMsg: `Interpreter not supported. Shell scripts must run in "#!/bin/sh", "#!/bin/bash", or "#!/bin/zsh."`,
+			expectErrMsg: `Interpreter not supported. Supported interpreters are "#!/bin/sh", "#!/bin/bash", "#!/bin/zsh", "#!/usr/bin/env python3", or an absolute path to "python" / "python3".`,
 		},
 		{
 			name:       "posix shell hashbang",
@@ -423,7 +426,7 @@ Fleet records the last 10,000 characters to prevent downtime.
 				args = append(args, "--fleet", fmt.Sprintf("%d", *c.teamID))
 			}
 
-			b, err := RunAppNoChecks(args)
+			b, err := runAppNoChecks(args)
 			if c.expectErrMsg != "" {
 				require.Error(t, err)
 				require.Contains(t, err.Error(), c.expectErrMsg)

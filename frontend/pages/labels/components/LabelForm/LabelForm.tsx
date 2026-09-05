@@ -1,8 +1,10 @@
 import React, { ReactNode, useState } from "react";
 
-// @ts-ignore
+import { MAX_ENTITY_CHAR_LENGTH } from "utilities/constants";
+
 import InputField from "components/forms/fields/InputField";
 import Button from "components/buttons/Button";
+import GitOpsModeTooltipWrapper from "components/GitOpsModeTooltipWrapper";
 import TeamNameField from "../TeamNameField/TeamNameField";
 import { validateLabelFormData, ILabelFormValidation } from "./helpers";
 
@@ -88,7 +90,6 @@ const LabelForm = ({
 
       // start from previous errors
       if (prev.name) next.name = prev.name;
-      if (prev.description) next.description = prev.description;
 
       // ONLY CLEAR existing error on this field if it is now valid.
       // Do NOT set a new error if there wasn't one before.
@@ -96,15 +97,10 @@ const LabelForm = ({
         if (prev.name && fullValidation.name?.isValid) {
           next.name = undefined; // clear existing name error
         }
-      } else if (fieldName === "description") {
-        if (prev.description && fullValidation.description?.isValid) {
-          next.description = undefined; // clear existing description error
-        }
       }
 
       // recompute isValid from remaining errors
-      const fields = [next.name, next.description];
-      next.isValid = fields.every((f) => !f || f.isValid);
+      next.isValid = !next.name || next.name.isValid;
 
       return next;
     });
@@ -119,6 +115,13 @@ const LabelForm = ({
     // full validation for new data
     const fullValidation = validateLabelFormData(nextData);
     setFormValidation(fullValidation);
+  };
+
+  const handleBlur = (
+    evt: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>
+  ) => {
+    const target = evt.currentTarget as HTMLInputElement;
+    onInputBlur({ name: target.name, value: target.value });
   };
 
   const onSubmitForm = (evt: React.FormEvent) => {
@@ -138,23 +141,24 @@ const LabelForm = ({
         parseTarget
         name="name"
         onChange={onFormChange}
-        onBlur={onInputBlur}
+        onBlur={handleBlur}
         value={name}
         inputClassName={`${baseClass}__label-title`}
         label="Name"
         placeholder="Label name"
+        inputOptions={{ maxLength: MAX_ENTITY_CHAR_LENGTH }}
       />
       <InputField
-        error={formValidation.description?.message}
         parseTarget
         name="description"
         onChange={onFormChange}
-        onBlur={onInputBlur}
+        onBlur={handleBlur}
         value={description}
         inputClassName={`${baseClass}__label-description`}
         label="Description"
         type="textarea"
         placeholder="Label description (optional)"
+        inputOptions={{ maxLength: MAX_ENTITY_CHAR_LENGTH }}
       />
       {immutableFields.length > 0 ? (
         <span className={`${baseClass}__help-text`}>
@@ -164,15 +168,20 @@ const LabelForm = ({
       {teamName ? <TeamNameField name={teamName} /> : null}
       {additionalFields}
       <div className="button-wrap">
-        <Button onClick={onCancel} variant="inverse">
+        <GitOpsModeTooltipWrapper
+          entityType="labels"
+          renderChildren={(disableChildren) => (
+            <Button
+              type="submit"
+              isLoading={isUpdatingLabel}
+              disabled={disableChildren || !formValidation.isValid}
+            >
+              Save
+            </Button>
+          )}
+        />
+        <Button onClick={onCancel} variant="secondary">
           Cancel
-        </Button>
-        <Button
-          type="submit"
-          isLoading={isUpdatingLabel}
-          disabled={!formValidation.isValid}
-        >
-          Save
         </Button>
       </div>
     </form>

@@ -1,6 +1,6 @@
-# Custom OS settings
+# Configuration profiles
 
-In Fleet you can enforce OS settings like security restrictions, screen lock, Wi-Fi, etc., on your macOS, iOS, iPadOS, Windows, and Android hosts using configuration profiles.
+In Fleet you can use configuration profiles to enforce OS settings like security restrictions, screen lock, Wi-Fi, etc., on your macOS, iOS, iPadOS, Windows, and Android hosts.
 
 ## Create configuration profile
 
@@ -8,27 +8,127 @@ For macOS, iOS, and iPadOS hosts, Fleet recommends the [iMazing Profile Creator]
 
 For Windows hosts, copy this [Windows configuration profile template](https://fleetdm.com/example-windows-profile) and update the profile using any [configuration service providers (CSPs)](https://fleetdm.com/guides/creating-windows-csps) from [Microsoft's MDM protocol](https://learn.microsoft.com/en-us/windows/client-management/mdm/). For local testing on Windows, [SyncMLViewer](https://github.com/okieselbach/SyncMLViewer/releases) is a useful GUI tool for inspecting MDM traffic.
 
-For Android hosts, copy this [Android configuration profile template](https://fleetdm.com/learn-more-about/example-android-profile) and update the profile using the options available in [Android Management API](https://developers.google.com/android/management/reference/rest/v1/enterprises.policies#resource:-policy). To learn how, watch [this video](https://youtu.be/Jk4Zcb2sR1w).
+For Android hosts, copy this [Android configuration profile template](https://fleetdm.com/learn-more-about/example-android-profile) and update the profile using the options available in [Android Management API](https://developers.google.com/android/management/reference/rest/v1/enterprises.policies#resource:-policy). To learn how, watch [this video](https://youtu.be/Jk4Zcb2sR1w). To learn more about the different settings availabe for fully managed vs. BYOD Android devices, see [Google's documentation](https://support.google.com/work/android/topic/9621435?hl=en&ref_topic=6151012,6090502,6090491,&sjid=13375704519136380831-NA).
+
+### Apple declarations (DDM)
+
+For macOS hosts, Fleet supports uploading Apple Declarative Device Management (DDM) profiles as `.json` files. Fleet supports the following declaration types:
+
+#### Configurations (`com.apple.configuration.*`)
+Enforce settings like passcode policies, account configurations, and more.
+
+The following configuration declarations are not supported:
+
+- com.apple.configuration.management.status-subscriptions
+- com.apple.configuration.watch.enrollment
+- com.apple.configuration.app.managed
+- com.apple.configuration.package
+
+#### Activations (`com.apple.activation.simple`)
+For advanced setups, you can provide a custom activation instead of having Fleet automatically create the activation when you upload a configuration profile.
+
+The activation must include `Type`, `Identifier`, and `Payload` key. `Payload` must have a `StandardConfiguration` containing a reference to a **single** configuration profile that already exists in Fleet. Adding a `Predicate` is allowed, however, best practices is to use labels for scoping.
+
+Example:
+```json
+{
+  "Type": "com.apple.activation.simple",
+  "Identifier": "myIdentifier",
+  "Payload": {
+    "StandardConfigurations": [
+	  "myConfigurationIdentifier"
+	]
+  }
+}
+```
+
+#### Assets (`com.apple.asset.*`)
+Deploy credentials, certificates, and other assets referenced by configurations.
+
+Each **asset declaration** `.json` must include a `Type`, `Identifier`, and `Payload` key. Example:
+
+```json
+{
+  "Type": "com.apple.asset.data",
+  "Identifier": "com.example.sudo-config-asset",
+  "Payload": {
+    "Reference": {
+      "DataURL": "https://mdm.yourcompany.com/assets/sudo-config.zip",
+      "ContentType": "application/zip"
+    }
+  }
+}
+```
+
+To upload an asset declaration, use the same workflow (UI, API, or GitOps) as configuration profiles. 
+
+For more complex workflows, such as deploying an in-house app package (`.ipa`), the recommended approach is to host the manifest and package on your own infrastructure and upload the corresponding asset declaration to Fleet. Asset files are raw JSON following Apple's [DDM schema](https://developer.apple.com/documentation/devicemanagement).
 
 ## Enforce
 
-You can enforce OS settings using the Fleet UI, Fleet API, or [Fleet's best practice GitOps](https://github.com/fleetdm/fleet-gitops).
+You can enforce OS settings using the Fleet UI, Fleet API, or [GitOps](https://fleetdm.com/docs/configuration/yaml-files).
 
 Fleet UI:
 
-1. In the Fleet UI, head to the **Controls > OS settings > Custom settings** page.
+1. In the Fleet UI, head to the **Controls > OS settings > Configuration profiles** page.
 
 2. Choose which fleet you want to add a configuration profile to by selecting the desired fleet in the fleets dropdown in the upper left corner. Fleets are available in Fleet Premium.
 
-3. Select **Add profile** and choose your configuration profile.
+3. Select either **Profiles** or **Assets** from the sub menu.
+  - To add a configuration profile, select **Add profile** and choose your configuration profile and target.
+  - To add an asset, select **Add asset** and choose your asset.
 
-4. To edit the OS setting, first remove the old configuration profile and then add the new one. On macOS, iOS, iPadOS, and Android, removing a configuration profile will remove enforcement of the OS setting.
+Once the profile is saved, you can edit the profile's targets or replace the configuration file. Hover over the profile row and select the **pencil/edit button** to edit the following:
 
-Fleet API: Use the [Add custom OS setting (configuration profile) endpoint](https://fleetdm.com/docs/rest-api/rest-api#add-custom-os-setting-configuration-profile) in the Fleet API.
+  - Targets (all hosts or custom). For custom targets, you can edit the labels (include and/or exclude).
+  - Configuration profile. In the edit modal, hover over the uploaded file and select the **pencil/edit button** to upload a replacement file.
+  > The replacement file must match the original:
+  > - **DDM profiles:** same declaration identifier and file name
+  > - **.mobileconfig profiles:** same `PayloadIdentifier` and `PayloadDisplayName`
+
+Fleet API: Use the [Create configuration profile endpoint](https://fleetdm.com/docs/rest-api/rest-api#create-configuration-profile) in the Fleet API.
+
+### Target hosts with labels
+
+A configuration profile only applies to hosts on the platform it's built for. A macOS, iOS, or iPadOS profile (`.mobileconfig` or `.json`) never installs on Windows or Android hosts, and a Windows profile (`.xml`) never installs on Apple hosts. You don't need a label to keep a profile on the right platform.
+
+On Fleet Premium, you can use labels to scope a profile to a subset of those hosts. There are three targeting modes, and you can use only one per profile:
+
+- **Include all:** the profile applies to hosts that have all of the selected labels.
+- **Include any:** the profile applies to hosts that have any of the selected labels.
+- **Exclude any:** the profile applies to hosts that have none of the selected labels.
+
+If you don't select any labels, the profile applies to all hosts that support its platform.
+
+Fleet UI: on the **Add profile** modal, select **Custom**, choose a targeting mode, and select one or more labels.
+
+GitOps: set `labels_include_all`, `labels_include_any`, or `labels_exclude_any` on the profile. Each takes a list of label names. See the [YAML reference](https://fleetdm.com/docs/configuration/yaml-files) for the full syntax.
+
+```yaml
+controls:
+  windows_settings:
+    configuration_profiles:
+      - paths: ../lib/windows/profiles/*.xml
+        labels_include_any:
+          - Engineering
+          - Design
+```
+
+Fleet API: pass the same fields to the [Create configuration profile endpoint](https://fleetdm.com/docs/rest-api/rest-api#create-configuration-profile).
+
+### Removal behavior
+
+When a configuration profile is removed from Fleet or a host changes teams, Fleet reverses the settings that were applied by the profile:
+
+- **macOS, iOS, iPadOS, and Android:** Removing a configuration profile removes enforcement of the OS setting on the host.
+
+- **Windows:** Fleet sends SyncML `<Delete>` commands to reverse the settings applied by the profile. This is best-effort: most common CSPs (Policy, VPNv2) support `<Delete>` and revert to their defaults, but some CSPs (e.g. Firewall, WDATP) only accept `<Replace>` and return an error for `<Delete>`. Fleet treats these errors as success since the profile is no longer managed. The setting remains on the device at its last configured value but is no longer enforced by Fleet.
+
+If two Windows profiles configure the same setting (LocURI) and one is removed, Fleet preserves the setting on hosts where the other profile still applies. When the remaining profile is label-scoped, Fleet checks per-host whether it applies and only sends `<Delete>` to hosts outside the label scope. In rare cases involving batch operations that simultaneously add new label-scoped profiles and remove or edit existing ones, Fleet may be conservative and skip the `<Delete>` even on hosts where the new profile does not apply. The setting remains enforced on those hosts. To work around this rare case, re-add and then remove the setting in a separate operation.
 
 ### Device and user scope
 
-Currently, on macOS and Windows hosts, Fleet supports enforcing OS settings at the device (device scoped) and user (user scoped) levels. The iOS, iPadOS, and Android platforms only support device-scoped configuration profiles. User-scoped declaration (DDM) profiles for macOS are coming soon.
+Currently, on macOS and Windows hosts, Fleet supports enforcing OS settings at the device (device scoped) and user (user scoped) levels. The iOS, iPadOS, and Android platforms only support device-scoped configuration profiles.
 
 If a macOS host is automatically enrolled (via [ADE](https://support.apple.com/en-us/102300)), user-scoped profiles are delivered to the user that was created during first time setup. For Macs that enrolled and turned on MDM manually, user-scoped profiles are delivered to the user that turned on MDM on the **Fleet Desktop > My device** page.
 
@@ -37,6 +137,7 @@ How to deliver user-scoped configuration profiles:
 #### macOS
 
 1. If you use iMazing Profile Creator, open your configuration profile in iMazing, select the **General** tab and update the **Payoad Scope** to **User**.
+
 2. If you edit your configuration profiles in a text editor, open the configuraiton profile in your text editor, find or add the `PayloadScope` key, and set the value to `User`. Here's an example `.mobileconfig` snippet:
 
 ```
@@ -52,9 +153,26 @@ How to deliver user-scoped configuration profiles:
 </plist>
 ```
 
+Here's an example DDM (`com.apple.configuration.*`) snippet:
+```json
+{
+    "Type": "com.apple.configuration.passcode.settings",
+    "PayloadScope": "User",
+    "Identifier": "EB13EE2B-5D63-4EBA-810F-5B81D07F5017",
+    "ServerToken": "E180CA9A-F089-4FA3-BBDF-94CC159C4AE8",
+    "Payload": {
+        "RequirePasscode": true,
+        "RequireComplexPasscode": true,
+        "MinimumLength": 10,
+        "MaximumInactivityInMinutes": 1
+    }
+}
+```
+
 #### Windows
 
 1. Head to the [Windows configuration profiles (CSPs) documentation](https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-configuration-service-provider) to verify that all the settings in your Windows profile support the user scope. For example, the [SCEP setting](https://learn.microsoft.com/en-us/windows/client-management/mdm/clientcertificateinstall-csp#devicescep) supports both the device and user scope.
+
 2. To make your Windows configuration profiles user scoped, replace `./Device` with `./User` in all `<LocURI>` elements.
 
 #### Upgrading from below 4.71.0
@@ -62,11 +180,13 @@ How to deliver user-scoped configuration profiles:
 Fleet added support for user-scoped macOS configuration profiles in Fleet 4.71.0. If you're upgrading Fleet from a version below 4.71.0, here's how to prepare your already enrolled hosts for macOS user-scoped configuration profiles:
 
 1. If the host automatically enrolled to Fleet (via ADE), you don't need to take action. Fleet added support for the user-scoped configuration profiles on these hosts.
+
 2. To deliver user-scoped profiles to hosts that manually enrolled and turned on MDM, first turn off MDM and ask end user to [turn on MDM](https://fleetdm.com/guides/mdm-migration#migrate-hosts:~:text=If%20the%20host%20is%20not%20assigned%20to%20Fleet%20in%20ABM%20(manual%20enrollment)%2C%20the%20end%20user%20will%20be%20given%20the%20option%20to%20download%20the%20MDM%20enrollment%20profile%20on%20their%20My%20device%20page.) through the **My device** page.
 
 Edit user-scoped configuration profiles that are already installed on hosts:
 
 1. Check for profiles with `PayloadScope` set to `User`. Already deployed profiles with `PayloadScope` set to `User` won’t be re-installed on hosts automatically.
+
 2. To change them to the user-scope, update the `PayloadIdentifier`, re-add the profile to Fleet, and delete the old profile. This will uninstall the device-scope profile and install the profile in the user scope. If you're using [GitOps](https://fleetdm.com/docs/configuration/yaml-files), just update the `PayloadIdentifier` and run GitOps.
 
 In versions older than 4.71.0, Fleet always delivered configuration profiles to the device scope (even when the profile's `PayloadScope` was set to `User`)
@@ -77,21 +197,21 @@ If you want to make sure the profile stays device-scoped, update `PayloadScope` 
 
 In the Fleet UI, head to the **Controls > OS settings** tab.
 
-To see the status of a specific setting, hover over the setting's row in the **Custom settings** table and select the information (**i**) icon.
+To see the status of a specific setting, hover over the setting's row in the **Configuration profiles** table and select the information (**i**) icon.
 
-Currently, when editing a profile using Fleet's GitOps workflow, it can take 30 seconds for the profile's status to update to "Pending."
+When editing a profile via Fleet's GitOps workflow, the profile's status will begin updating to "Pending" within 30 seconds. In larger installations, it may take a few minutes for the status to apply to all hosts.
+
+Editing a profile's labels sets the status to "Pending" for newly targeted hosts.
 
 ### Verified
 
-> For some Windows configuration profiles, [verification doesn't work](https://github.com/fleetdm/fleet/issues/38833). Fleet will [remove verification](https://github.com/fleetdm/fleet/issues/31921) for Windows profiles in 4.83 (coming soon).
+Hosts that applied all OS settings.
 
-Hosts that applied all OS settings. 
+For macOS configuration profiles, Fleet verified by running an osquery query. It can take up to 1 hour ([configurable](https://fleetdm.com/docs/configuration/fleet-server-configuration#osquery-detail-update-interval)) for these profiles to move from "Verifying" to "Verified".
 
-For macOS configuration profiles and device-scoped Windows profiles, Fleet verified by running a report. It can take up to 1 hour ([configurable](https://fleetdm.com/docs/configuration/fleet-server-configuration#osquery-detail-update-interval)) for these profiles to move from "Verifying" to "Verified".
+macOS declarations (DDM) profiles are verified with a [DDM StatusReport](https://developer.apple.com/documentation/devicemanagement/statusreport).
 
-macOS declarations profiles are verified with a [DDM StatusReport](https://developer.apple.com/documentation/devicemanagement/statusreport).
-
-User-scoped Windows profiles are "Verified" after Fleet gets a [200 response](https://learn.microsoft.com/en-us/windows/client-management/oma-dm-protocol-support#syncml-response-status-codes) from the Windows MDM protocol.
+All Windows profiles are "Verified" after Fleet gets a [200 response](https://learn.microsoft.com/en-us/windows/client-management/oma-dm-protocol-support#syncml-response-status-codes) from the Windows MDM protocol.
 
 iOS and iPadOS hosts are "Verified" after they acknowledge all MDM commands to apply OS settings. Android hosts are "Verified" after Fleet verifies that the settings is applied in the next [status report](https://developers.google.com/android/management/reference/rest/v1/enterprises.devices).
 
@@ -99,13 +219,13 @@ iOS and iPadOS hosts are "Verified" after they acknowledge all MDM commands to a
 
 Hosts that acknowledged all MDM commands to apply OS settings. Fleet is verifying. If the profile wasn't delivered, Fleet will redeliver the profile.
 
-For Windows profiles, when Fleet gets a [200 response](https://learn.microsoft.com/en-us/windows/client-management/oma-dm-protocol-support#syncml-response-status-codes) from the Windows MDM protocol, device-scoped profiles are "Verifying" but, currently, user-scoped Windows profiles go straight to "Verified."
-
 ### Pending
 
 Hosts that are running MDM commands or will run MDM commands to apply OS settings when they come online.
 
 ### Failed
+
+> Apple MDM profiles and Android certificates are automatically attempted up to 4 times (1 initial attempt + 3 retries) before entering the "Failed" state.
 
 Hosts that failed to apply OS settings. For Windows profiles, status codes are listed in [Microsoft's OMA DM docs](https://learn.microsoft.com/en-us/windows/client-management/oma-dm-protocol-support#syncml-response-status-codes).
 
@@ -133,12 +253,48 @@ SELECT data FROM registry WHERE path = 'HKEY_LOCAL_MACHINE\Software\Policies\emp
 
 > If your Windows profile fails with the following error: "The MDM protocol returned a success but the result couldn’t be verified by osquery", and the profile includes `[!CDATA []]` sections, [escape the XML](https://www.freeformatter.com/xml-escape.html) instead of using CDATA. For example, `[!CDATA[<enabled/>]]>` should be changed to `&lt;enabled/&gt;`.
 
-### Special Android behvaior
+### Special Android behavior
 
 On Android, if some settings from the profile fail (e.g. incompatible device), other settings from the profile will still be applied. Failed settings will be surfaced on **Host > OS settings**.
 Also, some settings from the profile might be overridden by another configuration profile, which means if multiple profiles include the same setting, the profile that is delivered most recently will be applied.
 
 The error message will provide the reason from the Android Management API (AMAPI) for why certain settings are not applied. Possible reasons are listed in the [AMAPI docs](https://developers.google.com/android/management/reference/rest/v1/NonComplianceReason).
+
+Note that the "Resend" button is only available for certificates. Fleet pushes certificates via Fleet's Android app. Other configuration profiles don't have the "Resend" button because they are sent via a different mechanism: the host checks in for these profiles periodically similarly to Apple declaration (DDM) profiles, rather than Fleet pushing them. 
+
+#### Biometric unlock on personally-owned (BYOD) hosts
+
+Android applies the biometric values of `keyguardDisabledFeatures` to the work profile lock. By default, the end user has one lock for both the work profile and the host ("Use one lock"). There is no separate work profile lock to restrict, so Android restricts the host's lock instead. The profile below turns off fingerprint and face unlock for the whole host, including the end user's personal apps:
+
+```json
+{
+  "keyguardDisabledFeatures": [
+    "FACE",
+    "BIOMETRICS"
+  ]
+}
+```
+
+To restrict biometric unlock on the work profile only, require a separate work profile lock in the same profile:
+
+```json
+{
+  "keyguardDisabledFeatures": [
+    "FACE",
+    "BIOMETRICS"
+  ],
+  "passwordPolicies": [
+    {
+      "passwordScope": "SCOPE_PROFILE",
+      "unifiedLockSettings": "REQUIRE_SEPARATE_WORK_LOCK"
+    }
+  ]
+}
+```
+
+Android then asks the end user to set a work profile lock. Until they set it, Android reports `passwordPolicies` with a reason of `USER_ACTION`, and Fleet shows the profile as "Failed" on **Host > OS settings**. The profile moves to "Verified" after the end user sets the lock.
+
+`unifiedLockSettings` requires Android 9 or later, and Android rejects the policy unless `passwordScope` is `SCOPE_PROFILE`.
 
 ## Broken profiles
 
@@ -156,9 +312,18 @@ If a backup is migrated to a new host using [Apple’s Migration Assistant](http
 
 To manually remove unmanaged profiles, ask the end user to go to **System Settings > General > Device Management**, select the profile, and select the **- (minus)** button at the bottom of the list.
 
+## Stuck user-channel profiles
+
+Configuration profiles scoped to the user channel only deliver to the host's enrolled managed local account. If that account is deleted, the user channel has no account to deliver to. In Fleet, the profile can show as **Pending** or **Enforcing** even though no MDM command was ever queued or sent.
+
+To check which account a profile is scoped to, go to a host's **Host details > OS settings** and hover over the user icon next to the profile's name.
+
+To resolve this, run `sudo profiles renew -type enrollment` on the host. This re-enrolls the user channel under the account that's currently logged in.
+
+
 <meta name="category" value="guides">
 <meta name="authorGitHubUsername" value="noahtalerman">
 <meta name="authorFullName" value="Noah Talerman">
-<meta name="publishedOn" value="2024-07-27">
-<meta name="articleTitle" value="Custom OS settings">
+<meta name="publishedOn" value="2026-07-16">
+<meta name="articleTitle" value="Configuration profiles">
 <meta name="description" value="Learn how to enforce custom settings on macOS and Window hosts using Fleet's configuration profiles.">

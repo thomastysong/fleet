@@ -22,11 +22,11 @@ It is [planned and ready](https://fleetdm.com/handbook/company/development-group
 ## Changes
 
 ### Product
-- [ ] UI changes: TODO <!-- Insert the link to the relevant Figma cover page. If there are substantial UI changes at one of Fleet's breakpoints (480, 768, 1024, 1280, and 1440px), make sure wireframes show the UI at the relevant breakpoint(s). Put "No changes" if there are no changes to the user interface. -->
+- [ ] UI changes: TODO <!-- Insert the link to the relevant Figma "Ready" page. If there are substantial UI changes at one of Fleet's breakpoints (480, 768, 1024, 1280, and 1440px), make sure wireframes show the UI at the relevant breakpoint(s). Put "No changes" if there are no changes to the user interface. -->
 - [ ] CLI (fleetctl) usage changes: TODO <!-- Insert the link to the relevant Figma cover page. Put "No changes" if there are no changes to the CLI. -->
 - [ ] YAML changes: TODO <!-- Specify changes in the YAML files doc page as a PR to the reference docs release branch following the guidelines in the handbook here: https://fleetdm.com/handbook/product-design#drafting Put "No changes" if there are no changes necessary. -->
-- [ ] REST API changes: TODO <!-- Specify changes in the REST API doc page as a PR to reference docs release branch following the guidelines in the handbook here: https://fleetdm.com/handbook/product-design#drafting Put "No changes" if there are no changes necessary. Move this item to the engineering list below if engineering will design the API changes. -->
-- [ ] Fleet's agent (fleetd) changes: TODO <!-- Specify changes to fleetd. If the change requires a new Fleet (server) version, consider specifying to only enable this change in new Fleet versions. Put "No changes" if there are no changes necessary. -->
+- [ ] REST API changes: TODO <!-- Specify changes as a PR to reference docs release branch following the guidelines in the handbook here: https://fleetdm.com/handbook/product-design#drafting Put "No changes" if there are no changes necessary. Move this item to the engineering list below if engineering will design the API changes. -->
+- [ ] Fleet's agent (fleetd) changes: TODO <!-- Specify changes to fleetd. If the change requires a new Fleet (server) version, consider specifying to only enable this change in new Fleet versions. If there are new tables, specify changes in the schema/ folder as a PR to the reference docs release branch following the guidelines in the handbook here: https://fleetdm.com/handbook/product-design#drafting Put "No changes" if there are no changes necessary. -->
 - [ ] Fleet server configuration changes: TODO <!-- Specify changes in the Fleet server configuration doc page as a PR to reference docs release branch following the guidelines in the handbook here: https://fleetdm.com/handbook/product-design#drafting File a :help-customers request and assign the SVP of Customer Success. Up to Customer Success to device if any changes to cloud environments is needed. Put "No changes" if there are no changes necessary. -->
 - [ ] Exposed, public API endpoint changes: TODO <!-- Specify changes in the "Which API endpoints to expose to the public internet?" guide as a PR to reference docs release branch following the guidelines in the handbook here: https://fleetdm.com/handbook/product-design#drafting File a :help-customers request and assign the SVP of Customer Success. Up to Customer Success to device if any changes to cloud environments is needed.  Put "No changes" if there are no changes necessary. -->
 - [ ] fleetdm.com changes: TODO <!-- Does this story include changes to fleetdm.com? (e.g. new API endpoints) If yes, create a blank subtask with the #g-website label, assign @eashaw, and add @eashaw and @lukeheath to the next design review meeting. fleetdm.com changes are up to @eashaw -->
@@ -37,6 +37,7 @@ It is [planned and ready](https://fleetdm.com/handbook/company/development-group
 - [ ] Changes to paid features or tiers: TODO  <!-- Specify changes in pricing-features-table.yml as a PR to reference docs release branch. Specify "Fleet Free" and/or "Fleet Premium" if there are no changes to the pricing page necessary. -->
 - [ ] My device and fleetdm.com/better changes: TODO <!-- If there are changes to the personal information Fleet can see on end user workstations, make sure wireframes include changes to the My device page. Also, specify changes as a PR to the fleetdm.com/better (aka Transparency page). Put "No changes" if there are no changes necessary. -->
 - [ ] Usage statistics: TODO <!-- Specify changes in the Fleet usage statistics guide as a PR to reference docs release branch. Put "No changes" if there are no changes necessary. -->
+- [ ] Compatibility: TODO <!-- If there are there are any breaking changes, outside of a major release, notify the Manager of Customer Support and Solutions Architecture. Put "No changes" if there are no changes necessary. -->
 - [ ] Other reference documentation changes: TODO <!-- Any other reference doc changes? Specify changes as a PR to reference docs release branch. Put "No changes" if there are no changes necessary. -->
 - [ ] First draft of test plan added
 - [ ] Once shipped, requester has been notified
@@ -50,7 +51,6 @@ It is [planned and ready](https://fleetdm.com/handbook/company/development-group
 - [ ] Load testing: TODO  <!-- List any required scalability testing to be conducted.  Remove this checkbox if there is no scalability testing required. -->
 - [ ] Pre-QA load test: TODO <!-- If this story has high risk of changing load profile, engineers must load-test prior to QA, with a subtask dedicated to that effort. Remove this checkbox if the change won't measurably modify Fleet's load profile, such that either load testing isn't needed at all or load testing is expected to be only performed during QA. -->
 - [ ] Load testing/osquery-perf improvements: TODO <!-- List, or link a subtask for, any osquery-perf or load test environment changes required to comprehensively load test this story if load testing is needed. -->
-- [ ] This is a premium only feature: Yes / No  <!-- If yes, make sure the test plan includes confirmation that both the frontend and backend are protected. -->
 
 > ℹ️  Please read this issue carefully and understand it.  Pay [special attention](https://fleetdm.com/handbook/company/development-groups#developing-from-wireframes) to UI wireframes, especially "dev notes".
 
@@ -63,15 +63,57 @@ It is [planned and ready](https://fleetdm.com/handbook/company/development-group
 
 ### Test plan
 <!-- Add detailed manual testing steps for all affected user roles. -->
-
 > Make sure to go through [the list](https://github.com/fleetdm/fleet/blob/main/docs/Contributing/guides/ui/design-qa-considerations.md) and consider all events that might be related to this story, so we catch edge cases earlier.
 
-- TODO
-- TODO
+#### Core flow
+<!-- Product TO DO -->
 - TODO
 
-<!-- Consider: Do the steps above apply to all global access roles, including admin, maintainer, observer, observer+, and GitOps?  Do the steps above apply to all fleet-level access roles?  If not, write the steps used to test each variation.
+#### Edge cases
+<!-- QA TO DO: replace the TODO with story-specific edge cases (invalid input, boundary conditions, missing config, deleted/modified related objects). -->
+- TODO
+
+<!-- 💡 Suggested checks below — un-comment any section that applies to this story, then fill it in.
+
+#### UI
+- [ ] Verify that all UI changes specified in the Figma wireframes are correctly implemented
+- [ ] Verify expected UI states (loading, empty, error states if applicable)
+
+#### API
+- [ ] Test all API endpoints added or modified in the **API changes** section of this issue
+- [ ] Verify any new API endpoints appear in the list when adding an API-only user. The API endpoints display name, method, and path is the same as listed in the API reference docs
+- [ ] Verify error handling for invalid inputs where applicable
+- [ ] Verify that the new endpoints are available for granular API assignment during API-only user creation
+
+#### GitOps (generate + run)
+- [ ] Configure the feature through the UI and run `fleetctl generate-gitops`
+- [ ] Confirm the generated `.yml` includes the expected fields (compare with YAML changes in the Product section)
+- [ ] Modify the generated `.yml` and run `fleetctl gitops`
+- [ ] Confirm the configuration updates correctly in Fleet
+- [ ] Enable GitOps mode and verify the feature behaves correctly
+- [ ] Create a new fleet and apply the feature for the first time together with the fleet creation
+
+#### Permissions
+- [ ] Verify role restrictions are applied correctly for **global roles** (admin, maintainer, observer, observer+, GitOps)
+- [ ] Verify role restrictions are applied correctly for **fleet-level roles**
+
+#### Premium gating (if this is a premium-only feature)
+- [ ] Verify the feature is blocked on Fleet Free in the **frontend** (UI hidden/disabled with appropriate messaging)
+- [ ] Verify the feature is blocked on Fleet Free in the **backend** (API returns the expected error, not just hidden in the UI)
+
+#### Upgrade / data migration
+- [ ] Verify behavior on a server upgraded from a prior version (not just a fresh install)
+- [ ] Verify existing data is migrated/handled correctly
+
+#### Feature in isolation (MDM / platform independence)
+- [ ] Verify the feature works on a fully configured server (all MDM platforms enabled)
+- [ ] Verify the feature works in isolation — e.g. Apple MDM **off**, Windows-only, Linux-only, or Android-only deployments as applicable
+
 -->
+
+#### Supplemental testing
+
+<!-- Mid-cycle testing checks. Added by QA after the issue was moved to Awaiting QA -->
 
 ### Testing notes
 <!-- Any additional testing notes relevant to this story or tools required for testing. -->
@@ -79,5 +121,9 @@ It is [planned and ready](https://fleetdm.com/handbook/company/development-group
 ### Confirmation
 <!-- The engineer responsible for implementing this user story completes the test plan before moving to the "Awaiting QA" column. -->
 
-1. [ ] Engineer: Added comment to user story confirming successful completion of test plan.
+1. [ ] Engineer: Added comment to user story confirming successful completion of test plan (include any special setup, test data, or configuration used during development/testing if applicable).
 2. [ ] QA: Added comment to user story confirming successful completion of test plan.
+3. [ ] QA: Determined whether this story needs Playwright automation.
+   - Needs automation: Yes / No
+   - If yes, filed a follow-up issue in the :help-qa project with status "Needs automation": <!-- link -->
+

@@ -1,15 +1,13 @@
-import React, { useContext, useState } from "react";
+import React, { useState } from "react";
 import { Tab, Tabs, TabList, TabPanel } from "react-tabs";
 import FileSaver from "file-saver";
 
-import { NotificationContext } from "context/notification";
+import { notify } from "components/ToastNotification";
 import { IConfig } from "interfaces/config";
 import { LEARN_MORE_ABOUT_BASE_LINK } from "utilities/constants";
 
 import Button from "components/buttons/Button";
-import Icon from "components/Icon/Icon";
 import RevealButton from "components/buttons/RevealButton";
-// @ts-ignore
 import InputField from "components/forms/fields/InputField";
 import TooltipWrapper from "components/TooltipWrapper";
 import TabNav from "components/TabNav";
@@ -21,6 +19,7 @@ import TabText from "components/TabText";
 import { isValidPemCertificate } from "../../../pages/hosts/ManageHostsPage/helpers";
 import IosIpadosPanel from "./IosIpadosPanel";
 import AndroidPanel from "./AndroidPanel";
+import MacosPanel from "./MacosPanel";
 
 interface IPlatformSubNav {
   name: string;
@@ -77,8 +76,6 @@ const PlatformWrapper = ({
   fetchCertificateError,
   config,
 }: IPlatformWrapperProps): JSX.Element => {
-  const { renderFlash } = useContext(NotificationContext);
-
   const [hostType, setHostType] = useState<"workstation" | "server">(
     "workstation"
   );
@@ -160,8 +157,7 @@ const PlatformWrapper = ({
 
       FileSaver.saveAs(file);
     } else {
-      renderFlash(
-        "error",
+      notify.error(
         "Your certificate could not be downloaded. Please check your Fleet configuration."
       );
     }
@@ -201,12 +197,13 @@ const PlatformWrapper = ({
                 </>
               )}
               <Button
-                variant="inverse"
+                variant="secondary"
                 className={`${baseClass}__fleet-certificate-download`}
                 onClick={onDownloadCertificate}
+                icon="download"
+                iconPosition="right"
               >
                 Download
-                <Icon name="download" size="small" />
               </Button>
             </p>
           ) : (
@@ -240,11 +237,11 @@ const PlatformWrapper = ({
       <>
         {packageType !== "plain-osquery" && (
           <span className={`${baseClass}__cta`}>
-            Generate your installer with the{" "}
+            Use this command to generate Fleet&apos;s agent.{" "}
             <CustomLink
               className={`${baseClass}__command-line-tool`}
-              url={`${LEARN_MORE_ABOUT_BASE_LINK}/installing-fleetctl`}
-              text="Fleet command-line tool"
+              url={`${LEARN_MORE_ABOUT_BASE_LINK}/generate-fleets-agent`}
+              text="Learn how"
               newTab
             />
           </span>
@@ -271,23 +268,20 @@ const PlatformWrapper = ({
     if (packageType === "deb") {
       packageTypeHelpText = (
         <>
-          Run this on your admin computer, then deploy the generated package to
-          your hosts. For CentOS, Red Hat, and Fedora Linux, use{" "}
+          Run this on your computer, then deploy the generated package to your
+          hosts. For CentOS, Red Hat, and Fedora Linux, use{" "}
           <code>--type=rpm</code>. For Arch Linux, use{" "}
-          <code>--type=pkg.tar.zst</code>.<br />
-          For ARM, use <code>--arch=arm64</code>
+          <code>--type=pkg.tar.zst</code>. For ARM, use{" "}
+          <code>--arch=arm64</code>.
         </>
       );
     } else if (packageType === "msi") {
       packageTypeHelpText = (
         <>
-          Run this on your admin computer, then deploy the generated package to
-          your hosts. For ARM, use <code>--arch=arm64</code>
+          Run this on your computer, then deploy the generated package to your
+          hosts. For ARM, use <code>--arch=arm64</code>
         </>
       );
-    } else if (packageType === "pkg") {
-      packageTypeHelpText =
-        "Run this on your admin computer, then install the generated package on your hosts.";
     } else {
       packageTypeHelpText = "";
     }
@@ -351,6 +345,10 @@ const PlatformWrapper = ({
       return <AndroidPanel enrollSecret={enrollSecret} />;
     }
 
+    if (packageType === "pkg") {
+      return <MacosPanel enrollSecret={enrollSecret} />;
+    }
+
     if (packageType === "advanced") {
       return (
         <>
@@ -370,12 +368,9 @@ const PlatformWrapper = ({
           <div>
             <InfoBanner className={`${baseClass}__chrome--instructions`}>
               This works for macOS, Windows, and Linux hosts. To add
-              Chromebooks,&nbsp;
-              <Button
-                variant="text-link-dark"
-                onClick={() => setSelectedTabIndex(3)}
-              >
-                click here
+              Chromebooks,{" "}
+              <Button variant="link" onClick={() => setSelectedTabIndex(3)}>
+                visit the ChromeOS tab
               </Button>
               .
             </InfoBanner>
@@ -398,13 +393,13 @@ const PlatformWrapper = ({
                   Osquery uses an enroll secret to authenticate with the Fleet
                   server.
                   <br />
-                  <Button variant="inverse" onClick={onDownloadEnrollSecret}>
+                  <Button
+                    variant="secondary"
+                    onClick={onDownloadEnrollSecret}
+                    icon="download"
+                    iconPosition="right"
+                  >
                     Download
-                    <Icon
-                      name="download"
-                      color="ui-fleet-black-75"
-                      size="small"
-                    />
                   </Button>
                 </p>
               </div>
@@ -423,9 +418,13 @@ const PlatformWrapper = ({
                       {fetchCertificateError}
                     </span>
                   ) : (
-                    <Button variant="inverse" onClick={onDownloadFlagfile}>
+                    <Button
+                      variant="secondary"
+                      onClick={onDownloadFlagfile}
+                      icon="download"
+                      iconPosition="right"
+                    >
                       Download
-                      <Icon name="download" size="small" />
                     </Button>
                   )}
                 </p>
@@ -533,7 +532,7 @@ const PlatformWrapper = ({
         </Tabs>
       </TabNav>
       <div className="modal-cta-wrap">
-        <Button onClick={onCancel}>Done</Button>
+        <Button onClick={onCancel}>Close</Button>
       </div>
     </div>
   );

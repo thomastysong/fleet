@@ -51,6 +51,7 @@ export const createMockMdmProfile = (
 const DEFAULT_HOST_MDM_DATA: IHostMdmData = {
   encryption_key_available: false,
   enrollment_status: "On (automatic)",
+  is_personal_enrollment: false,
   server_url: "http://mdmsolution.com",
   name: "MDM Solution",
   id: 1,
@@ -62,11 +63,11 @@ const DEFAULT_HOST_MDM_DATA: IHostMdmData = {
     },
     certificates: [],
   },
-  macos_settings: {
+  apple_settings: {
     disk_encryption: null,
     action_required: null,
   },
-  macos_setup: {
+  setup_experience: {
     bootstrap_package_status: "",
     details: "",
     bootstrap_package_name: "",

@@ -39,11 +39,12 @@ describe("SoftwareDetailsModal", () => {
     expect(screen.getByText("Hash:")).toBeVisible();
     expect(screen.getByText("mockhashhere")).toBeVisible();
 
-    // Vulnerabilities
-    expect(screen.getByText(/CVE-2020-0001/)).toBeVisible();
+    // Vulnerabilities — TruncatedTextList renders items in both a hidden
+    // measure layer and the visible row, so match all occurrences.
+    expect(screen.getAllByText(/CVE-2020-0001/).length).toBeGreaterThan(0);
 
-    // Done button
-    expect(screen.getByRole("button", { name: "Done" })).toBeVisible();
+    // Close button
+    expect(screen.getByRole("button", { name: "Close" })).toBeVisible();
   });
 
   it("does not render hash if signature_information is missing", () => {

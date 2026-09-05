@@ -29,7 +29,7 @@ const AuthenticationNav = ({
     return () => {
       document.removeEventListener("keydown", closeWithEscapeKey);
     };
-  }, []);
+  }, [router]);
 
   const onClick = (): void => {
     if (previousLocation) {
@@ -42,7 +42,7 @@ const AuthenticationNav = ({
       <Button
         onClick={onClick}
         className={`${baseClass}__back-link`}
-        variant="inverse"
+        variant="subdued"
       >
         <Icon name="close" color="core-fleet-black" />
       </Button>

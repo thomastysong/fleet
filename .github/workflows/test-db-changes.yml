@@ -15,7 +15,7 @@ on:
 
 # This allows a subsequently queued workflow run to interrupt previous runs
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id}}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 defaults:
@@ -28,17 +28,18 @@ permissions:
 
 jobs:
   test-db-changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-4core
     steps:
     - name: Harden Runner
-      uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+      uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
       with:
         egress-policy: audit
 
     - name: Checkout Code
-      uses: actions/checkout@629c2de402a417ea7690ca6ce3f33229e27606a5 # v2
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         fetch-depth: 0
+        persist-credentials: false
 
     # TODO: This doesn't cover all scenarios since other PRs might
     # be merged into `main` after this check has passed.
@@ -49,6 +50,7 @@ jobs:
     # TODO: This only checks for added files, we should also check for renames,
     # which should be more of an edge case, but they might still happen
     - name: Check migration order
+      id: migration-order
       run: |
         # if the workflow is run during a push event (on merges to main and
         # tags,) use the latest created tag as a reference
@@ -71,8 +73,17 @@ jobs:
           index=$((index+1))
         done
 
+        # The retry check below only wants migrations that are not on main yet.
+        to_check=""
+        for migration in "${new_migrations[@]:-}"; do
+          if [ -n "$migration" ] && ! git cat-file -e "origin/main:$migration" 2>/dev/null; then
+            to_check="$to_check $migration"
+          fi
+        done
+        echo "new_migrations=$(echo $to_check)" >> "$GITHUB_OUTPUT"
+
     - name: Install Go
-      uses: actions/setup-go@93397bea11091df50f3d7e59dc26a7711a8bcfbe # v4.1.0
+      uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
       with:
         go-version-file: 'go.mod'
 
@@ -109,4 +120,20 @@ jobs:
         	echo "❌ fail: hosts foreign keys are not allowed"
         	echo "Ref: https://github.com/fleetdm/fleet/blob/main/handbook/engineering/scaling-fleet.md#foreign-keys-and-locking"
         	exit 1
+        fi
+
+    - name: Check migrations can be retried
+      if: github.event_name == 'pull_request'
+      env:
+        NEW_MIGRATIONS: ${{ steps.migration-order.outputs.new_migrations }}
+      run: |
+        if [ -z "$NEW_MIGRATIONS" ]; then
+          echo "no new migrations"
+          exit 0
+        fi
+
+        echo "checking: $NEW_MIGRATIONS"
+        if ! go run ./tools/migration-retry-check -migrations="$NEW_MIGRATIONS"; then
+          echo "::error::A migration cannot be retried after a partial failure. See the log for which one and how to fix it."
+          exit 1
         fi

@@ -1,5 +1,5 @@
 {
-  "name": "Firefox",
+  "name": "Mozilla Firefox",
   "slug": "firefox/windows",
   "package_identifier": "Mozilla.Firefox",
   "unique_identifier": "Mozilla Firefox (x64 en-US)",
@@ -8,5 +8,6 @@
   "installer_arch": "x64",
   "installer_type": "exe",
   "installer_scope": "machine",
-  "default_categories": ["Browsers"]
+  "default_categories": ["Browsers"],
+  "frozen": true
 }

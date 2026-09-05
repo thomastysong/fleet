@@ -1,5 +1,5 @@
-import React, { useContext, useState } from "react";
-import { NotificationContext } from "context/notification";
+import React, { useState } from "react";
+import { notify } from "components/ToastNotification";
 import scriptAPI from "services/entities/scripts";
 
 import Button from "components/buttons/Button";
@@ -20,7 +20,6 @@ const ScriptUploadModal = ({
   onExit,
   currentTeamId,
 }: IScriptUploadModal) => {
-  const { renderFlash } = useContext(NotificationContext);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [showLoading, setShowLoading] = useState(false);
 
@@ -31,19 +30,27 @@ const ScriptUploadModal = ({
     setShowLoading(true);
     try {
       await scriptAPI.uploadScript(selectedFile, currentTeamId);
-      renderFlash("success", "Successfully uploaded.");
+      notify.success("Successfully uploaded.");
       onSubmit();
     } catch (e) {
-      renderFlash("error", getErrorMessage(e));
+      notify.error(getErrorMessage(e), { response: e });
     } finally {
       setShowLoading(false);
     }
   };
 
-  const additionalInfo =
-    selectedFile && selectedFile.name.match(/\.sh$/)
-      ? 'On macOS and Linux, script will run according to the interpreter specified in the first line: "#!/bin/sh", "#!/bin/zsh", or "#!/bin/bash"'
-      : undefined;
+  const additionalInfo = (() => {
+    if (!selectedFile) {
+      return undefined;
+    }
+    if (selectedFile.name.match(/\.sh$/)) {
+      return 'On macOS and Linux, script will run according to the interpreter specified in the first line: "#!/bin/sh", "#!/bin/zsh", or "#!/bin/bash"';
+    }
+    if (selectedFile.name.match(/\.py$/)) {
+      return 'On macOS and Linux, Python scripts must start with a python shebang in the first line (for example, "#!/usr/bin/env python3" or "#!/usr/bin/python3").';
+    }
+    return undefined;
+  })();
 
   return (
     <Modal

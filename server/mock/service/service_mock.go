@@ -12,7 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fleetdm/fleet/v4/pkg/optjson"
 	"github.com/fleetdm/fleet/v4/server/fleet"
+	"github.com/fleetdm/fleet/v4/server/mdm/nanodep/godep"
 	"github.com/fleetdm/fleet/v4/server/version"
 	"github.com/fleetdm/fleet/v4/server/websocket"
 )
@@ -25,6 +27,8 @@ type AuthenticateHostFunc func(ctx context.Context, nodeKey string) (host *fleet
 
 type GetClientConfigFunc func(ctx context.Context) (config map[string]interface{}, err error)
 
+type GetClientConfigWithETagFunc func(ctx context.Context, clientETag *string) (*fleet.ClientConfigResult, error)
+
 type GetDistributedQueriesFunc func(ctx context.Context) (queries map[string]string, discovery map[string]string, accelerate uint, err error)
 
 type SubmitDistributedQueryResultsFunc func(ctx context.Context, results fleet.OsqueryDistributedQueryResults, statuses map[string]fleet.OsqueryStatus, messages map[string]string, stats map[string]*fleet.Stats) (err error)
@@ -35,6 +39,8 @@ type SubmitResultLogsFunc func(ctx context.Context, logs []json.RawMessage) (err
 
 type YaraRuleByNameFunc func(ctx context.Context, name string) (*fleet.YaraRule, error)
 
+type ListHostIDsDueForDistributedReadFunc func(ctx context.Context, hostIDs []uint) (map[uint]string, error)
+
 type ListUsersFunc func(ctx context.Context, opt fleet.UserListOptions) (users []*fleet.User, err error)
 
 type UsersByIDsFunc func(ctx context.Context, ids []uint) ([]*fleet.UserSummary, error)
@@ -43,13 +49,15 @@ type GetHostLiteFunc func(ctx context.Context, id uint) (host *fleet.Host, err e
 
 type GetActivitiesWebhookSettingsFunc func(ctx context.Context) (fleet.ActivitiesWebhookSettings, error)
 
+type GetHostActivitiesWebhookSettingsFunc func(ctx context.Context, hostIDs []uint) ([]fleet.HostActivitiesWebhookDelivery, error)
+
 type ActivateNextUpcomingActivityForHostFunc func(ctx context.Context, hostID uint, fromCompletedExecID string) error
 
 type GetTransparencyURLFunc func(ctx context.Context) (string, error)
 
 type AuthenticateOrbitHostFunc func(ctx context.Context, nodeKey string) (host *fleet.Host, debug bool, err error)
 
-type EnrollOrbitFunc func(ctx context.Context, hostInfo fleet.OrbitHostInfo, enrollSecret string) (orbitNodeKey string, err error)
+type EnrollOrbitFunc func(ctx context.Context, hostInfo fleet.OrbitHostInfo, enrollSecret string, euaToken string) (orbitNodeKey string, err error)
 
 type GetOrbitConfigFunc func(ctx context.Context) (fleet.OrbitConfig, error)
 
@@ -58,6 +66,10 @@ type LogFleetdErrorFunc func(ctx context.Context, errData fleet.FleetdError) err
 type SetOrUpdateDeviceAuthTokenFunc func(ctx context.Context, authToken string) error
 
 type GetFleetDesktopSummaryFunc func(ctx context.Context) (fleet.DesktopSummary, error)
+
+type InitiateDeviceSSOFunc func(ctx context.Context, deviceURL string) (*fleet.DeviceSSOInitiation, error)
+
+type RequireDeviceSSOSessionFunc func(ctx context.Context, host *fleet.Host, sessionID string) error
 
 type SetEnterpriseOverridesFunc func(overrides fleet.EnterpriseOverrides)
 
@@ -87,6 +99,8 @@ type ResetPasswordFunc func(ctx context.Context, token string, password string) 
 
 type ModifyUserFunc func(ctx context.Context, userID uint, p fleet.UserPayload) (user *fleet.User, err error)
 
+type ModifyAPIOnlyUserFunc func(ctx context.Context, userID uint, p fleet.UserPayload) (user *fleet.User, err error)
+
 type DeleteUserFunc func(ctx context.Context, id uint) (*fleet.User, error)
 
 type ChangeUserEmailFunc func(ctx context.Context, token string) (string, error)
@@ -99,9 +113,9 @@ type InitiateMDMSSOFunc func(ctx context.Context, initiator string, customOrigin
 
 type InitSSOCallbackFunc func(ctx context.Context, sessionID string, samlResponse []byte) (auth fleet.Auth, redirectURL string, err error)
 
-type MDMSSOCallbackFunc func(ctx context.Context, sessionID string, samlResponse []byte) (redirectURL string, byodCookieValue string)
+type MDMSSOCallbackFunc func(ctx context.Context, sessionID string, samlResponse []byte) (redirectURL string, byodCookieValue string, deviceSSOSessionID string, deviceSSOSessionDurationSeconds int)
 
-type GetMDMAccountDrivenEnrollmentSSOURLFunc func(ctx context.Context) (string, error)
+type GetMDMAccountDrivenEnrollmentSSOURLFunc func(ctx context.Context, enrollmentToken string) (string, error)
 
 type GetSSOUserFunc func(ctx context.Context, auth fleet.Auth) (*fleet.User, error)
 
@@ -191,6 +205,8 @@ type GetHostQueryReportResultsFunc func(ctx context.Context, hid uint, queryID u
 
 type QueryReportIsClippedFunc func(ctx context.Context, queryID uint, maxQueryReportRows int) (bool, error)
 
+type ListHostReportsFunc func(ctx context.Context, hostID uint, opts fleet.ListHostReportsOptions) (rows []*fleet.HostReport, total int, metadata *fleet.PaginationMetadata, err error)
+
 type NewQueryFunc func(ctx context.Context, p fleet.QueryPayload) (*fleet.Query, error)
 
 type ModifyQueryFunc func(ctx context.Context, id uint, p fleet.QueryPayload) (*fleet.Query, error)
@@ -237,7 +253,7 @@ type HostByIdentifierFunc func(ctx context.Context, identifier string, opts flee
 
 type RefetchHostFunc func(ctx context.Context, id uint) (err error)
 
-type CleanupExpiredHostsFunc func(ctx context.Context) ([]fleet.DeletedHostDetails, error)
+type CleanupExpiredHostsBatchFunc func(ctx context.Context, batchSize int) ([]fleet.DeletedHostDetails, error)
 
 type AddHostsToTeamFunc func(ctx context.Context, teamID *uint, hostIDs []uint, skipBulkPending bool) error
 
@@ -259,7 +275,7 @@ type HostLiteByIdentifierFunc func(ctx context.Context, identifier string) (*fle
 
 type HostLiteByIDFunc func(ctx context.Context, id uint) (*fleet.HostLite, error)
 
-type ListDevicePoliciesFunc func(ctx context.Context, host *fleet.Host) ([]*fleet.HostPolicy, error)
+type ListDevicePoliciesFunc func(ctx context.Context, host *fleet.Host) ([]*fleet.DevicePolicy, error)
 
 type BypassConditionalAccessFunc func(ctx context.Context, host *fleet.Host) error
 
@@ -281,7 +297,9 @@ type GetMunkiIssueFunc func(ctx context.Context, munkiIssueID uint) (*fleet.Munk
 
 type HostEncryptionKeyFunc func(ctx context.Context, id uint) (*fleet.HostDiskEncryptionKey, error)
 
-type EscrowLUKSDataFunc func(ctx context.Context, passphrase string, salt string, keySlot *uint, clientError string) error
+type EscrowLUKSDataFunc func(ctx context.Context, passphrase string, salt string, keySlot *uint, clientError string, keyType string) error
+
+type EscrowWindowsManagedLocalAccountPasswordFunc func(ctx context.Context, password string, clientError string) error
 
 type AddLabelsToHostFunc func(ctx context.Context, id uint, labels []string) error
 
@@ -297,6 +315,10 @@ type UpdateSoftwareNameFunc func(ctx context.Context, titleID uint, name string)
 
 type ListHostCertificatesFunc func(ctx context.Context, hostID uint, opts fleet.ListOptions) ([]*fleet.HostCertificatePayload, *fleet.PaginationMetadata, error)
 
+type GetHostRecoveryLockPasswordFunc func(ctx context.Context, hostID uint) (*fleet.HostRecoveryLockPassword, error)
+
+type HostDeviceURLFunc func(ctx context.Context, hostID uint) (string, error)
+
 type NewAppConfigFunc func(ctx context.Context, p fleet.AppConfig) (info *fleet.AppConfig, err error)
 
 type AppConfigObfuscatedFunc func(ctx context.Context) (info *fleet.AppConfig, err error)
@@ -304,6 +326,10 @@ type AppConfigObfuscatedFunc func(ctx context.Context) (info *fleet.AppConfig, e
 type ModifyAppConfigFunc func(ctx context.Context, p []byte, applyOpts fleet.ApplySpecOptions) (info *fleet.AppConfig, err error)
 
 type SandboxEnabledFunc func() bool
+
+type MaxInstallerSizeBytesFunc func() int64
+
+type AppConfigUrlsFunc func(ctx context.Context) (urls *fleet.AppConfigUrls, err error)
 
 type ApplyEnrollSecretSpecFunc func(ctx context.Context, spec *fleet.EnrollSecretSpec, applyOpts fleet.ApplySpecOptions) error
 
@@ -393,6 +419,14 @@ type ApplyTeamSpecsFunc func(ctx context.Context, specs []*fleet.TeamSpec, apply
 
 type SetActivityServiceFunc func(activitySvc fleet.ActivityWriteService)
 
+type SetConfigETagStoreFunc func(store fleet.ConfigETagStore)
+
+type SetACMEServiceFunc func(acmeSvc fleet.ACMEWriteService)
+
+type SetAgentCheckInNotifierFunc func(notifier fleet.AgentCheckInNotifier)
+
+type NewACMEEnrollmentFunc func(ctx context.Context, hostIdentifier string) (string, error)
+
 type NewActivityFunc func(ctx context.Context, user *fleet.User, activity fleet.ActivityDetails) error
 
 type ListHostUpcomingActivitiesFunc func(ctx context.Context, hostID uint, opt fleet.ListOptions) ([]*fleet.UpcomingActivity, *fleet.PaginationMetadata, error)
@@ -401,7 +435,7 @@ type CancelHostUpcomingActivityFunc func(ctx context.Context, hostID uint, execu
 
 type ApplyUserRolesSpecsFunc func(ctx context.Context, specs fleet.UsersRoleSpec) error
 
-type CreateCertificateTemplateFunc func(ctx context.Context, name string, teamID uint, certificateAuthorityID uint, subjectName string) (*fleet.CertificateTemplateResponse, error)
+type CreateCertificateTemplateFunc func(ctx context.Context, name string, teamID uint, certificateAuthorityID uint, subjectName string, subjectAlternativeName string) (*fleet.CertificateTemplateResponse, error)
 
 type ListCertificateTemplatesFunc func(ctx context.Context, teamID uint, opts fleet.ListOptions) ([]*fleet.CertificateTemplateResponseSummary, *fleet.PaginationMetadata, error)
 
@@ -416,6 +450,8 @@ type ApplyCertificateTemplateSpecsFunc func(ctx context.Context, specs []*fleet.
 type DeleteCertificateTemplateSpecsFunc func(ctx context.Context, certificateTemplateIDs []uint, teamID uint) error
 
 type UpdateCertificateStatusFunc func(ctx context.Context, update *fleet.CertificateStatusUpdate) error
+
+type ResendHostCertificateTemplateFunc func(ctx context.Context, hostID uint, templateID uint) error
 
 type GlobalScheduleQueryFunc func(ctx context.Context, sq *fleet.ScheduledQuery) (*fleet.ScheduledQuery, error)
 
@@ -437,23 +473,29 @@ type DeleteTeamScheduledQueriesFunc func(ctx context.Context, teamID uint, id ui
 
 type NewGlobalPolicyFunc func(ctx context.Context, p fleet.PolicyPayload) (*fleet.Policy, error)
 
-type ListGlobalPoliciesFunc func(ctx context.Context, opts fleet.ListOptions) ([]*fleet.Policy, error)
+type ListGlobalPoliciesFunc func(ctx context.Context, opts fleet.ListOptions, platform string) ([]*fleet.Policy, error)
 
 type DeleteGlobalPoliciesFunc func(ctx context.Context, ids []uint) ([]uint, error)
 
 type ModifyGlobalPolicyFunc func(ctx context.Context, id uint, p fleet.ModifyPolicyPayload) (*fleet.Policy, error)
 
-type GetPolicyByIDQueriesFunc func(ctx context.Context, policyID uint) (*fleet.Policy, error)
+type GetPolicyByIDFunc func(ctx context.Context, policyID uint) (*fleet.Policy, error)
+
+type ResetPolicyFunc func(ctx context.Context, policyID uint) error
+
+type ListPolicyAutomationActivitiesFunc func(ctx context.Context, policyID uint, opts fleet.ListOptions, status string) ([]*fleet.PolicyAutomationActivity, *fleet.PaginationMetadata, error)
 
 type ApplyPolicySpecsFunc func(ctx context.Context, policies []*fleet.PolicySpec) error
 
-type CountGlobalPoliciesFunc func(ctx context.Context, matchQuery string) (int, error)
+type CountGlobalPoliciesFunc func(ctx context.Context, matchQuery string, platform string) (int, error)
 
 type AutofillPolicySqlFunc func(ctx context.Context, sql string) (description string, resolution string, err error)
 
 type ListSoftwareFunc func(ctx context.Context, opt fleet.SoftwareListOptions) ([]fleet.Software, *fleet.PaginationMetadata, error)
 
 type SoftwareByIDFunc func(ctx context.Context, id uint, teamID *uint, includeCVEScores bool) (*fleet.Software, error)
+
+type SoftwareLiteByIDFunc func(ctx context.Context, id uint) (fleet.SoftwareLite, error)
 
 type CountSoftwareFunc func(ctx context.Context, opt fleet.SoftwareListOptions) (int, error)
 
@@ -463,7 +505,7 @@ type ListSoftwareTitlesFunc func(ctx context.Context, opt fleet.SoftwareTitleLis
 
 type SoftwareTitleByIDFunc func(ctx context.Context, id uint, teamID *uint) (*fleet.SoftwareTitle, error)
 
-type SoftwareTitleNameForHostFilterFunc func(ctx context.Context, id uint) (name string, displayName string, err error)
+type SoftwareTitleNameForHostFilterFunc func(ctx context.Context, id uint, teamID *uint) (name string, displayName string, err error)
 
 type InstallSoftwareTitleFunc func(ctx context.Context, hostID uint, softwareTitleID uint) error
 
@@ -473,29 +515,33 @@ type GetVPPTokenIfCanInstallVPPAppsFunc func(ctx context.Context, appleDevice bo
 
 type InstallVPPAppPostValidationFunc func(ctx context.Context, host *fleet.Host, vppApp *fleet.VPPApp, token string, opts fleet.HostSoftwareInstallOptions) (string, error)
 
+type InstallInHouseAppForSetupExperienceFunc func(ctx context.Context, host *fleet.Host, inHouseAppID uint, softwareTitleID uint) (string, error)
+
 type UninstallSoftwareTitleFunc func(ctx context.Context, hostID uint, softwareTitleID uint) error
 
 type GetSoftwareInstallResultsFunc func(ctx context.Context, installUUID string) (*fleet.HostSoftwareInstallerResult, error)
 
 type BatchSetSoftwareInstallersFunc func(ctx context.Context, tmName string, payloads []*fleet.SoftwareInstallerPayload, dryRun bool) (string, error)
 
-type GetBatchSetSoftwareInstallersResultFunc func(ctx context.Context, tmName string, requestUUID string, dryRun bool) (status string, message string, packages []fleet.SoftwarePackageResponse, err error)
+type GetBatchSetSoftwareInstallersResultFunc func(ctx context.Context, tmName string, requestUUID string, dryRun bool) (*fleet.BatchSetSoftwareInstallersResult, error)
 
 type SelfServiceInstallSoftwareTitleFunc func(ctx context.Context, host *fleet.Host, softwareTitleID uint) error
+
+type SelfServiceInstallAllSoftwareTitlesFunc func(ctx context.Context, host *fleet.Host, categoryID *uint, matchQuery string) error
 
 type HasSelfServiceSoftwareInstallersFunc func(ctx context.Context, host *fleet.Host) (bool, error)
 
 type GetAppStoreAppsFunc func(ctx context.Context, teamID *uint) ([]*fleet.VPPApp, error)
 
-type AddAppStoreAppFunc func(ctx context.Context, teamID *uint, appTeam fleet.VPPAppTeam) (uint, error)
+type AddAppStoreAppFunc func(ctx context.Context, teamID *uint, appTeam fleet.VPPAppTeam) (uint, string, error)
 
 type UpdateAppStoreAppFunc func(ctx context.Context, titleID uint, teamID *uint, payload fleet.AppStoreAppUpdatePayload) (*fleet.VPPAppStoreApp, *fleet.ActivityEditedAppStoreApp, error)
 
-type GetInHouseAppManifestFunc func(ctx context.Context, titleID uint, teamID *uint) ([]byte, error)
+type GetInHouseAppManifestFunc func(ctx context.Context, titleID uint, token string) ([]byte, error)
 
-type GetInHouseAppPackageFunc func(ctx context.Context, titleID uint, teamID *uint) (*fleet.DownloadSoftwareInstallerPayload, error)
+type GetInHouseAppPackageFunc func(ctx context.Context, titleID uint, token string) (*fleet.DownloadSoftwareInstallerPayload, error)
 
-type MDMAppleProcessOTAEnrollmentFunc func(ctx context.Context, certificates []*x509.Certificate, rootSigner *x509.Certificate, enrollSecret string, idpUUID string, deviceInfo fleet.MDMAppleMachineInfo) ([]byte, error)
+type MDMAppleProcessOTAEnrollmentFunc func(ctx context.Context, certificates []*x509.Certificate, rootSigner *x509.Certificate, enrollSecret string, idpUUID string, personal bool, deviceInfo fleet.MDMAppleMachineInfo) ([]byte, error)
 
 type ListVulnerabilitiesFunc func(ctx context.Context, opt fleet.VulnListOptions) ([]fleet.VulnerabilityWithMetadata, *fleet.PaginationMetadata, error)
 
@@ -509,15 +555,15 @@ type ListSoftwareByCVEFunc func(ctx context.Context, cve string, teamID *uint) (
 
 type NewTeamPolicyFunc func(ctx context.Context, teamID uint, p fleet.NewTeamPolicyPayload) (*fleet.Policy, error)
 
-type ListTeamPoliciesFunc func(ctx context.Context, teamID uint, opts fleet.ListOptions, iopts fleet.ListOptions, mergeInherited bool) (teamPolicies []*fleet.Policy, inheritedPolicies []*fleet.Policy, err error)
+type ListTeamPoliciesFunc func(ctx context.Context, teamID uint, opts fleet.ListOptions, iopts fleet.ListOptions, mergeInherited bool, automationType fleet.PolicyAutomationType, platform string) (teamPolicies []*fleet.Policy, inheritedPolicies []*fleet.Policy, err error)
 
 type DeleteTeamPoliciesFunc func(ctx context.Context, teamID uint, ids []uint) ([]uint, error)
 
 type ModifyTeamPolicyFunc func(ctx context.Context, teamID uint, id uint, p fleet.ModifyPolicyPayload) (*fleet.Policy, error)
 
-type GetTeamPolicyByIDQueriesFunc func(ctx context.Context, teamID uint, policyID uint) (*fleet.Policy, error)
+type GetTeamPolicyByIDFunc func(ctx context.Context, teamID uint, policyID uint) (*fleet.Policy, error)
 
-type CountTeamPoliciesFunc func(ctx context.Context, teamID uint, matchQuery string, mergeInherited bool) (int, int, error)
+type CountTeamPoliciesFunc func(ctx context.Context, teamID uint, matchQuery string, mergeInherited bool, automationType fleet.PolicyAutomationType, platform string) (int, int, error)
 
 type LookupGeoIPFunc func(ctx context.Context, ip string) *fleet.GeoLocation
 
@@ -549,13 +595,15 @@ type DeleteVPPTokenFunc func(ctx context.Context, tokenID uint) error
 
 type CreateAndroidWebAppFunc func(ctx context.Context, title string, startURL string, icon io.Reader) (string, error)
 
-type BatchAssociateVPPAppsFunc func(ctx context.Context, teamName string, payloads []fleet.VPPBatchPayload, dryRun bool) ([]fleet.VPPAppResponse, error)
+type BatchAssociateVPPAppsFunc func(ctx context.Context, teamName string, payloads []fleet.VPPBatchPayload, dryRun bool) ([]fleet.VPPAppResponse, []string, error)
 
 type GetHostDEPAssignmentFunc func(ctx context.Context, host *fleet.Host) (*fleet.HostDEPAssignment, error)
 
-type NewMDMAppleConfigProfileFunc func(ctx context.Context, teamID uint, data []byte, labels []string, labelsMembershipMode fleet.MDMLabelsMode) (*fleet.MDMAppleConfigProfile, error)
+type GetHostDEPAssignmentDetailsFunc func(ctx context.Context, hostID uint) (*fleet.HostDEPAssignment, *godep.DeviceDetails, fleet.DEPDeviceErrorType, error)
 
-type NewMDMAppleDeclarationFunc func(ctx context.Context, teamID uint, data []byte, labels []string, name string, labelsMembershipMode fleet.MDMLabelsMode) (*fleet.MDMAppleDeclaration, error)
+type NewMDMAppleConfigProfileFunc func(ctx context.Context, teamID uint, data []byte, labelsInclude []string, labelsMembershipMode fleet.MDMLabelsMode, labelsExcludeAny []string) (*fleet.MDMAppleConfigProfile, error)
+
+type NewMDMAppleDeclarationFunc func(ctx context.Context, teamID uint, data []byte, labelsInclude []string, name string, labelsMembershipMode fleet.MDMLabelsMode, labelsExcludeAny []string, activation []byte) (*fleet.MDMAppleDeclaration, error)
 
 type GetMDMAppleConfigProfileByDeprecatedIDFunc func(ctx context.Context, profileID uint) (*fleet.MDMAppleConfigProfile, error)
 
@@ -575,7 +623,7 @@ type GetMDMAppleFileVaultSummaryFunc func(ctx context.Context, teamID *uint) (*f
 
 type GetMDMAppleProfilesSummaryFunc func(ctx context.Context, teamID *uint) (*fleet.MDMProfilesSummary, error)
 
-type GetMDMAppleEnrollmentProfileByTokenFunc func(ctx context.Context, enrollmentToken string, enrollmentRef string) (profile []byte, err error)
+type GetMDMAppleEnrollmentProfileByTokenFunc func(ctx context.Context, enrollmentToken string, enrollmentRef string, machineInfo *fleet.MDMAppleMachineInfo) (profile []byte, err error)
 
 type GetMDMAppleAccountEnrollmentProfileFunc func(ctx context.Context, enrollReference string) (profile []byte, err error)
 
@@ -613,7 +661,7 @@ type ListABMTokensFunc func(ctx context.Context) ([]*fleet.ABMToken, error)
 
 type CountABMTokensFunc func(ctx context.Context) (int, error)
 
-type UpdateABMTokenTeamsFunc func(ctx context.Context, tokenID uint, macOSTeamID *uint, iOSTeamID *uint, iPadOSTeamID *uint) (*fleet.ABMToken, error)
+type UpdateABMTokenTeamsFunc func(ctx context.Context, tokenID uint, macOSTeamID *uint, iOSTeamID *uint, iPadOSTeamID *uint, byodTeamID *uint) (*fleet.ABMToken, error)
 
 type DeleteABMTokenFunc func(ctx context.Context, tokenID uint) error
 
@@ -633,11 +681,11 @@ type MDMAppleEraseDeviceFunc func(ctx context.Context, hostID uint) error
 
 type MDMListHostConfigurationProfilesFunc func(ctx context.Context, hostID uint) ([]*fleet.MDMAppleConfigProfile, error)
 
-type MDMAppleEnableFileVaultAndEscrowFunc func(ctx context.Context, teamID *uint) error
+type MDMAppleReconcileFileVaultProfileFunc func(ctx context.Context, teamID *uint) error
 
-type MDMAppleDisableFileVaultAndEscrowFunc func(ctx context.Context, teamID *uint) error
+type UpdateMDMDiskEncryptionFunc func(ctx context.Context, teamID *uint, payload fleet.MDMDiskEncryptionSettingsPayload) error
 
-type UpdateMDMDiskEncryptionFunc func(ctx context.Context, teamID *uint, enableDiskEncryption *bool, requireBitLockerPIN *bool) error
+type UpdateMDMHostNameTemplateFunc func(ctx context.Context, fleetID *uint, nameTemplate string) error
 
 type VerifyMDMAppleConfiguredFunc func(ctx context.Context) error
 
@@ -669,6 +717,8 @@ type SetOrUpdateMDMAppleSetupAssistantFunc func(ctx context.Context, asst *fleet
 
 type GetMDMAppleSetupAssistantFunc func(ctx context.Context, teamID *uint) (*fleet.MDMAppleSetupAssistant, error)
 
+type GetDefaultMDMAppleSetupAssistantProfileFunc func(ctx context.Context) (profile godep.Profile, updatedAt *time.Time, err error)
+
 type DeleteMDMAppleSetupAssistantFunc func(ctx context.Context, teamID *uint) error
 
 type HasCustomSetupAssistantConfigurationWebURLFunc func(ctx context.Context, teamID *uint) (bool, error)
@@ -677,13 +727,13 @@ type UpdateMDMAppleSetupFunc func(ctx context.Context, payload fleet.MDMAppleSet
 
 type TriggerMigrateMDMDeviceFunc func(ctx context.Context, host *fleet.Host) error
 
-type GetMDMManualEnrollmentProfileFunc func(ctx context.Context) ([]byte, error)
+type GetMDMManualEnrollmentProfileFunc func(ctx context.Context, personal bool) ([]byte, error)
 
 type TriggerLinuxDiskEncryptionEscrowFunc func(ctx context.Context, host *fleet.Host) error
 
 type CheckMDMAppleEnrollmentWithMinimumOSVersionFunc func(ctx context.Context, m *fleet.MDMAppleMachineInfo) (*fleet.MDMAppleSoftwareUpdateRequired, error)
 
-type GetOTAProfileFunc func(ctx context.Context, enrollSecret string, idpUUID string) ([]byte, error)
+type GetOTAProfileFunc func(ctx context.Context, enrollSecret string, idpUUID string, personal bool) ([]byte, error)
 
 type TriggerCronScheduleFunc func(ctx context.Context, name string) error
 
@@ -692,8 +742,6 @@ type ResetAutomationFunc func(ctx context.Context, teamIDs []uint, policyIDs []u
 type ProcessMDMMicrosoftDiscoveryFunc func(ctx context.Context, req *fleet.SoapRequest) (*fleet.SoapResponse, error)
 
 type GetMDMMicrosoftDiscoveryResponseFunc func(ctx context.Context, upnEmail string) (*fleet.DiscoverResponse, error)
-
-type GetMDMMicrosoftSTSAuthResponseFunc func(ctx context.Context, appru string, loginHint string) (string, error)
 
 type GetMDMWindowsPolicyResponseFunc func(ctx context.Context, authToken *fleet.HeaderBinarySecurityToken) (*fleet.GetPoliciesResponse, error)
 
@@ -715,17 +763,23 @@ type ListMDMCommandsFunc func(ctx context.Context, opts *fleet.MDMCommandListOpt
 
 type SetOrUpdateDiskEncryptionKeyFunc func(ctx context.Context, encryptionKey string, clientError string) error
 
+type SetOrUpdateDiskEncryptionProtectionFunc func(ctx context.Context, outcome fleet.DiskEncryptionProtectionOutcome, clientError string) error
+
 type GetMDMWindowsConfigProfileFunc func(ctx context.Context, profileUUID string) (*fleet.MDMWindowsConfigProfile, error)
 
 type DeleteMDMWindowsConfigProfileFunc func(ctx context.Context, profileUUID string) error
 
 type GetMDMWindowsProfilesSummaryFunc func(ctx context.Context, teamID *uint) (*fleet.MDMProfilesSummary, error)
 
-type NewMDMWindowsConfigProfileFunc func(ctx context.Context, teamID uint, profileName string, data []byte, labels []string, labelsMembershipMode fleet.MDMLabelsMode) (*fleet.MDMWindowsConfigProfile, error)
+type NewMDMWindowsConfigProfileFunc func(ctx context.Context, teamID uint, profileName string, data []byte, labelsInclude []string, labelsMembershipMode fleet.MDMLabelsMode, labelsExcludeAny []string) (*fleet.MDMWindowsConfigProfile, error)
 
 type NewMDMUnsupportedConfigProfileFunc func(ctx context.Context, teamID uint, filename string) error
 
+type NewMDMActivationUnsupportedProfileFunc func(ctx context.Context, teamID uint) error
+
 type NewMDMInvalidJSONConfigProfileFunc func(ctx context.Context, teamID uint, err error) error
+
+type UpdateMDMConfigProfileFunc func(ctx context.Context, profileUUID string, profileName string, profile []byte, labelsInclude []string, labelsMembershipMode fleet.MDMLabelsMode, labelsExcludeAny []string, activation optjson.Slice[byte]) error
 
 type ListMDMConfigProfilesFunc func(ctx context.Context, teamID *uint, opt fleet.ListOptions) ([]*fleet.MDMConfigProfilePayload, *fleet.PaginationMetadata, error)
 
@@ -735,7 +789,7 @@ type LinuxHostDiskEncryptionStatusFunc func(ctx context.Context, host fleet.Host
 
 type GetMDMLinuxProfilesSummaryFunc func(ctx context.Context, teamId *uint) (fleet.MDMProfilesSummary, error)
 
-type NewMDMAndroidConfigProfileFunc func(ctx context.Context, teamID uint, profileName string, data []byte, labels []string, labelsMembershipMode fleet.MDMLabelsMode) (*fleet.MDMAndroidConfigProfile, error)
+type NewMDMAndroidConfigProfileFunc func(ctx context.Context, teamID uint, profileName string, data []byte, labelsInclude []string, labelsMembershipMode fleet.MDMLabelsMode, labelsExcludeAny []string) (*fleet.MDMAndroidConfigProfile, error)
 
 type DeleteMDMAndroidConfigProfileFunc func(ctx context.Context, profileUUID string) error
 
@@ -746,6 +800,8 @@ type GetMDMAndroidProfilesSummaryFunc func(ctx context.Context, teamID *uint) (*
 type GetMDMDiskEncryptionSummaryFunc func(ctx context.Context, teamID *uint) (*fleet.MDMDiskEncryptionSummary, error)
 
 type ResendHostMDMProfileFunc func(ctx context.Context, hostID uint, profileUUID string) error
+
+type ResendHostNameTemplateFunc func(ctx context.Context, hostID uint) error
 
 type ResendDeviceHostMDMProfileFunc func(ctx context.Context, host *fleet.Host, profileUUID string) error
 
@@ -797,19 +853,29 @@ type UnlockHostFunc func(ctx context.Context, hostID uint) (unlockPIN string, er
 
 type WipeHostFunc func(ctx context.Context, hostID uint, metadata *fleet.MDMWipeMetadata) error
 
+type ClearPasscodeFunc func(ctx context.Context, hostID uint) (*fleet.CommandEnqueueResult, error)
+
+type CancelHostMDMCommandFunc func(ctx context.Context, hostID uint, commandUUID string) error
+
+type RotateRecoveryLockPasswordFunc func(ctx context.Context, hostID uint) error
+
+type GetHostManagedAccountPasswordFunc func(ctx context.Context, hostID uint) (*fleet.HostManagedLocalAccountPassword, error)
+
+type RotateManagedLocalAccountPasswordFunc func(ctx context.Context, hostID uint) error
+
 type UploadSoftwareInstallerFunc func(ctx context.Context, payload *fleet.UploadSoftwareInstallerPayload) (*fleet.SoftwareInstaller, error)
 
 type UpdateSoftwareInstallerFunc func(ctx context.Context, payload *fleet.UpdateSoftwareInstallerPayload) (*fleet.SoftwareInstaller, error)
 
-type DeleteSoftwareInstallerFunc func(ctx context.Context, titleID uint, teamID *uint) error
+type DeleteSoftwareInstallerFunc func(ctx context.Context, titleID uint, teamID *uint, installerID *uint) error
 
-type GenerateSoftwareInstallerTokenFunc func(ctx context.Context, alt string, titleID uint, teamID *uint) (string, error)
+type GenerateSoftwareInstallerTokenFunc func(ctx context.Context, alt string, titleID uint, teamID *uint, installerID *uint) (string, error)
 
 type GetSoftwareInstallerTokenMetadataFunc func(ctx context.Context, token string, titleID uint) (*fleet.SoftwareInstallerTokenMetadata, error)
 
 type GetSoftwareInstallerMetadataFunc func(ctx context.Context, skipAuthz bool, titleID uint, teamID *uint) (*fleet.SoftwareInstaller, error)
 
-type DownloadSoftwareInstallerFunc func(ctx context.Context, skipAuthz bool, alt string, titleID uint, teamID *uint) (*fleet.DownloadSoftwareInstallerPayload, error)
+type DownloadSoftwareInstallerFunc func(ctx context.Context, skipAuthz bool, alt string, titleID uint, teamID *uint, installerID *uint) (*fleet.DownloadSoftwareInstallerPayload, error)
 
 type OrbitDownloadSoftwareInstallerFunc func(ctx context.Context, installerID uint) (*fleet.DownloadSoftwareInstallerPayload, error)
 
@@ -818,6 +884,22 @@ type GetSoftwareTitleIconFunc func(ctx context.Context, teamID uint, titleID uin
 type UploadSoftwareTitleIconFunc func(ctx context.Context, payload *fleet.UploadSoftwareTitleIconPayload) (fleet.SoftwareTitleIcon, error)
 
 type DeleteSoftwareTitleIconFunc func(ctx context.Context, teamID uint, titleID uint) error
+
+type ListSoftwareCategoriesFunc func(ctx context.Context, teamID *uint) ([]fleet.SoftwareCategory, error)
+
+type ListSelfServiceSoftwareCategoriesForHostFunc func(ctx context.Context, host *fleet.Host) ([]fleet.SoftwareCategory, error)
+
+type NewSoftwareCategoryFunc func(ctx context.Context, teamID *uint, name string) (*fleet.SoftwareCategory, error)
+
+type UpdateSoftwareCategoryFunc func(ctx context.Context, id uint, name string) (*fleet.SoftwareCategory, error)
+
+type DeleteSoftwareCategoryFunc func(ctx context.Context, id uint) error
+
+type UploadOrgLogoFunc func(ctx context.Context, mode fleet.OrgLogoMode, content io.ReadSeeker) error
+
+type DeleteOrgLogoFunc func(ctx context.Context, mode fleet.OrgLogoMode) error
+
+type GetOrgLogoFunc func(ctx context.Context, mode fleet.OrgLogoMode) ([]byte, int64, error)
 
 type SetSetupExperienceSoftwareFunc func(ctx context.Context, platform string, teamID uint, titleIDs []uint) error
 
@@ -841,9 +923,9 @@ type MaybeCancelPendingSetupExperienceStepsFunc func(ctx context.Context, host *
 
 type IsAllSetupExperienceSoftwareRequiredFunc func(ctx context.Context, host *fleet.Host) (bool, error)
 
-type AddFleetMaintainedAppFunc func(ctx context.Context, teamID *uint, appID uint, installScript string, preInstallQuery string, postInstallScript string, uninstallScript string, selfService bool, automaticInstall bool, labelsIncludeAny []string, labelsExcludeAny []string) (uint, error)
+type AddFleetMaintainedAppFunc func(ctx context.Context, teamID *uint, appID uint, installScript string, preInstallQuery string, postInstallScript string, uninstallScript string, selfService bool, automaticInstall bool, labelsIncludeAny []string, labelsExcludeAny []string, labelsIncludeAll []string) (uint, error)
 
-type ListFleetMaintainedAppsFunc func(ctx context.Context, teamID *uint, opts fleet.ListOptions) ([]fleet.MaintainedApp, *fleet.PaginationMetadata, error)
+type ListFleetMaintainedAppsFunc func(ctx context.Context, teamID *uint, opts fleet.MaintainedAppListOptions) ([]fleet.MaintainedApp, *fleet.PaginationMetadata, error)
 
 type GetFleetMaintainedAppFunc func(ctx context.Context, appID uint, teamID *uint) (*fleet.MaintainedApp, error)
 
@@ -856,6 +938,20 @@ type CreateSecretVariableFunc func(ctx context.Context, name string, value strin
 type ListSecretVariablesFunc func(ctx context.Context, opts fleet.ListOptions) (secretVariables []fleet.SecretVariableIdentifier, meta *fleet.PaginationMetadata, count int, err error)
 
 type DeleteSecretVariableFunc func(ctx context.Context, id uint) error
+
+type ListCustomHostVitalsFunc func(ctx context.Context, opts fleet.ListOptions) (customHostVitals []fleet.CustomHostVital, meta *fleet.PaginationMetadata, count int, err error)
+
+type CreateCustomHostVitalFunc func(ctx context.Context, name string) (*fleet.CustomHostVital, error)
+
+type UpdateCustomHostVitalFunc func(ctx context.Context, id uint, name string) (*fleet.CustomHostVital, error)
+
+type DeleteCustomHostVitalFunc func(ctx context.Context, id uint) error
+
+type SetHostCustomHostVitalValueFunc func(ctx context.Context, hostID uint, vitalID uint, value string) error
+
+type UpsertCustomHostVitalsFunc func(ctx context.Context, customHostVitals []fleet.CustomHostVital, dryRun bool) error
+
+type ListAPIEndpointsFunc func(ctx context.Context) (endpoints []fleet.APIEndpoint, err error)
 
 type ScimDetailsFunc func(ctx context.Context) (fleet.ScimDetails, error)
 
@@ -883,11 +979,43 @@ type UpdateCertificateAuthorityFunc func(ctx context.Context, id uint, p fleet.C
 
 type RequestCertificateFunc func(ctx context.Context, p fleet.RequestCertificatePayload) (*string, error)
 
-type BatchApplyCertificateAuthoritiesFunc func(ctx context.Context, groupedCAs fleet.GroupedCertificateAuthorities, dryRun bool, viaGitOps bool) error
+type BatchApplyCertificateAuthoritiesFunc func(ctx context.Context, groupedCAs fleet.GroupedCertificateAuthorities, opts fleet.BatchApplyCertificateAuthoritiesOpts) error
 
 type GetGroupedCertificateAuthoritiesFunc func(ctx context.Context, includeSecrets bool) (*fleet.GroupedCertificateAuthorities, error)
 
 type UnenrollMDMFunc func(ctx context.Context, hostID uint) error
+
+type PSSONonceFunc func(ctx context.Context) (string, error)
+
+type PSSORegisterDeviceFunc func(ctx context.Context, req fleet.PSSODeviceRegistrationRequest) error
+
+type PSSOTokenFunc func(ctx context.Context, jwtBytes []byte) ([]byte, error)
+
+type PSSOJWKSFunc func(ctx context.Context) ([]byte, error)
+
+type PSSOAASAFunc func(ctx context.Context) ([]byte, error)
+
+type ListAppleDDMAssetsFunc func(ctx context.Context, teamID *uint) ([]*fleet.DDMAsset, error)
+
+type GetAppleDDMAssetFunc func(ctx context.Context, assetUUID string) (*fleet.DDMAsset, error)
+
+type DownloadAppleDDMAssetFunc func(ctx context.Context, assetUUID string) (filename string, data []byte, err error)
+
+type CreateAppleDDMAssetFunc func(ctx context.Context, teamID *uint, name string, data []byte) (string, error)
+
+type DeleteAppleDDMAssetFunc func(ctx context.Context, assetUUID string) error
+
+type BatchSetAppleDDMAssetsFunc func(ctx context.Context, teamID *uint, teamName string, assets []fleet.MDMAppleDDMAssetBatchPayload, dryRun bool) error
+
+type ReleaseABDevicesFunc func(ctx context.Context, hostIDs []uint) ([]*fleet.ABReleaseDeviceResponse, error)
+
+type ListMicrosoftGraphCredentialsFunc func(ctx context.Context) ([]*fleet.MicrosoftGraphCredentialMetadata, error)
+
+type ApplyMicrosoftGraphCredentialsFunc func(ctx context.Context, creds []fleet.MicrosoftGraphCredential, dryRun bool) error
+
+type SendAPNSPingFunc func(ctx context.Context, hostID uint) error
+
+type DeviceSendAPNSPingFunc func(ctx context.Context, host *fleet.Host) error
 
 type Service struct {
 	EnrollOsqueryFunc        EnrollOsqueryFunc
@@ -898,6 +1026,9 @@ type Service struct {
 
 	GetClientConfigFunc        GetClientConfigFunc
 	GetClientConfigFuncInvoked bool
+
+	GetClientConfigWithETagFunc        GetClientConfigWithETagFunc
+	GetClientConfigWithETagFuncInvoked bool
 
 	GetDistributedQueriesFunc        GetDistributedQueriesFunc
 	GetDistributedQueriesFuncInvoked bool
@@ -914,6 +1045,9 @@ type Service struct {
 	YaraRuleByNameFunc        YaraRuleByNameFunc
 	YaraRuleByNameFuncInvoked bool
 
+	ListHostIDsDueForDistributedReadFunc        ListHostIDsDueForDistributedReadFunc
+	ListHostIDsDueForDistributedReadFuncInvoked bool
+
 	ListUsersFunc        ListUsersFunc
 	ListUsersFuncInvoked bool
 
@@ -925,6 +1059,9 @@ type Service struct {
 
 	GetActivitiesWebhookSettingsFunc        GetActivitiesWebhookSettingsFunc
 	GetActivitiesWebhookSettingsFuncInvoked bool
+
+	GetHostActivitiesWebhookSettingsFunc        GetHostActivitiesWebhookSettingsFunc
+	GetHostActivitiesWebhookSettingsFuncInvoked bool
 
 	ActivateNextUpcomingActivityForHostFunc        ActivateNextUpcomingActivityForHostFunc
 	ActivateNextUpcomingActivityForHostFuncInvoked bool
@@ -949,6 +1086,12 @@ type Service struct {
 
 	GetFleetDesktopSummaryFunc        GetFleetDesktopSummaryFunc
 	GetFleetDesktopSummaryFuncInvoked bool
+
+	InitiateDeviceSSOFunc        InitiateDeviceSSOFunc
+	InitiateDeviceSSOFuncInvoked bool
+
+	RequireDeviceSSOSessionFunc        RequireDeviceSSOSessionFunc
+	RequireDeviceSSOSessionFuncInvoked bool
 
 	SetEnterpriseOverridesFunc        SetEnterpriseOverridesFunc
 	SetEnterpriseOverridesFuncInvoked bool
@@ -991,6 +1134,9 @@ type Service struct {
 
 	ModifyUserFunc        ModifyUserFunc
 	ModifyUserFuncInvoked bool
+
+	ModifyAPIOnlyUserFunc        ModifyAPIOnlyUserFunc
+	ModifyAPIOnlyUserFuncInvoked bool
 
 	DeleteUserFunc        DeleteUserFunc
 	DeleteUserFuncInvoked bool
@@ -1148,6 +1294,9 @@ type Service struct {
 	QueryReportIsClippedFunc        QueryReportIsClippedFunc
 	QueryReportIsClippedFuncInvoked bool
 
+	ListHostReportsFunc        ListHostReportsFunc
+	ListHostReportsFuncInvoked bool
+
 	NewQueryFunc        NewQueryFunc
 	NewQueryFuncInvoked bool
 
@@ -1217,8 +1366,8 @@ type Service struct {
 	RefetchHostFunc        RefetchHostFunc
 	RefetchHostFuncInvoked bool
 
-	CleanupExpiredHostsFunc        CleanupExpiredHostsFunc
-	CleanupExpiredHostsFuncInvoked bool
+	CleanupExpiredHostsBatchFunc        CleanupExpiredHostsBatchFunc
+	CleanupExpiredHostsBatchFuncInvoked bool
 
 	AddHostsToTeamFunc        AddHostsToTeamFunc
 	AddHostsToTeamFuncInvoked bool
@@ -1286,6 +1435,9 @@ type Service struct {
 	EscrowLUKSDataFunc        EscrowLUKSDataFunc
 	EscrowLUKSDataFuncInvoked bool
 
+	EscrowWindowsManagedLocalAccountPasswordFunc        EscrowWindowsManagedLocalAccountPasswordFunc
+	EscrowWindowsManagedLocalAccountPasswordFuncInvoked bool
+
 	AddLabelsToHostFunc        AddLabelsToHostFunc
 	AddLabelsToHostFuncInvoked bool
 
@@ -1307,6 +1459,12 @@ type Service struct {
 	ListHostCertificatesFunc        ListHostCertificatesFunc
 	ListHostCertificatesFuncInvoked bool
 
+	GetHostRecoveryLockPasswordFunc        GetHostRecoveryLockPasswordFunc
+	GetHostRecoveryLockPasswordFuncInvoked bool
+
+	HostDeviceURLFunc        HostDeviceURLFunc
+	HostDeviceURLFuncInvoked bool
+
 	NewAppConfigFunc        NewAppConfigFunc
 	NewAppConfigFuncInvoked bool
 
@@ -1318,6 +1476,12 @@ type Service struct {
 
 	SandboxEnabledFunc        SandboxEnabledFunc
 	SandboxEnabledFuncInvoked bool
+
+	MaxInstallerSizeBytesFunc        MaxInstallerSizeBytesFunc
+	MaxInstallerSizeBytesFuncInvoked bool
+
+	AppConfigUrlsFunc        AppConfigUrlsFunc
+	AppConfigUrlsFuncInvoked bool
 
 	ApplyEnrollSecretSpecFunc        ApplyEnrollSecretSpecFunc
 	ApplyEnrollSecretSpecFuncInvoked bool
@@ -1451,6 +1615,18 @@ type Service struct {
 	SetActivityServiceFunc        SetActivityServiceFunc
 	SetActivityServiceFuncInvoked bool
 
+	SetConfigETagStoreFunc        SetConfigETagStoreFunc
+	SetConfigETagStoreFuncInvoked bool
+
+	SetACMEServiceFunc        SetACMEServiceFunc
+	SetACMEServiceFuncInvoked bool
+
+	SetAgentCheckInNotifierFunc        SetAgentCheckInNotifierFunc
+	SetAgentCheckInNotifierFuncInvoked bool
+
+	NewACMEEnrollmentFunc        NewACMEEnrollmentFunc
+	NewACMEEnrollmentFuncInvoked bool
+
 	NewActivityFunc        NewActivityFunc
 	NewActivityFuncInvoked bool
 
@@ -1486,6 +1662,9 @@ type Service struct {
 
 	UpdateCertificateStatusFunc        UpdateCertificateStatusFunc
 	UpdateCertificateStatusFuncInvoked bool
+
+	ResendHostCertificateTemplateFunc        ResendHostCertificateTemplateFunc
+	ResendHostCertificateTemplateFuncInvoked bool
 
 	GlobalScheduleQueryFunc        GlobalScheduleQueryFunc
 	GlobalScheduleQueryFuncInvoked bool
@@ -1526,8 +1705,14 @@ type Service struct {
 	ModifyGlobalPolicyFunc        ModifyGlobalPolicyFunc
 	ModifyGlobalPolicyFuncInvoked bool
 
-	GetPolicyByIDQueriesFunc        GetPolicyByIDQueriesFunc
-	GetPolicyByIDQueriesFuncInvoked bool
+	GetPolicyByIDFunc        GetPolicyByIDFunc
+	GetPolicyByIDFuncInvoked bool
+
+	ResetPolicyFunc        ResetPolicyFunc
+	ResetPolicyFuncInvoked bool
+
+	ListPolicyAutomationActivitiesFunc        ListPolicyAutomationActivitiesFunc
+	ListPolicyAutomationActivitiesFuncInvoked bool
 
 	ApplyPolicySpecsFunc        ApplyPolicySpecsFunc
 	ApplyPolicySpecsFuncInvoked bool
@@ -1543,6 +1728,9 @@ type Service struct {
 
 	SoftwareByIDFunc        SoftwareByIDFunc
 	SoftwareByIDFuncInvoked bool
+
+	SoftwareLiteByIDFunc        SoftwareLiteByIDFunc
+	SoftwareLiteByIDFuncInvoked bool
 
 	CountSoftwareFunc        CountSoftwareFunc
 	CountSoftwareFuncInvoked bool
@@ -1571,6 +1759,9 @@ type Service struct {
 	InstallVPPAppPostValidationFunc        InstallVPPAppPostValidationFunc
 	InstallVPPAppPostValidationFuncInvoked bool
 
+	InstallInHouseAppForSetupExperienceFunc        InstallInHouseAppForSetupExperienceFunc
+	InstallInHouseAppForSetupExperienceFuncInvoked bool
+
 	UninstallSoftwareTitleFunc        UninstallSoftwareTitleFunc
 	UninstallSoftwareTitleFuncInvoked bool
 
@@ -1585,6 +1776,9 @@ type Service struct {
 
 	SelfServiceInstallSoftwareTitleFunc        SelfServiceInstallSoftwareTitleFunc
 	SelfServiceInstallSoftwareTitleFuncInvoked bool
+
+	SelfServiceInstallAllSoftwareTitlesFunc        SelfServiceInstallAllSoftwareTitlesFunc
+	SelfServiceInstallAllSoftwareTitlesFuncInvoked bool
 
 	HasSelfServiceSoftwareInstallersFunc        HasSelfServiceSoftwareInstallersFunc
 	HasSelfServiceSoftwareInstallersFuncInvoked bool
@@ -1634,8 +1828,8 @@ type Service struct {
 	ModifyTeamPolicyFunc        ModifyTeamPolicyFunc
 	ModifyTeamPolicyFuncInvoked bool
 
-	GetTeamPolicyByIDQueriesFunc        GetTeamPolicyByIDQueriesFunc
-	GetTeamPolicyByIDQueriesFuncInvoked bool
+	GetTeamPolicyByIDFunc        GetTeamPolicyByIDFunc
+	GetTeamPolicyByIDFuncInvoked bool
 
 	CountTeamPoliciesFunc        CountTeamPoliciesFunc
 	CountTeamPoliciesFuncInvoked bool
@@ -1690,6 +1884,9 @@ type Service struct {
 
 	GetHostDEPAssignmentFunc        GetHostDEPAssignmentFunc
 	GetHostDEPAssignmentFuncInvoked bool
+
+	GetHostDEPAssignmentDetailsFunc        GetHostDEPAssignmentDetailsFunc
+	GetHostDEPAssignmentDetailsFuncInvoked bool
 
 	NewMDMAppleConfigProfileFunc        NewMDMAppleConfigProfileFunc
 	NewMDMAppleConfigProfileFuncInvoked bool
@@ -1811,14 +2008,14 @@ type Service struct {
 	MDMListHostConfigurationProfilesFunc        MDMListHostConfigurationProfilesFunc
 	MDMListHostConfigurationProfilesFuncInvoked bool
 
-	MDMAppleEnableFileVaultAndEscrowFunc        MDMAppleEnableFileVaultAndEscrowFunc
-	MDMAppleEnableFileVaultAndEscrowFuncInvoked bool
-
-	MDMAppleDisableFileVaultAndEscrowFunc        MDMAppleDisableFileVaultAndEscrowFunc
-	MDMAppleDisableFileVaultAndEscrowFuncInvoked bool
+	MDMAppleReconcileFileVaultProfileFunc        MDMAppleReconcileFileVaultProfileFunc
+	MDMAppleReconcileFileVaultProfileFuncInvoked bool
 
 	UpdateMDMDiskEncryptionFunc        UpdateMDMDiskEncryptionFunc
 	UpdateMDMDiskEncryptionFuncInvoked bool
+
+	UpdateMDMHostNameTemplateFunc        UpdateMDMHostNameTemplateFunc
+	UpdateMDMHostNameTemplateFuncInvoked bool
 
 	VerifyMDMAppleConfiguredFunc        VerifyMDMAppleConfiguredFunc
 	VerifyMDMAppleConfiguredFuncInvoked bool
@@ -1865,6 +2062,9 @@ type Service struct {
 	GetMDMAppleSetupAssistantFunc        GetMDMAppleSetupAssistantFunc
 	GetMDMAppleSetupAssistantFuncInvoked bool
 
+	GetDefaultMDMAppleSetupAssistantProfileFunc        GetDefaultMDMAppleSetupAssistantProfileFunc
+	GetDefaultMDMAppleSetupAssistantProfileFuncInvoked bool
+
 	DeleteMDMAppleSetupAssistantFunc        DeleteMDMAppleSetupAssistantFunc
 	DeleteMDMAppleSetupAssistantFuncInvoked bool
 
@@ -1901,9 +2101,6 @@ type Service struct {
 	GetMDMMicrosoftDiscoveryResponseFunc        GetMDMMicrosoftDiscoveryResponseFunc
 	GetMDMMicrosoftDiscoveryResponseFuncInvoked bool
 
-	GetMDMMicrosoftSTSAuthResponseFunc        GetMDMMicrosoftSTSAuthResponseFunc
-	GetMDMMicrosoftSTSAuthResponseFuncInvoked bool
-
 	GetMDMWindowsPolicyResponseFunc        GetMDMWindowsPolicyResponseFunc
 	GetMDMWindowsPolicyResponseFuncInvoked bool
 
@@ -1934,6 +2131,9 @@ type Service struct {
 	SetOrUpdateDiskEncryptionKeyFunc        SetOrUpdateDiskEncryptionKeyFunc
 	SetOrUpdateDiskEncryptionKeyFuncInvoked bool
 
+	SetOrUpdateDiskEncryptionProtectionFunc        SetOrUpdateDiskEncryptionProtectionFunc
+	SetOrUpdateDiskEncryptionProtectionFuncInvoked bool
+
 	GetMDMWindowsConfigProfileFunc        GetMDMWindowsConfigProfileFunc
 	GetMDMWindowsConfigProfileFuncInvoked bool
 
@@ -1949,8 +2149,14 @@ type Service struct {
 	NewMDMUnsupportedConfigProfileFunc        NewMDMUnsupportedConfigProfileFunc
 	NewMDMUnsupportedConfigProfileFuncInvoked bool
 
+	NewMDMActivationUnsupportedProfileFunc        NewMDMActivationUnsupportedProfileFunc
+	NewMDMActivationUnsupportedProfileFuncInvoked bool
+
 	NewMDMInvalidJSONConfigProfileFunc        NewMDMInvalidJSONConfigProfileFunc
 	NewMDMInvalidJSONConfigProfileFuncInvoked bool
+
+	UpdateMDMConfigProfileFunc        UpdateMDMConfigProfileFunc
+	UpdateMDMConfigProfileFuncInvoked bool
 
 	ListMDMConfigProfilesFunc        ListMDMConfigProfilesFunc
 	ListMDMConfigProfilesFuncInvoked bool
@@ -1981,6 +2187,9 @@ type Service struct {
 
 	ResendHostMDMProfileFunc        ResendHostMDMProfileFunc
 	ResendHostMDMProfileFuncInvoked bool
+
+	ResendHostNameTemplateFunc        ResendHostNameTemplateFunc
+	ResendHostNameTemplateFuncInvoked bool
 
 	ResendDeviceHostMDMProfileFunc        ResendDeviceHostMDMProfileFunc
 	ResendDeviceHostMDMProfileFuncInvoked bool
@@ -2057,6 +2266,21 @@ type Service struct {
 	WipeHostFunc        WipeHostFunc
 	WipeHostFuncInvoked bool
 
+	ClearPasscodeFunc        ClearPasscodeFunc
+	ClearPasscodeFuncInvoked bool
+
+	CancelHostMDMCommandFunc        CancelHostMDMCommandFunc
+	CancelHostMDMCommandFuncInvoked bool
+
+	RotateRecoveryLockPasswordFunc        RotateRecoveryLockPasswordFunc
+	RotateRecoveryLockPasswordFuncInvoked bool
+
+	GetHostManagedAccountPasswordFunc        GetHostManagedAccountPasswordFunc
+	GetHostManagedAccountPasswordFuncInvoked bool
+
+	RotateManagedLocalAccountPasswordFunc        RotateManagedLocalAccountPasswordFunc
+	RotateManagedLocalAccountPasswordFuncInvoked bool
+
 	UploadSoftwareInstallerFunc        UploadSoftwareInstallerFunc
 	UploadSoftwareInstallerFuncInvoked bool
 
@@ -2089,6 +2313,30 @@ type Service struct {
 
 	DeleteSoftwareTitleIconFunc        DeleteSoftwareTitleIconFunc
 	DeleteSoftwareTitleIconFuncInvoked bool
+
+	ListSoftwareCategoriesFunc        ListSoftwareCategoriesFunc
+	ListSoftwareCategoriesFuncInvoked bool
+
+	ListSelfServiceSoftwareCategoriesForHostFunc        ListSelfServiceSoftwareCategoriesForHostFunc
+	ListSelfServiceSoftwareCategoriesForHostFuncInvoked bool
+
+	NewSoftwareCategoryFunc        NewSoftwareCategoryFunc
+	NewSoftwareCategoryFuncInvoked bool
+
+	UpdateSoftwareCategoryFunc        UpdateSoftwareCategoryFunc
+	UpdateSoftwareCategoryFuncInvoked bool
+
+	DeleteSoftwareCategoryFunc        DeleteSoftwareCategoryFunc
+	DeleteSoftwareCategoryFuncInvoked bool
+
+	UploadOrgLogoFunc        UploadOrgLogoFunc
+	UploadOrgLogoFuncInvoked bool
+
+	DeleteOrgLogoFunc        DeleteOrgLogoFunc
+	DeleteOrgLogoFuncInvoked bool
+
+	GetOrgLogoFunc        GetOrgLogoFunc
+	GetOrgLogoFuncInvoked bool
 
 	SetSetupExperienceSoftwareFunc        SetSetupExperienceSoftwareFunc
 	SetSetupExperienceSoftwareFuncInvoked bool
@@ -2147,6 +2395,27 @@ type Service struct {
 	DeleteSecretVariableFunc        DeleteSecretVariableFunc
 	DeleteSecretVariableFuncInvoked bool
 
+	ListCustomHostVitalsFunc        ListCustomHostVitalsFunc
+	ListCustomHostVitalsFuncInvoked bool
+
+	CreateCustomHostVitalFunc        CreateCustomHostVitalFunc
+	CreateCustomHostVitalFuncInvoked bool
+
+	UpdateCustomHostVitalFunc        UpdateCustomHostVitalFunc
+	UpdateCustomHostVitalFuncInvoked bool
+
+	DeleteCustomHostVitalFunc        DeleteCustomHostVitalFunc
+	DeleteCustomHostVitalFuncInvoked bool
+
+	SetHostCustomHostVitalValueFunc        SetHostCustomHostVitalValueFunc
+	SetHostCustomHostVitalValueFuncInvoked bool
+
+	UpsertCustomHostVitalsFunc        UpsertCustomHostVitalsFunc
+	UpsertCustomHostVitalsFuncInvoked bool
+
+	ListAPIEndpointsFunc        ListAPIEndpointsFunc
+	ListAPIEndpointsFuncInvoked bool
+
 	ScimDetailsFunc        ScimDetailsFunc
 	ScimDetailsFuncInvoked bool
 
@@ -2195,6 +2464,54 @@ type Service struct {
 	UnenrollMDMFunc        UnenrollMDMFunc
 	UnenrollMDMFuncInvoked bool
 
+	PSSONonceFunc        PSSONonceFunc
+	PSSONonceFuncInvoked bool
+
+	PSSORegisterDeviceFunc        PSSORegisterDeviceFunc
+	PSSORegisterDeviceFuncInvoked bool
+
+	PSSOTokenFunc        PSSOTokenFunc
+	PSSOTokenFuncInvoked bool
+
+	PSSOJWKSFunc        PSSOJWKSFunc
+	PSSOJWKSFuncInvoked bool
+
+	PSSOAASAFunc        PSSOAASAFunc
+	PSSOAASAFuncInvoked bool
+
+	ListAppleDDMAssetsFunc        ListAppleDDMAssetsFunc
+	ListAppleDDMAssetsFuncInvoked bool
+
+	GetAppleDDMAssetFunc        GetAppleDDMAssetFunc
+	GetAppleDDMAssetFuncInvoked bool
+
+	DownloadAppleDDMAssetFunc        DownloadAppleDDMAssetFunc
+	DownloadAppleDDMAssetFuncInvoked bool
+
+	CreateAppleDDMAssetFunc        CreateAppleDDMAssetFunc
+	CreateAppleDDMAssetFuncInvoked bool
+
+	DeleteAppleDDMAssetFunc        DeleteAppleDDMAssetFunc
+	DeleteAppleDDMAssetFuncInvoked bool
+
+	BatchSetAppleDDMAssetsFunc        BatchSetAppleDDMAssetsFunc
+	BatchSetAppleDDMAssetsFuncInvoked bool
+
+	ReleaseABDevicesFunc        ReleaseABDevicesFunc
+	ReleaseABDevicesFuncInvoked bool
+
+	ListMicrosoftGraphCredentialsFunc        ListMicrosoftGraphCredentialsFunc
+	ListMicrosoftGraphCredentialsFuncInvoked bool
+
+	ApplyMicrosoftGraphCredentialsFunc        ApplyMicrosoftGraphCredentialsFunc
+	ApplyMicrosoftGraphCredentialsFuncInvoked bool
+
+	SendAPNSPingFunc        SendAPNSPingFunc
+	SendAPNSPingFuncInvoked bool
+
+	DeviceSendAPNSPingFunc        DeviceSendAPNSPingFunc
+	DeviceSendAPNSPingFuncInvoked bool
+
 	mu sync.Mutex
 }
 
@@ -2217,6 +2534,13 @@ func (s *Service) GetClientConfig(ctx context.Context) (config map[string]interf
 	s.GetClientConfigFuncInvoked = true
 	s.mu.Unlock()
 	return s.GetClientConfigFunc(ctx)
+}
+
+func (s *Service) GetClientConfigWithETag(ctx context.Context, clientETag *string) (*fleet.ClientConfigResult, error) {
+	s.mu.Lock()
+	s.GetClientConfigWithETagFuncInvoked = true
+	s.mu.Unlock()
+	return s.GetClientConfigWithETagFunc(ctx, clientETag)
 }
 
 func (s *Service) GetDistributedQueries(ctx context.Context) (queries map[string]string, discovery map[string]string, accelerate uint, err error) {
@@ -2254,6 +2578,13 @@ func (s *Service) YaraRuleByName(ctx context.Context, name string) (*fleet.YaraR
 	return s.YaraRuleByNameFunc(ctx, name)
 }
 
+func (s *Service) ListHostIDsDueForDistributedRead(ctx context.Context, hostIDs []uint) (map[uint]string, error) {
+	s.mu.Lock()
+	s.ListHostIDsDueForDistributedReadFuncInvoked = true
+	s.mu.Unlock()
+	return s.ListHostIDsDueForDistributedReadFunc(ctx, hostIDs)
+}
+
 func (s *Service) ListUsers(ctx context.Context, opt fleet.UserListOptions) (users []*fleet.User, err error) {
 	s.mu.Lock()
 	s.ListUsersFuncInvoked = true
@@ -2282,6 +2613,13 @@ func (s *Service) GetActivitiesWebhookSettings(ctx context.Context) (fleet.Activ
 	return s.GetActivitiesWebhookSettingsFunc(ctx)
 }
 
+func (s *Service) GetHostActivitiesWebhookSettings(ctx context.Context, hostIDs []uint) ([]fleet.HostActivitiesWebhookDelivery, error) {
+	s.mu.Lock()
+	s.GetHostActivitiesWebhookSettingsFuncInvoked = true
+	s.mu.Unlock()
+	return s.GetHostActivitiesWebhookSettingsFunc(ctx, hostIDs)
+}
+
 func (s *Service) ActivateNextUpcomingActivityForHost(ctx context.Context, hostID uint, fromCompletedExecID string) error {
 	s.mu.Lock()
 	s.ActivateNextUpcomingActivityForHostFuncInvoked = true
@@ -2303,11 +2641,11 @@ func (s *Service) AuthenticateOrbitHost(ctx context.Context, nodeKey string) (ho
 	return s.AuthenticateOrbitHostFunc(ctx, nodeKey)
 }
 
-func (s *Service) EnrollOrbit(ctx context.Context, hostInfo fleet.OrbitHostInfo, enrollSecret string) (orbitNodeKey string, err error) {
+func (s *Service) EnrollOrbit(ctx context.Context, hostInfo fleet.OrbitHostInfo, enrollSecret string, euaToken string) (orbitNodeKey string, err error) {
 	s.mu.Lock()
 	s.EnrollOrbitFuncInvoked = true
 	s.mu.Unlock()
-	return s.EnrollOrbitFunc(ctx, hostInfo, enrollSecret)
+	return s.EnrollOrbitFunc(ctx, hostInfo, enrollSecret, euaToken)
 }
 
 func (s *Service) GetOrbitConfig(ctx context.Context) (fleet.OrbitConfig, error) {
@@ -2336,6 +2674,20 @@ func (s *Service) GetFleetDesktopSummary(ctx context.Context) (fleet.DesktopSumm
 	s.GetFleetDesktopSummaryFuncInvoked = true
 	s.mu.Unlock()
 	return s.GetFleetDesktopSummaryFunc(ctx)
+}
+
+func (s *Service) InitiateDeviceSSO(ctx context.Context, deviceURL string) (*fleet.DeviceSSOInitiation, error) {
+	s.mu.Lock()
+	s.InitiateDeviceSSOFuncInvoked = true
+	s.mu.Unlock()
+	return s.InitiateDeviceSSOFunc(ctx, deviceURL)
+}
+
+func (s *Service) RequireDeviceSSOSession(ctx context.Context, host *fleet.Host, sessionID string) error {
+	s.mu.Lock()
+	s.RequireDeviceSSOSessionFuncInvoked = true
+	s.mu.Unlock()
+	return s.RequireDeviceSSOSessionFunc(ctx, host, sessionID)
 }
 
 func (s *Service) SetEnterpriseOverrides(overrides fleet.EnterpriseOverrides) {
@@ -2436,6 +2788,13 @@ func (s *Service) ModifyUser(ctx context.Context, userID uint, p fleet.UserPaylo
 	return s.ModifyUserFunc(ctx, userID, p)
 }
 
+func (s *Service) ModifyAPIOnlyUser(ctx context.Context, userID uint, p fleet.UserPayload) (user *fleet.User, err error) {
+	s.mu.Lock()
+	s.ModifyAPIOnlyUserFuncInvoked = true
+	s.mu.Unlock()
+	return s.ModifyAPIOnlyUserFunc(ctx, userID, p)
+}
+
 func (s *Service) DeleteUser(ctx context.Context, id uint) (*fleet.User, error) {
 	s.mu.Lock()
 	s.DeleteUserFuncInvoked = true
@@ -2478,18 +2837,18 @@ func (s *Service) InitSSOCallback(ctx context.Context, sessionID string, samlRes
 	return s.InitSSOCallbackFunc(ctx, sessionID, samlResponse)
 }
 
-func (s *Service) MDMSSOCallback(ctx context.Context, sessionID string, samlResponse []byte) (redirectURL string, byodCookieValue string) {
+func (s *Service) MDMSSOCallback(ctx context.Context, sessionID string, samlResponse []byte) (redirectURL string, byodCookieValue string, deviceSSOSessionID string, deviceSSOSessionDurationSeconds int) {
 	s.mu.Lock()
 	s.MDMSSOCallbackFuncInvoked = true
 	s.mu.Unlock()
 	return s.MDMSSOCallbackFunc(ctx, sessionID, samlResponse)
 }
 
-func (s *Service) GetMDMAccountDrivenEnrollmentSSOURL(ctx context.Context) (string, error) {
+func (s *Service) GetMDMAccountDrivenEnrollmentSSOURL(ctx context.Context, enrollmentToken string) (string, error) {
 	s.mu.Lock()
 	s.GetMDMAccountDrivenEnrollmentSSOURLFuncInvoked = true
 	s.mu.Unlock()
-	return s.GetMDMAccountDrivenEnrollmentSSOURLFunc(ctx)
+	return s.GetMDMAccountDrivenEnrollmentSSOURLFunc(ctx, enrollmentToken)
 }
 
 func (s *Service) GetSSOUser(ctx context.Context, auth fleet.Auth) (*fleet.User, error) {
@@ -2800,6 +3159,13 @@ func (s *Service) QueryReportIsClipped(ctx context.Context, queryID uint, maxQue
 	return s.QueryReportIsClippedFunc(ctx, queryID, maxQueryReportRows)
 }
 
+func (s *Service) ListHostReports(ctx context.Context, hostID uint, opts fleet.ListHostReportsOptions) (rows []*fleet.HostReport, total int, metadata *fleet.PaginationMetadata, err error) {
+	s.mu.Lock()
+	s.ListHostReportsFuncInvoked = true
+	s.mu.Unlock()
+	return s.ListHostReportsFunc(ctx, hostID, opts)
+}
+
 func (s *Service) NewQuery(ctx context.Context, p fleet.QueryPayload) (*fleet.Query, error) {
 	s.mu.Lock()
 	s.NewQueryFuncInvoked = true
@@ -2961,11 +3327,11 @@ func (s *Service) RefetchHost(ctx context.Context, id uint) (err error) {
 	return s.RefetchHostFunc(ctx, id)
 }
 
-func (s *Service) CleanupExpiredHosts(ctx context.Context) ([]fleet.DeletedHostDetails, error) {
+func (s *Service) CleanupExpiredHostsBatch(ctx context.Context, batchSize int) ([]fleet.DeletedHostDetails, error) {
 	s.mu.Lock()
-	s.CleanupExpiredHostsFuncInvoked = true
+	s.CleanupExpiredHostsBatchFuncInvoked = true
 	s.mu.Unlock()
-	return s.CleanupExpiredHostsFunc(ctx)
+	return s.CleanupExpiredHostsBatchFunc(ctx, batchSize)
 }
 
 func (s *Service) AddHostsToTeam(ctx context.Context, teamID *uint, hostIDs []uint, skipBulkPending bool) error {
@@ -3038,7 +3404,7 @@ func (s *Service) HostLiteByID(ctx context.Context, id uint) (*fleet.HostLite, e
 	return s.HostLiteByIDFunc(ctx, id)
 }
 
-func (s *Service) ListDevicePolicies(ctx context.Context, host *fleet.Host) ([]*fleet.HostPolicy, error) {
+func (s *Service) ListDevicePolicies(ctx context.Context, host *fleet.Host) ([]*fleet.DevicePolicy, error) {
 	s.mu.Lock()
 	s.ListDevicePoliciesFuncInvoked = true
 	s.mu.Unlock()
@@ -3115,11 +3481,18 @@ func (s *Service) HostEncryptionKey(ctx context.Context, id uint) (*fleet.HostDi
 	return s.HostEncryptionKeyFunc(ctx, id)
 }
 
-func (s *Service) EscrowLUKSData(ctx context.Context, passphrase string, salt string, keySlot *uint, clientError string) error {
+func (s *Service) EscrowLUKSData(ctx context.Context, passphrase string, salt string, keySlot *uint, clientError string, keyType string) error {
 	s.mu.Lock()
 	s.EscrowLUKSDataFuncInvoked = true
 	s.mu.Unlock()
-	return s.EscrowLUKSDataFunc(ctx, passphrase, salt, keySlot, clientError)
+	return s.EscrowLUKSDataFunc(ctx, passphrase, salt, keySlot, clientError, keyType)
+}
+
+func (s *Service) EscrowWindowsManagedLocalAccountPassword(ctx context.Context, password string, clientError string) error {
+	s.mu.Lock()
+	s.EscrowWindowsManagedLocalAccountPasswordFuncInvoked = true
+	s.mu.Unlock()
+	return s.EscrowWindowsManagedLocalAccountPasswordFunc(ctx, password, clientError)
 }
 
 func (s *Service) AddLabelsToHost(ctx context.Context, id uint, labels []string) error {
@@ -3171,6 +3544,20 @@ func (s *Service) ListHostCertificates(ctx context.Context, hostID uint, opts fl
 	return s.ListHostCertificatesFunc(ctx, hostID, opts)
 }
 
+func (s *Service) GetHostRecoveryLockPassword(ctx context.Context, hostID uint) (*fleet.HostRecoveryLockPassword, error) {
+	s.mu.Lock()
+	s.GetHostRecoveryLockPasswordFuncInvoked = true
+	s.mu.Unlock()
+	return s.GetHostRecoveryLockPasswordFunc(ctx, hostID)
+}
+
+func (s *Service) HostDeviceURL(ctx context.Context, hostID uint) (string, error) {
+	s.mu.Lock()
+	s.HostDeviceURLFuncInvoked = true
+	s.mu.Unlock()
+	return s.HostDeviceURLFunc(ctx, hostID)
+}
+
 func (s *Service) NewAppConfig(ctx context.Context, p fleet.AppConfig) (info *fleet.AppConfig, err error) {
 	s.mu.Lock()
 	s.NewAppConfigFuncInvoked = true
@@ -3197,6 +3584,20 @@ func (s *Service) SandboxEnabled() bool {
 	s.SandboxEnabledFuncInvoked = true
 	s.mu.Unlock()
 	return s.SandboxEnabledFunc()
+}
+
+func (s *Service) MaxInstallerSizeBytes() int64 {
+	s.mu.Lock()
+	s.MaxInstallerSizeBytesFuncInvoked = true
+	s.mu.Unlock()
+	return s.MaxInstallerSizeBytesFunc()
+}
+
+func (s *Service) AppConfigUrls(ctx context.Context) (urls *fleet.AppConfigUrls, err error) {
+	s.mu.Lock()
+	s.AppConfigUrlsFuncInvoked = true
+	s.mu.Unlock()
+	return s.AppConfigUrlsFunc(ctx)
 }
 
 func (s *Service) ApplyEnrollSecretSpec(ctx context.Context, spec *fleet.EnrollSecretSpec, applyOpts fleet.ApplySpecOptions) error {
@@ -3507,6 +3908,34 @@ func (s *Service) SetActivityService(activitySvc fleet.ActivityWriteService) {
 	s.SetActivityServiceFunc(activitySvc)
 }
 
+func (s *Service) SetConfigETagStore(store fleet.ConfigETagStore) {
+	s.mu.Lock()
+	s.SetConfigETagStoreFuncInvoked = true
+	s.mu.Unlock()
+	s.SetConfigETagStoreFunc(store)
+}
+
+func (s *Service) SetACMEService(acmeSvc fleet.ACMEWriteService) {
+	s.mu.Lock()
+	s.SetACMEServiceFuncInvoked = true
+	s.mu.Unlock()
+	s.SetACMEServiceFunc(acmeSvc)
+}
+
+func (s *Service) SetAgentCheckInNotifier(notifier fleet.AgentCheckInNotifier) {
+	s.mu.Lock()
+	s.SetAgentCheckInNotifierFuncInvoked = true
+	s.mu.Unlock()
+	s.SetAgentCheckInNotifierFunc(notifier)
+}
+
+func (s *Service) NewACMEEnrollment(ctx context.Context, hostIdentifier string) (string, error) {
+	s.mu.Lock()
+	s.NewACMEEnrollmentFuncInvoked = true
+	s.mu.Unlock()
+	return s.NewACMEEnrollmentFunc(ctx, hostIdentifier)
+}
+
 func (s *Service) NewActivity(ctx context.Context, user *fleet.User, activity fleet.ActivityDetails) error {
 	s.mu.Lock()
 	s.NewActivityFuncInvoked = true
@@ -3535,11 +3964,11 @@ func (s *Service) ApplyUserRolesSpecs(ctx context.Context, specs fleet.UsersRole
 	return s.ApplyUserRolesSpecsFunc(ctx, specs)
 }
 
-func (s *Service) CreateCertificateTemplate(ctx context.Context, name string, teamID uint, certificateAuthorityID uint, subjectName string) (*fleet.CertificateTemplateResponse, error) {
+func (s *Service) CreateCertificateTemplate(ctx context.Context, name string, teamID uint, certificateAuthorityID uint, subjectName string, subjectAlternativeName string) (*fleet.CertificateTemplateResponse, error) {
 	s.mu.Lock()
 	s.CreateCertificateTemplateFuncInvoked = true
 	s.mu.Unlock()
-	return s.CreateCertificateTemplateFunc(ctx, name, teamID, certificateAuthorityID, subjectName)
+	return s.CreateCertificateTemplateFunc(ctx, name, teamID, certificateAuthorityID, subjectName, subjectAlternativeName)
 }
 
 func (s *Service) ListCertificateTemplates(ctx context.Context, teamID uint, opts fleet.ListOptions) ([]*fleet.CertificateTemplateResponseSummary, *fleet.PaginationMetadata, error) {
@@ -3589,6 +4018,13 @@ func (s *Service) UpdateCertificateStatus(ctx context.Context, update *fleet.Cer
 	s.UpdateCertificateStatusFuncInvoked = true
 	s.mu.Unlock()
 	return s.UpdateCertificateStatusFunc(ctx, update)
+}
+
+func (s *Service) ResendHostCertificateTemplate(ctx context.Context, hostID uint, templateID uint) error {
+	s.mu.Lock()
+	s.ResendHostCertificateTemplateFuncInvoked = true
+	s.mu.Unlock()
+	return s.ResendHostCertificateTemplateFunc(ctx, hostID, templateID)
 }
 
 func (s *Service) GlobalScheduleQuery(ctx context.Context, sq *fleet.ScheduledQuery) (*fleet.ScheduledQuery, error) {
@@ -3661,11 +4097,11 @@ func (s *Service) NewGlobalPolicy(ctx context.Context, p fleet.PolicyPayload) (*
 	return s.NewGlobalPolicyFunc(ctx, p)
 }
 
-func (s *Service) ListGlobalPolicies(ctx context.Context, opts fleet.ListOptions) ([]*fleet.Policy, error) {
+func (s *Service) ListGlobalPolicies(ctx context.Context, opts fleet.ListOptions, platform string) ([]*fleet.Policy, error) {
 	s.mu.Lock()
 	s.ListGlobalPoliciesFuncInvoked = true
 	s.mu.Unlock()
-	return s.ListGlobalPoliciesFunc(ctx, opts)
+	return s.ListGlobalPoliciesFunc(ctx, opts, platform)
 }
 
 func (s *Service) DeleteGlobalPolicies(ctx context.Context, ids []uint) ([]uint, error) {
@@ -3682,11 +4118,25 @@ func (s *Service) ModifyGlobalPolicy(ctx context.Context, id uint, p fleet.Modif
 	return s.ModifyGlobalPolicyFunc(ctx, id, p)
 }
 
-func (s *Service) GetPolicyByIDQueries(ctx context.Context, policyID uint) (*fleet.Policy, error) {
+func (s *Service) GetPolicyByID(ctx context.Context, policyID uint) (*fleet.Policy, error) {
 	s.mu.Lock()
-	s.GetPolicyByIDQueriesFuncInvoked = true
+	s.GetPolicyByIDFuncInvoked = true
 	s.mu.Unlock()
-	return s.GetPolicyByIDQueriesFunc(ctx, policyID)
+	return s.GetPolicyByIDFunc(ctx, policyID)
+}
+
+func (s *Service) ResetPolicy(ctx context.Context, policyID uint) error {
+	s.mu.Lock()
+	s.ResetPolicyFuncInvoked = true
+	s.mu.Unlock()
+	return s.ResetPolicyFunc(ctx, policyID)
+}
+
+func (s *Service) ListPolicyAutomationActivities(ctx context.Context, policyID uint, opts fleet.ListOptions, status string) ([]*fleet.PolicyAutomationActivity, *fleet.PaginationMetadata, error) {
+	s.mu.Lock()
+	s.ListPolicyAutomationActivitiesFuncInvoked = true
+	s.mu.Unlock()
+	return s.ListPolicyAutomationActivitiesFunc(ctx, policyID, opts, status)
 }
 
 func (s *Service) ApplyPolicySpecs(ctx context.Context, policies []*fleet.PolicySpec) error {
@@ -3696,11 +4146,11 @@ func (s *Service) ApplyPolicySpecs(ctx context.Context, policies []*fleet.Policy
 	return s.ApplyPolicySpecsFunc(ctx, policies)
 }
 
-func (s *Service) CountGlobalPolicies(ctx context.Context, matchQuery string) (int, error) {
+func (s *Service) CountGlobalPolicies(ctx context.Context, matchQuery string, platform string) (int, error) {
 	s.mu.Lock()
 	s.CountGlobalPoliciesFuncInvoked = true
 	s.mu.Unlock()
-	return s.CountGlobalPoliciesFunc(ctx, matchQuery)
+	return s.CountGlobalPoliciesFunc(ctx, matchQuery, platform)
 }
 
 func (s *Service) AutofillPolicySql(ctx context.Context, sql string) (description string, resolution string, err error) {
@@ -3722,6 +4172,13 @@ func (s *Service) SoftwareByID(ctx context.Context, id uint, teamID *uint, inclu
 	s.SoftwareByIDFuncInvoked = true
 	s.mu.Unlock()
 	return s.SoftwareByIDFunc(ctx, id, teamID, includeCVEScores)
+}
+
+func (s *Service) SoftwareLiteByID(ctx context.Context, id uint) (fleet.SoftwareLite, error) {
+	s.mu.Lock()
+	s.SoftwareLiteByIDFuncInvoked = true
+	s.mu.Unlock()
+	return s.SoftwareLiteByIDFunc(ctx, id)
 }
 
 func (s *Service) CountSoftware(ctx context.Context, opt fleet.SoftwareListOptions) (int, error) {
@@ -3752,11 +4209,11 @@ func (s *Service) SoftwareTitleByID(ctx context.Context, id uint, teamID *uint) 
 	return s.SoftwareTitleByIDFunc(ctx, id, teamID)
 }
 
-func (s *Service) SoftwareTitleNameForHostFilter(ctx context.Context, id uint) (name string, displayName string, err error) {
+func (s *Service) SoftwareTitleNameForHostFilter(ctx context.Context, id uint, teamID *uint) (name string, displayName string, err error) {
 	s.mu.Lock()
 	s.SoftwareTitleNameForHostFilterFuncInvoked = true
 	s.mu.Unlock()
-	return s.SoftwareTitleNameForHostFilterFunc(ctx, id)
+	return s.SoftwareTitleNameForHostFilterFunc(ctx, id, teamID)
 }
 
 func (s *Service) InstallSoftwareTitle(ctx context.Context, hostID uint, softwareTitleID uint) error {
@@ -3787,6 +4244,13 @@ func (s *Service) InstallVPPAppPostValidation(ctx context.Context, host *fleet.H
 	return s.InstallVPPAppPostValidationFunc(ctx, host, vppApp, token, opts)
 }
 
+func (s *Service) InstallInHouseAppForSetupExperience(ctx context.Context, host *fleet.Host, inHouseAppID uint, softwareTitleID uint) (string, error) {
+	s.mu.Lock()
+	s.InstallInHouseAppForSetupExperienceFuncInvoked = true
+	s.mu.Unlock()
+	return s.InstallInHouseAppForSetupExperienceFunc(ctx, host, inHouseAppID, softwareTitleID)
+}
+
 func (s *Service) UninstallSoftwareTitle(ctx context.Context, hostID uint, softwareTitleID uint) error {
 	s.mu.Lock()
 	s.UninstallSoftwareTitleFuncInvoked = true
@@ -3808,7 +4272,7 @@ func (s *Service) BatchSetSoftwareInstallers(ctx context.Context, tmName string,
 	return s.BatchSetSoftwareInstallersFunc(ctx, tmName, payloads, dryRun)
 }
 
-func (s *Service) GetBatchSetSoftwareInstallersResult(ctx context.Context, tmName string, requestUUID string, dryRun bool) (status string, message string, packages []fleet.SoftwarePackageResponse, err error) {
+func (s *Service) GetBatchSetSoftwareInstallersResult(ctx context.Context, tmName string, requestUUID string, dryRun bool) (*fleet.BatchSetSoftwareInstallersResult, error) {
 	s.mu.Lock()
 	s.GetBatchSetSoftwareInstallersResultFuncInvoked = true
 	s.mu.Unlock()
@@ -3820,6 +4284,13 @@ func (s *Service) SelfServiceInstallSoftwareTitle(ctx context.Context, host *fle
 	s.SelfServiceInstallSoftwareTitleFuncInvoked = true
 	s.mu.Unlock()
 	return s.SelfServiceInstallSoftwareTitleFunc(ctx, host, softwareTitleID)
+}
+
+func (s *Service) SelfServiceInstallAllSoftwareTitles(ctx context.Context, host *fleet.Host, categoryID *uint, matchQuery string) error {
+	s.mu.Lock()
+	s.SelfServiceInstallAllSoftwareTitlesFuncInvoked = true
+	s.mu.Unlock()
+	return s.SelfServiceInstallAllSoftwareTitlesFunc(ctx, host, categoryID, matchQuery)
 }
 
 func (s *Service) HasSelfServiceSoftwareInstallers(ctx context.Context, host *fleet.Host) (bool, error) {
@@ -3836,7 +4307,7 @@ func (s *Service) GetAppStoreApps(ctx context.Context, teamID *uint) ([]*fleet.V
 	return s.GetAppStoreAppsFunc(ctx, teamID)
 }
 
-func (s *Service) AddAppStoreApp(ctx context.Context, teamID *uint, appTeam fleet.VPPAppTeam) (uint, error) {
+func (s *Service) AddAppStoreApp(ctx context.Context, teamID *uint, appTeam fleet.VPPAppTeam) (uint, string, error) {
 	s.mu.Lock()
 	s.AddAppStoreAppFuncInvoked = true
 	s.mu.Unlock()
@@ -3850,25 +4321,25 @@ func (s *Service) UpdateAppStoreApp(ctx context.Context, titleID uint, teamID *u
 	return s.UpdateAppStoreAppFunc(ctx, titleID, teamID, payload)
 }
 
-func (s *Service) GetInHouseAppManifest(ctx context.Context, titleID uint, teamID *uint) ([]byte, error) {
+func (s *Service) GetInHouseAppManifest(ctx context.Context, titleID uint, token string) ([]byte, error) {
 	s.mu.Lock()
 	s.GetInHouseAppManifestFuncInvoked = true
 	s.mu.Unlock()
-	return s.GetInHouseAppManifestFunc(ctx, titleID, teamID)
+	return s.GetInHouseAppManifestFunc(ctx, titleID, token)
 }
 
-func (s *Service) GetInHouseAppPackage(ctx context.Context, titleID uint, teamID *uint) (*fleet.DownloadSoftwareInstallerPayload, error) {
+func (s *Service) GetInHouseAppPackage(ctx context.Context, titleID uint, token string) (*fleet.DownloadSoftwareInstallerPayload, error) {
 	s.mu.Lock()
 	s.GetInHouseAppPackageFuncInvoked = true
 	s.mu.Unlock()
-	return s.GetInHouseAppPackageFunc(ctx, titleID, teamID)
+	return s.GetInHouseAppPackageFunc(ctx, titleID, token)
 }
 
-func (s *Service) MDMAppleProcessOTAEnrollment(ctx context.Context, certificates []*x509.Certificate, rootSigner *x509.Certificate, enrollSecret string, idpUUID string, deviceInfo fleet.MDMAppleMachineInfo) ([]byte, error) {
+func (s *Service) MDMAppleProcessOTAEnrollment(ctx context.Context, certificates []*x509.Certificate, rootSigner *x509.Certificate, enrollSecret string, idpUUID string, personal bool, deviceInfo fleet.MDMAppleMachineInfo) ([]byte, error) {
 	s.mu.Lock()
 	s.MDMAppleProcessOTAEnrollmentFuncInvoked = true
 	s.mu.Unlock()
-	return s.MDMAppleProcessOTAEnrollmentFunc(ctx, certificates, rootSigner, enrollSecret, idpUUID, deviceInfo)
+	return s.MDMAppleProcessOTAEnrollmentFunc(ctx, certificates, rootSigner, enrollSecret, idpUUID, personal, deviceInfo)
 }
 
 func (s *Service) ListVulnerabilities(ctx context.Context, opt fleet.VulnListOptions) ([]fleet.VulnerabilityWithMetadata, *fleet.PaginationMetadata, error) {
@@ -3913,11 +4384,11 @@ func (s *Service) NewTeamPolicy(ctx context.Context, teamID uint, p fleet.NewTea
 	return s.NewTeamPolicyFunc(ctx, teamID, p)
 }
 
-func (s *Service) ListTeamPolicies(ctx context.Context, teamID uint, opts fleet.ListOptions, iopts fleet.ListOptions, mergeInherited bool) (teamPolicies []*fleet.Policy, inheritedPolicies []*fleet.Policy, err error) {
+func (s *Service) ListTeamPolicies(ctx context.Context, teamID uint, opts fleet.ListOptions, iopts fleet.ListOptions, mergeInherited bool, automationType fleet.PolicyAutomationType, platform string) (teamPolicies []*fleet.Policy, inheritedPolicies []*fleet.Policy, err error) {
 	s.mu.Lock()
 	s.ListTeamPoliciesFuncInvoked = true
 	s.mu.Unlock()
-	return s.ListTeamPoliciesFunc(ctx, teamID, opts, iopts, mergeInherited)
+	return s.ListTeamPoliciesFunc(ctx, teamID, opts, iopts, mergeInherited, automationType, platform)
 }
 
 func (s *Service) DeleteTeamPolicies(ctx context.Context, teamID uint, ids []uint) ([]uint, error) {
@@ -3934,18 +4405,18 @@ func (s *Service) ModifyTeamPolicy(ctx context.Context, teamID uint, id uint, p 
 	return s.ModifyTeamPolicyFunc(ctx, teamID, id, p)
 }
 
-func (s *Service) GetTeamPolicyByIDQueries(ctx context.Context, teamID uint, policyID uint) (*fleet.Policy, error) {
+func (s *Service) GetTeamPolicyByID(ctx context.Context, teamID uint, policyID uint) (*fleet.Policy, error) {
 	s.mu.Lock()
-	s.GetTeamPolicyByIDQueriesFuncInvoked = true
+	s.GetTeamPolicyByIDFuncInvoked = true
 	s.mu.Unlock()
-	return s.GetTeamPolicyByIDQueriesFunc(ctx, teamID, policyID)
+	return s.GetTeamPolicyByIDFunc(ctx, teamID, policyID)
 }
 
-func (s *Service) CountTeamPolicies(ctx context.Context, teamID uint, matchQuery string, mergeInherited bool) (int, int, error) {
+func (s *Service) CountTeamPolicies(ctx context.Context, teamID uint, matchQuery string, mergeInherited bool, automationType fleet.PolicyAutomationType, platform string) (int, int, error) {
 	s.mu.Lock()
 	s.CountTeamPoliciesFuncInvoked = true
 	s.mu.Unlock()
-	return s.CountTeamPoliciesFunc(ctx, teamID, matchQuery, mergeInherited)
+	return s.CountTeamPoliciesFunc(ctx, teamID, matchQuery, mergeInherited, automationType, platform)
 }
 
 func (s *Service) LookupGeoIP(ctx context.Context, ip string) *fleet.GeoLocation {
@@ -4053,7 +4524,7 @@ func (s *Service) CreateAndroidWebApp(ctx context.Context, title string, startUR
 	return s.CreateAndroidWebAppFunc(ctx, title, startURL, icon)
 }
 
-func (s *Service) BatchAssociateVPPApps(ctx context.Context, teamName string, payloads []fleet.VPPBatchPayload, dryRun bool) ([]fleet.VPPAppResponse, error) {
+func (s *Service) BatchAssociateVPPApps(ctx context.Context, teamName string, payloads []fleet.VPPBatchPayload, dryRun bool) ([]fleet.VPPAppResponse, []string, error) {
 	s.mu.Lock()
 	s.BatchAssociateVPPAppsFuncInvoked = true
 	s.mu.Unlock()
@@ -4067,18 +4538,25 @@ func (s *Service) GetHostDEPAssignment(ctx context.Context, host *fleet.Host) (*
 	return s.GetHostDEPAssignmentFunc(ctx, host)
 }
 
-func (s *Service) NewMDMAppleConfigProfile(ctx context.Context, teamID uint, data []byte, labels []string, labelsMembershipMode fleet.MDMLabelsMode) (*fleet.MDMAppleConfigProfile, error) {
+func (s *Service) GetHostDEPAssignmentDetails(ctx context.Context, hostID uint) (*fleet.HostDEPAssignment, *godep.DeviceDetails, fleet.DEPDeviceErrorType, error) {
+	s.mu.Lock()
+	s.GetHostDEPAssignmentDetailsFuncInvoked = true
+	s.mu.Unlock()
+	return s.GetHostDEPAssignmentDetailsFunc(ctx, hostID)
+}
+
+func (s *Service) NewMDMAppleConfigProfile(ctx context.Context, teamID uint, data []byte, labelsInclude []string, labelsMembershipMode fleet.MDMLabelsMode, labelsExcludeAny []string) (*fleet.MDMAppleConfigProfile, error) {
 	s.mu.Lock()
 	s.NewMDMAppleConfigProfileFuncInvoked = true
 	s.mu.Unlock()
-	return s.NewMDMAppleConfigProfileFunc(ctx, teamID, data, labels, labelsMembershipMode)
+	return s.NewMDMAppleConfigProfileFunc(ctx, teamID, data, labelsInclude, labelsMembershipMode, labelsExcludeAny)
 }
 
-func (s *Service) NewMDMAppleDeclaration(ctx context.Context, teamID uint, data []byte, labels []string, name string, labelsMembershipMode fleet.MDMLabelsMode) (*fleet.MDMAppleDeclaration, error) {
+func (s *Service) NewMDMAppleDeclaration(ctx context.Context, teamID uint, data []byte, labelsInclude []string, name string, labelsMembershipMode fleet.MDMLabelsMode, labelsExcludeAny []string, activation []byte) (*fleet.MDMAppleDeclaration, error) {
 	s.mu.Lock()
 	s.NewMDMAppleDeclarationFuncInvoked = true
 	s.mu.Unlock()
-	return s.NewMDMAppleDeclarationFunc(ctx, teamID, data, labels, name, labelsMembershipMode)
+	return s.NewMDMAppleDeclarationFunc(ctx, teamID, data, labelsInclude, name, labelsMembershipMode, labelsExcludeAny, activation)
 }
 
 func (s *Service) GetMDMAppleConfigProfileByDeprecatedID(ctx context.Context, profileID uint) (*fleet.MDMAppleConfigProfile, error) {
@@ -4144,11 +4622,11 @@ func (s *Service) GetMDMAppleProfilesSummary(ctx context.Context, teamID *uint) 
 	return s.GetMDMAppleProfilesSummaryFunc(ctx, teamID)
 }
 
-func (s *Service) GetMDMAppleEnrollmentProfileByToken(ctx context.Context, enrollmentToken string, enrollmentRef string) (profile []byte, err error) {
+func (s *Service) GetMDMAppleEnrollmentProfileByToken(ctx context.Context, enrollmentToken string, enrollmentRef string, machineInfo *fleet.MDMAppleMachineInfo) (profile []byte, err error) {
 	s.mu.Lock()
 	s.GetMDMAppleEnrollmentProfileByTokenFuncInvoked = true
 	s.mu.Unlock()
-	return s.GetMDMAppleEnrollmentProfileByTokenFunc(ctx, enrollmentToken, enrollmentRef)
+	return s.GetMDMAppleEnrollmentProfileByTokenFunc(ctx, enrollmentToken, enrollmentRef, machineInfo)
 }
 
 func (s *Service) GetMDMAppleAccountEnrollmentProfile(ctx context.Context, enrollReference string) (profile []byte, err error) {
@@ -4277,11 +4755,11 @@ func (s *Service) CountABMTokens(ctx context.Context) (int, error) {
 	return s.CountABMTokensFunc(ctx)
 }
 
-func (s *Service) UpdateABMTokenTeams(ctx context.Context, tokenID uint, macOSTeamID *uint, iOSTeamID *uint, iPadOSTeamID *uint) (*fleet.ABMToken, error) {
+func (s *Service) UpdateABMTokenTeams(ctx context.Context, tokenID uint, macOSTeamID *uint, iOSTeamID *uint, iPadOSTeamID *uint, byodTeamID *uint) (*fleet.ABMToken, error) {
 	s.mu.Lock()
 	s.UpdateABMTokenTeamsFuncInvoked = true
 	s.mu.Unlock()
-	return s.UpdateABMTokenTeamsFunc(ctx, tokenID, macOSTeamID, iOSTeamID, iPadOSTeamID)
+	return s.UpdateABMTokenTeamsFunc(ctx, tokenID, macOSTeamID, iOSTeamID, iPadOSTeamID, byodTeamID)
 }
 
 func (s *Service) DeleteABMToken(ctx context.Context, tokenID uint) error {
@@ -4347,25 +4825,25 @@ func (s *Service) MDMListHostConfigurationProfiles(ctx context.Context, hostID u
 	return s.MDMListHostConfigurationProfilesFunc(ctx, hostID)
 }
 
-func (s *Service) MDMAppleEnableFileVaultAndEscrow(ctx context.Context, teamID *uint) error {
+func (s *Service) MDMAppleReconcileFileVaultProfile(ctx context.Context, teamID *uint) error {
 	s.mu.Lock()
-	s.MDMAppleEnableFileVaultAndEscrowFuncInvoked = true
+	s.MDMAppleReconcileFileVaultProfileFuncInvoked = true
 	s.mu.Unlock()
-	return s.MDMAppleEnableFileVaultAndEscrowFunc(ctx, teamID)
+	return s.MDMAppleReconcileFileVaultProfileFunc(ctx, teamID)
 }
 
-func (s *Service) MDMAppleDisableFileVaultAndEscrow(ctx context.Context, teamID *uint) error {
-	s.mu.Lock()
-	s.MDMAppleDisableFileVaultAndEscrowFuncInvoked = true
-	s.mu.Unlock()
-	return s.MDMAppleDisableFileVaultAndEscrowFunc(ctx, teamID)
-}
-
-func (s *Service) UpdateMDMDiskEncryption(ctx context.Context, teamID *uint, enableDiskEncryption *bool, requireBitLockerPIN *bool) error {
+func (s *Service) UpdateMDMDiskEncryption(ctx context.Context, teamID *uint, payload fleet.MDMDiskEncryptionSettingsPayload) error {
 	s.mu.Lock()
 	s.UpdateMDMDiskEncryptionFuncInvoked = true
 	s.mu.Unlock()
-	return s.UpdateMDMDiskEncryptionFunc(ctx, teamID, enableDiskEncryption, requireBitLockerPIN)
+	return s.UpdateMDMDiskEncryptionFunc(ctx, teamID, payload)
+}
+
+func (s *Service) UpdateMDMHostNameTemplate(ctx context.Context, fleetID *uint, nameTemplate string) error {
+	s.mu.Lock()
+	s.UpdateMDMHostNameTemplateFuncInvoked = true
+	s.mu.Unlock()
+	return s.UpdateMDMHostNameTemplateFunc(ctx, fleetID, nameTemplate)
 }
 
 func (s *Service) VerifyMDMAppleConfigured(ctx context.Context) error {
@@ -4473,6 +4951,13 @@ func (s *Service) GetMDMAppleSetupAssistant(ctx context.Context, teamID *uint) (
 	return s.GetMDMAppleSetupAssistantFunc(ctx, teamID)
 }
 
+func (s *Service) GetDefaultMDMAppleSetupAssistantProfile(ctx context.Context) (profile godep.Profile, updatedAt *time.Time, err error) {
+	s.mu.Lock()
+	s.GetDefaultMDMAppleSetupAssistantProfileFuncInvoked = true
+	s.mu.Unlock()
+	return s.GetDefaultMDMAppleSetupAssistantProfileFunc(ctx)
+}
+
 func (s *Service) DeleteMDMAppleSetupAssistant(ctx context.Context, teamID *uint) error {
 	s.mu.Lock()
 	s.DeleteMDMAppleSetupAssistantFuncInvoked = true
@@ -4501,11 +4986,11 @@ func (s *Service) TriggerMigrateMDMDevice(ctx context.Context, host *fleet.Host)
 	return s.TriggerMigrateMDMDeviceFunc(ctx, host)
 }
 
-func (s *Service) GetMDMManualEnrollmentProfile(ctx context.Context) ([]byte, error) {
+func (s *Service) GetMDMManualEnrollmentProfile(ctx context.Context, personal bool) ([]byte, error) {
 	s.mu.Lock()
 	s.GetMDMManualEnrollmentProfileFuncInvoked = true
 	s.mu.Unlock()
-	return s.GetMDMManualEnrollmentProfileFunc(ctx)
+	return s.GetMDMManualEnrollmentProfileFunc(ctx, personal)
 }
 
 func (s *Service) TriggerLinuxDiskEncryptionEscrow(ctx context.Context, host *fleet.Host) error {
@@ -4522,11 +5007,11 @@ func (s *Service) CheckMDMAppleEnrollmentWithMinimumOSVersion(ctx context.Contex
 	return s.CheckMDMAppleEnrollmentWithMinimumOSVersionFunc(ctx, m)
 }
 
-func (s *Service) GetOTAProfile(ctx context.Context, enrollSecret string, idpUUID string) ([]byte, error) {
+func (s *Service) GetOTAProfile(ctx context.Context, enrollSecret string, idpUUID string, personal bool) ([]byte, error) {
 	s.mu.Lock()
 	s.GetOTAProfileFuncInvoked = true
 	s.mu.Unlock()
-	return s.GetOTAProfileFunc(ctx, enrollSecret, idpUUID)
+	return s.GetOTAProfileFunc(ctx, enrollSecret, idpUUID, personal)
 }
 
 func (s *Service) TriggerCronSchedule(ctx context.Context, name string) error {
@@ -4555,13 +5040,6 @@ func (s *Service) GetMDMMicrosoftDiscoveryResponse(ctx context.Context, upnEmail
 	s.GetMDMMicrosoftDiscoveryResponseFuncInvoked = true
 	s.mu.Unlock()
 	return s.GetMDMMicrosoftDiscoveryResponseFunc(ctx, upnEmail)
-}
-
-func (s *Service) GetMDMMicrosoftSTSAuthResponse(ctx context.Context, appru string, loginHint string) (string, error) {
-	s.mu.Lock()
-	s.GetMDMMicrosoftSTSAuthResponseFuncInvoked = true
-	s.mu.Unlock()
-	return s.GetMDMMicrosoftSTSAuthResponseFunc(ctx, appru, loginHint)
 }
 
 func (s *Service) GetMDMWindowsPolicyResponse(ctx context.Context, authToken *fleet.HeaderBinarySecurityToken) (*fleet.GetPoliciesResponse, error) {
@@ -4634,6 +5112,13 @@ func (s *Service) SetOrUpdateDiskEncryptionKey(ctx context.Context, encryptionKe
 	return s.SetOrUpdateDiskEncryptionKeyFunc(ctx, encryptionKey, clientError)
 }
 
+func (s *Service) SetOrUpdateDiskEncryptionProtection(ctx context.Context, outcome fleet.DiskEncryptionProtectionOutcome, clientError string) error {
+	s.mu.Lock()
+	s.SetOrUpdateDiskEncryptionProtectionFuncInvoked = true
+	s.mu.Unlock()
+	return s.SetOrUpdateDiskEncryptionProtectionFunc(ctx, outcome, clientError)
+}
+
 func (s *Service) GetMDMWindowsConfigProfile(ctx context.Context, profileUUID string) (*fleet.MDMWindowsConfigProfile, error) {
 	s.mu.Lock()
 	s.GetMDMWindowsConfigProfileFuncInvoked = true
@@ -4655,11 +5140,11 @@ func (s *Service) GetMDMWindowsProfilesSummary(ctx context.Context, teamID *uint
 	return s.GetMDMWindowsProfilesSummaryFunc(ctx, teamID)
 }
 
-func (s *Service) NewMDMWindowsConfigProfile(ctx context.Context, teamID uint, profileName string, data []byte, labels []string, labelsMembershipMode fleet.MDMLabelsMode) (*fleet.MDMWindowsConfigProfile, error) {
+func (s *Service) NewMDMWindowsConfigProfile(ctx context.Context, teamID uint, profileName string, data []byte, labelsInclude []string, labelsMembershipMode fleet.MDMLabelsMode, labelsExcludeAny []string) (*fleet.MDMWindowsConfigProfile, error) {
 	s.mu.Lock()
 	s.NewMDMWindowsConfigProfileFuncInvoked = true
 	s.mu.Unlock()
-	return s.NewMDMWindowsConfigProfileFunc(ctx, teamID, profileName, data, labels, labelsMembershipMode)
+	return s.NewMDMWindowsConfigProfileFunc(ctx, teamID, profileName, data, labelsInclude, labelsMembershipMode, labelsExcludeAny)
 }
 
 func (s *Service) NewMDMUnsupportedConfigProfile(ctx context.Context, teamID uint, filename string) error {
@@ -4669,11 +5154,25 @@ func (s *Service) NewMDMUnsupportedConfigProfile(ctx context.Context, teamID uin
 	return s.NewMDMUnsupportedConfigProfileFunc(ctx, teamID, filename)
 }
 
+func (s *Service) NewMDMActivationUnsupportedProfile(ctx context.Context, teamID uint) error {
+	s.mu.Lock()
+	s.NewMDMActivationUnsupportedProfileFuncInvoked = true
+	s.mu.Unlock()
+	return s.NewMDMActivationUnsupportedProfileFunc(ctx, teamID)
+}
+
 func (s *Service) NewMDMInvalidJSONConfigProfile(ctx context.Context, teamID uint, err error) error {
 	s.mu.Lock()
 	s.NewMDMInvalidJSONConfigProfileFuncInvoked = true
 	s.mu.Unlock()
 	return s.NewMDMInvalidJSONConfigProfileFunc(ctx, teamID, err)
+}
+
+func (s *Service) UpdateMDMConfigProfile(ctx context.Context, profileUUID string, profileName string, profile []byte, labelsInclude []string, labelsMembershipMode fleet.MDMLabelsMode, labelsExcludeAny []string, activation optjson.Slice[byte]) error {
+	s.mu.Lock()
+	s.UpdateMDMConfigProfileFuncInvoked = true
+	s.mu.Unlock()
+	return s.UpdateMDMConfigProfileFunc(ctx, profileUUID, profileName, profile, labelsInclude, labelsMembershipMode, labelsExcludeAny, activation)
 }
 
 func (s *Service) ListMDMConfigProfiles(ctx context.Context, teamID *uint, opt fleet.ListOptions) ([]*fleet.MDMConfigProfilePayload, *fleet.PaginationMetadata, error) {
@@ -4704,11 +5203,11 @@ func (s *Service) GetMDMLinuxProfilesSummary(ctx context.Context, teamId *uint) 
 	return s.GetMDMLinuxProfilesSummaryFunc(ctx, teamId)
 }
 
-func (s *Service) NewMDMAndroidConfigProfile(ctx context.Context, teamID uint, profileName string, data []byte, labels []string, labelsMembershipMode fleet.MDMLabelsMode) (*fleet.MDMAndroidConfigProfile, error) {
+func (s *Service) NewMDMAndroidConfigProfile(ctx context.Context, teamID uint, profileName string, data []byte, labelsInclude []string, labelsMembershipMode fleet.MDMLabelsMode, labelsExcludeAny []string) (*fleet.MDMAndroidConfigProfile, error) {
 	s.mu.Lock()
 	s.NewMDMAndroidConfigProfileFuncInvoked = true
 	s.mu.Unlock()
-	return s.NewMDMAndroidConfigProfileFunc(ctx, teamID, profileName, data, labels, labelsMembershipMode)
+	return s.NewMDMAndroidConfigProfileFunc(ctx, teamID, profileName, data, labelsInclude, labelsMembershipMode, labelsExcludeAny)
 }
 
 func (s *Service) DeleteMDMAndroidConfigProfile(ctx context.Context, profileUUID string) error {
@@ -4744,6 +5243,13 @@ func (s *Service) ResendHostMDMProfile(ctx context.Context, hostID uint, profile
 	s.ResendHostMDMProfileFuncInvoked = true
 	s.mu.Unlock()
 	return s.ResendHostMDMProfileFunc(ctx, hostID, profileUUID)
+}
+
+func (s *Service) ResendHostNameTemplate(ctx context.Context, hostID uint) error {
+	s.mu.Lock()
+	s.ResendHostNameTemplateFuncInvoked = true
+	s.mu.Unlock()
+	return s.ResendHostNameTemplateFunc(ctx, hostID)
 }
 
 func (s *Service) ResendDeviceHostMDMProfile(ctx context.Context, host *fleet.Host, profileUUID string) error {
@@ -4921,6 +5427,41 @@ func (s *Service) WipeHost(ctx context.Context, hostID uint, metadata *fleet.MDM
 	return s.WipeHostFunc(ctx, hostID, metadata)
 }
 
+func (s *Service) ClearPasscode(ctx context.Context, hostID uint) (*fleet.CommandEnqueueResult, error) {
+	s.mu.Lock()
+	s.ClearPasscodeFuncInvoked = true
+	s.mu.Unlock()
+	return s.ClearPasscodeFunc(ctx, hostID)
+}
+
+func (s *Service) CancelHostMDMCommand(ctx context.Context, hostID uint, commandUUID string) error {
+	s.mu.Lock()
+	s.CancelHostMDMCommandFuncInvoked = true
+	s.mu.Unlock()
+	return s.CancelHostMDMCommandFunc(ctx, hostID, commandUUID)
+}
+
+func (s *Service) RotateRecoveryLockPassword(ctx context.Context, hostID uint) error {
+	s.mu.Lock()
+	s.RotateRecoveryLockPasswordFuncInvoked = true
+	s.mu.Unlock()
+	return s.RotateRecoveryLockPasswordFunc(ctx, hostID)
+}
+
+func (s *Service) GetHostManagedAccountPassword(ctx context.Context, hostID uint) (*fleet.HostManagedLocalAccountPassword, error) {
+	s.mu.Lock()
+	s.GetHostManagedAccountPasswordFuncInvoked = true
+	s.mu.Unlock()
+	return s.GetHostManagedAccountPasswordFunc(ctx, hostID)
+}
+
+func (s *Service) RotateManagedLocalAccountPassword(ctx context.Context, hostID uint) error {
+	s.mu.Lock()
+	s.RotateManagedLocalAccountPasswordFuncInvoked = true
+	s.mu.Unlock()
+	return s.RotateManagedLocalAccountPasswordFunc(ctx, hostID)
+}
+
 func (s *Service) UploadSoftwareInstaller(ctx context.Context, payload *fleet.UploadSoftwareInstallerPayload) (*fleet.SoftwareInstaller, error) {
 	s.mu.Lock()
 	s.UploadSoftwareInstallerFuncInvoked = true
@@ -4935,18 +5476,18 @@ func (s *Service) UpdateSoftwareInstaller(ctx context.Context, payload *fleet.Up
 	return s.UpdateSoftwareInstallerFunc(ctx, payload)
 }
 
-func (s *Service) DeleteSoftwareInstaller(ctx context.Context, titleID uint, teamID *uint) error {
+func (s *Service) DeleteSoftwareInstaller(ctx context.Context, titleID uint, teamID *uint, installerID *uint) error {
 	s.mu.Lock()
 	s.DeleteSoftwareInstallerFuncInvoked = true
 	s.mu.Unlock()
-	return s.DeleteSoftwareInstallerFunc(ctx, titleID, teamID)
+	return s.DeleteSoftwareInstallerFunc(ctx, titleID, teamID, installerID)
 }
 
-func (s *Service) GenerateSoftwareInstallerToken(ctx context.Context, alt string, titleID uint, teamID *uint) (string, error) {
+func (s *Service) GenerateSoftwareInstallerToken(ctx context.Context, alt string, titleID uint, teamID *uint, installerID *uint) (string, error) {
 	s.mu.Lock()
 	s.GenerateSoftwareInstallerTokenFuncInvoked = true
 	s.mu.Unlock()
-	return s.GenerateSoftwareInstallerTokenFunc(ctx, alt, titleID, teamID)
+	return s.GenerateSoftwareInstallerTokenFunc(ctx, alt, titleID, teamID, installerID)
 }
 
 func (s *Service) GetSoftwareInstallerTokenMetadata(ctx context.Context, token string, titleID uint) (*fleet.SoftwareInstallerTokenMetadata, error) {
@@ -4963,11 +5504,11 @@ func (s *Service) GetSoftwareInstallerMetadata(ctx context.Context, skipAuthz bo
 	return s.GetSoftwareInstallerMetadataFunc(ctx, skipAuthz, titleID, teamID)
 }
 
-func (s *Service) DownloadSoftwareInstaller(ctx context.Context, skipAuthz bool, alt string, titleID uint, teamID *uint) (*fleet.DownloadSoftwareInstallerPayload, error) {
+func (s *Service) DownloadSoftwareInstaller(ctx context.Context, skipAuthz bool, alt string, titleID uint, teamID *uint, installerID *uint) (*fleet.DownloadSoftwareInstallerPayload, error) {
 	s.mu.Lock()
 	s.DownloadSoftwareInstallerFuncInvoked = true
 	s.mu.Unlock()
-	return s.DownloadSoftwareInstallerFunc(ctx, skipAuthz, alt, titleID, teamID)
+	return s.DownloadSoftwareInstallerFunc(ctx, skipAuthz, alt, titleID, teamID, installerID)
 }
 
 func (s *Service) OrbitDownloadSoftwareInstaller(ctx context.Context, installerID uint) (*fleet.DownloadSoftwareInstallerPayload, error) {
@@ -4996,6 +5537,62 @@ func (s *Service) DeleteSoftwareTitleIcon(ctx context.Context, teamID uint, titl
 	s.DeleteSoftwareTitleIconFuncInvoked = true
 	s.mu.Unlock()
 	return s.DeleteSoftwareTitleIconFunc(ctx, teamID, titleID)
+}
+
+func (s *Service) ListSoftwareCategories(ctx context.Context, teamID *uint) ([]fleet.SoftwareCategory, error) {
+	s.mu.Lock()
+	s.ListSoftwareCategoriesFuncInvoked = true
+	s.mu.Unlock()
+	return s.ListSoftwareCategoriesFunc(ctx, teamID)
+}
+
+func (s *Service) ListSelfServiceSoftwareCategoriesForHost(ctx context.Context, host *fleet.Host) ([]fleet.SoftwareCategory, error) {
+	s.mu.Lock()
+	s.ListSelfServiceSoftwareCategoriesForHostFuncInvoked = true
+	s.mu.Unlock()
+	return s.ListSelfServiceSoftwareCategoriesForHostFunc(ctx, host)
+}
+
+func (s *Service) NewSoftwareCategory(ctx context.Context, teamID *uint, name string) (*fleet.SoftwareCategory, error) {
+	s.mu.Lock()
+	s.NewSoftwareCategoryFuncInvoked = true
+	s.mu.Unlock()
+	return s.NewSoftwareCategoryFunc(ctx, teamID, name)
+}
+
+func (s *Service) UpdateSoftwareCategory(ctx context.Context, id uint, name string) (*fleet.SoftwareCategory, error) {
+	s.mu.Lock()
+	s.UpdateSoftwareCategoryFuncInvoked = true
+	s.mu.Unlock()
+	return s.UpdateSoftwareCategoryFunc(ctx, id, name)
+}
+
+func (s *Service) DeleteSoftwareCategory(ctx context.Context, id uint) error {
+	s.mu.Lock()
+	s.DeleteSoftwareCategoryFuncInvoked = true
+	s.mu.Unlock()
+	return s.DeleteSoftwareCategoryFunc(ctx, id)
+}
+
+func (s *Service) UploadOrgLogo(ctx context.Context, mode fleet.OrgLogoMode, content io.ReadSeeker) error {
+	s.mu.Lock()
+	s.UploadOrgLogoFuncInvoked = true
+	s.mu.Unlock()
+	return s.UploadOrgLogoFunc(ctx, mode, content)
+}
+
+func (s *Service) DeleteOrgLogo(ctx context.Context, mode fleet.OrgLogoMode) error {
+	s.mu.Lock()
+	s.DeleteOrgLogoFuncInvoked = true
+	s.mu.Unlock()
+	return s.DeleteOrgLogoFunc(ctx, mode)
+}
+
+func (s *Service) GetOrgLogo(ctx context.Context, mode fleet.OrgLogoMode) ([]byte, int64, error) {
+	s.mu.Lock()
+	s.GetOrgLogoFuncInvoked = true
+	s.mu.Unlock()
+	return s.GetOrgLogoFunc(ctx, mode)
 }
 
 func (s *Service) SetSetupExperienceSoftware(ctx context.Context, platform string, teamID uint, titleIDs []uint) error {
@@ -5075,14 +5672,14 @@ func (s *Service) IsAllSetupExperienceSoftwareRequired(ctx context.Context, host
 	return s.IsAllSetupExperienceSoftwareRequiredFunc(ctx, host)
 }
 
-func (s *Service) AddFleetMaintainedApp(ctx context.Context, teamID *uint, appID uint, installScript string, preInstallQuery string, postInstallScript string, uninstallScript string, selfService bool, automaticInstall bool, labelsIncludeAny []string, labelsExcludeAny []string) (uint, error) {
+func (s *Service) AddFleetMaintainedApp(ctx context.Context, teamID *uint, appID uint, installScript string, preInstallQuery string, postInstallScript string, uninstallScript string, selfService bool, automaticInstall bool, labelsIncludeAny []string, labelsExcludeAny []string, labelsIncludeAll []string) (uint, error) {
 	s.mu.Lock()
 	s.AddFleetMaintainedAppFuncInvoked = true
 	s.mu.Unlock()
-	return s.AddFleetMaintainedAppFunc(ctx, teamID, appID, installScript, preInstallQuery, postInstallScript, uninstallScript, selfService, automaticInstall, labelsIncludeAny, labelsExcludeAny)
+	return s.AddFleetMaintainedAppFunc(ctx, teamID, appID, installScript, preInstallQuery, postInstallScript, uninstallScript, selfService, automaticInstall, labelsIncludeAny, labelsExcludeAny, labelsIncludeAll)
 }
 
-func (s *Service) ListFleetMaintainedApps(ctx context.Context, teamID *uint, opts fleet.ListOptions) ([]fleet.MaintainedApp, *fleet.PaginationMetadata, error) {
+func (s *Service) ListFleetMaintainedApps(ctx context.Context, teamID *uint, opts fleet.MaintainedAppListOptions) ([]fleet.MaintainedApp, *fleet.PaginationMetadata, error) {
 	s.mu.Lock()
 	s.ListFleetMaintainedAppsFuncInvoked = true
 	s.mu.Unlock()
@@ -5129,6 +5726,55 @@ func (s *Service) DeleteSecretVariable(ctx context.Context, id uint) error {
 	s.DeleteSecretVariableFuncInvoked = true
 	s.mu.Unlock()
 	return s.DeleteSecretVariableFunc(ctx, id)
+}
+
+func (s *Service) ListCustomHostVitals(ctx context.Context, opts fleet.ListOptions) (customHostVitals []fleet.CustomHostVital, meta *fleet.PaginationMetadata, count int, err error) {
+	s.mu.Lock()
+	s.ListCustomHostVitalsFuncInvoked = true
+	s.mu.Unlock()
+	return s.ListCustomHostVitalsFunc(ctx, opts)
+}
+
+func (s *Service) CreateCustomHostVital(ctx context.Context, name string) (*fleet.CustomHostVital, error) {
+	s.mu.Lock()
+	s.CreateCustomHostVitalFuncInvoked = true
+	s.mu.Unlock()
+	return s.CreateCustomHostVitalFunc(ctx, name)
+}
+
+func (s *Service) UpdateCustomHostVital(ctx context.Context, id uint, name string) (*fleet.CustomHostVital, error) {
+	s.mu.Lock()
+	s.UpdateCustomHostVitalFuncInvoked = true
+	s.mu.Unlock()
+	return s.UpdateCustomHostVitalFunc(ctx, id, name)
+}
+
+func (s *Service) DeleteCustomHostVital(ctx context.Context, id uint) error {
+	s.mu.Lock()
+	s.DeleteCustomHostVitalFuncInvoked = true
+	s.mu.Unlock()
+	return s.DeleteCustomHostVitalFunc(ctx, id)
+}
+
+func (s *Service) SetHostCustomHostVitalValue(ctx context.Context, hostID uint, vitalID uint, value string) error {
+	s.mu.Lock()
+	s.SetHostCustomHostVitalValueFuncInvoked = true
+	s.mu.Unlock()
+	return s.SetHostCustomHostVitalValueFunc(ctx, hostID, vitalID, value)
+}
+
+func (s *Service) UpsertCustomHostVitals(ctx context.Context, customHostVitals []fleet.CustomHostVital, dryRun bool) error {
+	s.mu.Lock()
+	s.UpsertCustomHostVitalsFuncInvoked = true
+	s.mu.Unlock()
+	return s.UpsertCustomHostVitalsFunc(ctx, customHostVitals, dryRun)
+}
+
+func (s *Service) ListAPIEndpoints(ctx context.Context) (endpoints []fleet.APIEndpoint, err error) {
+	s.mu.Lock()
+	s.ListAPIEndpointsFuncInvoked = true
+	s.mu.Unlock()
+	return s.ListAPIEndpointsFunc(ctx)
 }
 
 func (s *Service) ScimDetails(ctx context.Context) (fleet.ScimDetails, error) {
@@ -5222,11 +5868,11 @@ func (s *Service) RequestCertificate(ctx context.Context, p fleet.RequestCertifi
 	return s.RequestCertificateFunc(ctx, p)
 }
 
-func (s *Service) BatchApplyCertificateAuthorities(ctx context.Context, groupedCAs fleet.GroupedCertificateAuthorities, dryRun bool, viaGitOps bool) error {
+func (s *Service) BatchApplyCertificateAuthorities(ctx context.Context, groupedCAs fleet.GroupedCertificateAuthorities, opts fleet.BatchApplyCertificateAuthoritiesOpts) error {
 	s.mu.Lock()
 	s.BatchApplyCertificateAuthoritiesFuncInvoked = true
 	s.mu.Unlock()
-	return s.BatchApplyCertificateAuthoritiesFunc(ctx, groupedCAs, dryRun, viaGitOps)
+	return s.BatchApplyCertificateAuthoritiesFunc(ctx, groupedCAs, opts)
 }
 
 func (s *Service) GetGroupedCertificateAuthorities(ctx context.Context, includeSecrets bool) (*fleet.GroupedCertificateAuthorities, error) {
@@ -5241,4 +5887,116 @@ func (s *Service) UnenrollMDM(ctx context.Context, hostID uint) error {
 	s.UnenrollMDMFuncInvoked = true
 	s.mu.Unlock()
 	return s.UnenrollMDMFunc(ctx, hostID)
+}
+
+func (s *Service) PSSONonce(ctx context.Context) (string, error) {
+	s.mu.Lock()
+	s.PSSONonceFuncInvoked = true
+	s.mu.Unlock()
+	return s.PSSONonceFunc(ctx)
+}
+
+func (s *Service) PSSORegisterDevice(ctx context.Context, req fleet.PSSODeviceRegistrationRequest) error {
+	s.mu.Lock()
+	s.PSSORegisterDeviceFuncInvoked = true
+	s.mu.Unlock()
+	return s.PSSORegisterDeviceFunc(ctx, req)
+}
+
+func (s *Service) PSSOToken(ctx context.Context, jwtBytes []byte) ([]byte, error) {
+	s.mu.Lock()
+	s.PSSOTokenFuncInvoked = true
+	s.mu.Unlock()
+	return s.PSSOTokenFunc(ctx, jwtBytes)
+}
+
+func (s *Service) PSSOJWKS(ctx context.Context) ([]byte, error) {
+	s.mu.Lock()
+	s.PSSOJWKSFuncInvoked = true
+	s.mu.Unlock()
+	return s.PSSOJWKSFunc(ctx)
+}
+
+func (s *Service) PSSOAASA(ctx context.Context) ([]byte, error) {
+	s.mu.Lock()
+	s.PSSOAASAFuncInvoked = true
+	s.mu.Unlock()
+	return s.PSSOAASAFunc(ctx)
+}
+
+func (s *Service) ListAppleDDMAssets(ctx context.Context, teamID *uint) ([]*fleet.DDMAsset, error) {
+	s.mu.Lock()
+	s.ListAppleDDMAssetsFuncInvoked = true
+	s.mu.Unlock()
+	return s.ListAppleDDMAssetsFunc(ctx, teamID)
+}
+
+func (s *Service) GetAppleDDMAsset(ctx context.Context, assetUUID string) (*fleet.DDMAsset, error) {
+	s.mu.Lock()
+	s.GetAppleDDMAssetFuncInvoked = true
+	s.mu.Unlock()
+	return s.GetAppleDDMAssetFunc(ctx, assetUUID)
+}
+
+func (s *Service) DownloadAppleDDMAsset(ctx context.Context, assetUUID string) (filename string, data []byte, err error) {
+	s.mu.Lock()
+	s.DownloadAppleDDMAssetFuncInvoked = true
+	s.mu.Unlock()
+	return s.DownloadAppleDDMAssetFunc(ctx, assetUUID)
+}
+
+func (s *Service) CreateAppleDDMAsset(ctx context.Context, teamID *uint, name string, data []byte) (string, error) {
+	s.mu.Lock()
+	s.CreateAppleDDMAssetFuncInvoked = true
+	s.mu.Unlock()
+	return s.CreateAppleDDMAssetFunc(ctx, teamID, name, data)
+}
+
+func (s *Service) DeleteAppleDDMAsset(ctx context.Context, assetUUID string) error {
+	s.mu.Lock()
+	s.DeleteAppleDDMAssetFuncInvoked = true
+	s.mu.Unlock()
+	return s.DeleteAppleDDMAssetFunc(ctx, assetUUID)
+}
+
+func (s *Service) BatchSetAppleDDMAssets(ctx context.Context, teamID *uint, teamName string, assets []fleet.MDMAppleDDMAssetBatchPayload, dryRun bool) error {
+	s.mu.Lock()
+	s.BatchSetAppleDDMAssetsFuncInvoked = true
+	s.mu.Unlock()
+	return s.BatchSetAppleDDMAssetsFunc(ctx, teamID, teamName, assets, dryRun)
+}
+
+func (s *Service) ReleaseABDevices(ctx context.Context, hostIDs []uint) ([]*fleet.ABReleaseDeviceResponse, error) {
+	s.mu.Lock()
+	s.ReleaseABDevicesFuncInvoked = true
+	s.mu.Unlock()
+	return s.ReleaseABDevicesFunc(ctx, hostIDs)
+}
+
+func (s *Service) ListMicrosoftGraphCredentials(ctx context.Context) ([]*fleet.MicrosoftGraphCredentialMetadata, error) {
+	s.mu.Lock()
+	s.ListMicrosoftGraphCredentialsFuncInvoked = true
+	s.mu.Unlock()
+	return s.ListMicrosoftGraphCredentialsFunc(ctx)
+}
+
+func (s *Service) ApplyMicrosoftGraphCredentials(ctx context.Context, creds []fleet.MicrosoftGraphCredential, dryRun bool) error {
+	s.mu.Lock()
+	s.ApplyMicrosoftGraphCredentialsFuncInvoked = true
+	s.mu.Unlock()
+	return s.ApplyMicrosoftGraphCredentialsFunc(ctx, creds, dryRun)
+}
+
+func (s *Service) SendAPNSPing(ctx context.Context, hostID uint) error {
+	s.mu.Lock()
+	s.SendAPNSPingFuncInvoked = true
+	s.mu.Unlock()
+	return s.SendAPNSPingFunc(ctx, hostID)
+}
+
+func (s *Service) DeviceSendAPNSPing(ctx context.Context, host *fleet.Host) error {
+	s.mu.Lock()
+	s.DeviceSendAPNSPingFuncInvoked = true
+	s.mu.Unlock()
+	return s.DeviceSendAPNSPingFunc(ctx, host)
 }

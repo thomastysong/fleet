@@ -7,7 +7,7 @@ import React, {
   useEffect,
 } from "react";
 import { InjectedRouter } from "react-router";
-import { useQuery } from "react-query";
+import { useQuery, useQueryClient } from "react-query";
 import { AxiosError } from "axios";
 
 import hostAPI, {
@@ -19,7 +19,6 @@ import {
   IHostSoftware,
   IVPPHostSoftware,
   ISoftware,
-  NO_VERSION_OR_HOST_DATA_SOURCES,
 } from "interfaces/software";
 import { HostPlatform, isIPadOrIPhone, isAndroid } from "interfaces/platform";
 
@@ -27,14 +26,12 @@ import { DEFAULT_USE_QUERY_OPTIONS } from "utilities/constants";
 import permissions from "utilities/permissions";
 import { getPathWithQueryParams } from "utilities/url";
 
-import { NotificationContext } from "context/notification";
 import { AppContext } from "context/app";
 
+import { notify } from "components/ToastNotification";
 import CardHeader from "components/CardHeader";
 import DataError from "components/DataError";
 import Spinner from "components/Spinner";
-import Button from "components/buttons/Button";
-import Icon from "components/Icon";
 import SoftwareInstallDetailsModal from "components/ActivityDetails/InstallDetails/SoftwareInstallDetailsModal";
 import SoftwareIpaInstallDetailsModal from "components/ActivityDetails/InstallDetails/SoftwareIpaInstallDetailsModal";
 import SoftwareScriptDetailsModal from "components/ActivityDetails/InstallDetails/SoftwareScriptDetailsModal";
@@ -132,15 +129,14 @@ const HostSoftwareLibrary = ({
   refetchHostDetails,
   isHostDetailsPolling,
 }: IHostSoftwareLibraryProps) => {
-  const { renderFlash } = useContext(NotificationContext);
   const {
     isGlobalAdmin,
     isGlobalMaintainer,
-    isTeamAdmin,
-    isTeamMaintainer,
     isGlobalTechnician,
     currentUser,
   } = useContext(AppContext);
+
+  const queryClient = useQueryClient();
 
   const isUnsupported = isAndroid(platform); // no Android software
   const isWindowsHost = platform === "windows";
@@ -297,11 +293,11 @@ const HostSoftwareLibrary = ({
           setHostSoftwareLibraryRes(response);
         }
       },
-      onError: () => {
+      onError: (error) => {
         pendingSoftwareSetRef.current = new Set();
-        renderFlash(
-          "error",
-          "We're having trouble checking pending installs. Please refresh the page."
+        notify.error(
+          "We're having trouble checking pending installs. Please refresh the page.",
+          { response: error }
         );
       },
     }
@@ -463,17 +459,26 @@ const HostSoftwareLibrary = ({
     isHostOnline,
   ]);
 
+  const isHostTeamAdmin = permissions.isTeamAdmin(currentUser, hostTeamId);
+  const isHostTeamMaintainer = permissions.isTeamMaintainer(
+    currentUser,
+    hostTeamId
+  );
+
   const hasSWWriteRole = Boolean(
     isGlobalAdmin ||
       isGlobalMaintainer ||
-      isTeamAdmin ||
-      isTeamMaintainer ||
+      isHostTeamAdmin ||
+      isHostTeamMaintainer ||
       isGlobalTechnician ||
       permissions.isTeamTechnician(currentUser, hostTeamId)
   );
 
   const canAddSoftware =
-    (isGlobalAdmin || isGlobalMaintainer || isTeamAdmin || isTeamMaintainer) &&
+    (isGlobalAdmin ||
+      isGlobalMaintainer ||
+      isHostTeamAdmin ||
+      isHostTeamMaintainer) &&
     !isAndroidHost;
 
   // 4.77 Currently Android apps can only be installed via self-service by end user
@@ -488,12 +493,15 @@ const HostSoftwareLibrary = ({
   }, []);
 
   const onClickInstallAction = useCallback(
-    async (softwareId: number, isScriptPackage = false) => {
+    async (softwareId: number, isScriptPackage = false): Promise<boolean> => {
       try {
         await hostAPI.installHostSoftwarePackage(id as number, softwareId);
         if (isMountedRef.current) {
           onInstallOrUninstall();
         }
+        queryClient.invalidateQueries({
+          queryKey: [{ scope: "upcoming-activities" }],
+        });
 
         const message = () => {
           switch (true) {
@@ -508,28 +516,31 @@ const HostSoftwareLibrary = ({
           }
         };
 
-        renderFlash(
-          "success",
+        notify.success(
           <>
             {message()} To see details, go to <b>Details &gt; Activity</b>.
           </>
         );
+        return true;
       } catch (e) {
-        renderFlash("error", getInstallErrorMessage(e));
+        notify.error(getInstallErrorMessage(e), { response: e });
+        return false;
       }
     },
-    [id, renderFlash, onInstallOrUninstall, isHostOnline]
+    [id, onInstallOrUninstall, isHostOnline, queryClient]
   );
 
   const onClickUninstallAction = useCallback(
-    async (softwareId: number) => {
+    async (softwareId: number): Promise<boolean> => {
       try {
         await hostAPI.uninstallHostSoftwarePackage(id as number, softwareId);
         if (isMountedRef.current) {
           onInstallOrUninstall();
         }
-        renderFlash(
-          "success",
+        queryClient.invalidateQueries({
+          queryKey: [{ scope: "upcoming-activities" }],
+        });
+        notify.success(
           <>
             Software{" "}
             {isHostOnline
@@ -538,11 +549,13 @@ const HostSoftwareLibrary = ({
             . To see details, go to <b>Details &gt; Activity</b>.
           </>
         );
+        return true;
       } catch (e) {
-        renderFlash("error", getUninstallErrorMessage(e));
+        notify.error(getUninstallErrorMessage(e), { response: e });
+        return false;
       }
     },
-    [id, renderFlash, onInstallOrUninstall, isHostOnline]
+    [id, onInstallOrUninstall, isHostOnline, queryClient]
   );
 
   const tableConfig = useMemo(() => {
@@ -613,6 +626,8 @@ const HostSoftwareLibrary = ({
         pagePath={pathname}
         selfService={queryParams.self_service}
         teamId={queryParams.fleet_id}
+        canAddSoftware={canAddSoftware}
+        onAddSoftware={onAddSoftware}
       />
     );
   };
@@ -621,12 +636,6 @@ const HostSoftwareLibrary = ({
     <div className={baseClass}>
       <div className={`${baseClass}__header`}>
         <CardHeader subheader="Software available to be installed on this host" />
-        {canAddSoftware && (
-          <Button variant="inverse" onClick={onAddSoftware}>
-            <Icon name="plus" />
-            <span>Add software</span>
-          </Button>
-        )}
       </div>
       {renderHostSoftware()}
       {selectedSoftwareUpdates && (

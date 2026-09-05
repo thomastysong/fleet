@@ -4,10 +4,11 @@ import PATHS from "router/paths";
 import { ISideNavItem } from "pages/admin/components/SideNav/SideNav";
 
 import DiskEncryption from "./cards/DiskEncryption";
-import CustomSettings from "./cards/CustomSettings";
+import ConfigurationProfiles from "./cards/ConfigurationProfiles";
 import Certificates from "./cards/Certificates";
 import Passwords from "./cards/Passwords";
-import { ICustomSettingsProps } from "./cards/CustomSettings/CustomSettings";
+import HostNameTemplate from "./cards/HostNameTemplate";
+import { IConfigurationProfilesProps } from "./cards/ConfigurationProfiles/ConfigurationProfiles";
 import { IDiskEncryptionProps } from "./cards/DiskEncryption/DiskEncryption";
 
 export interface IOSSettingsCommonProps {
@@ -16,9 +17,12 @@ export interface IOSSettingsCommonProps {
   /** handler that fires when a change occures on the section (e.g. disk encryption
    * enabled, profile uploaded) */
   onMutation: () => void;
+  /** Platform sub-route segment (`os-settings/:section/:platform`); only the
+   * disk encryption card has platform tabs. */
+  urlPlatformParam?: string;
 }
 
-type IOSSettingsCardProps = IDiskEncryptionProps | ICustomSettingsProps;
+type IOSSettingsCardProps = IDiskEncryptionProps | IConfigurationProfilesProps;
 
 // Observers and observers+ will not have access to the Controls page at all, so the only role to
 // exclude at this point is technician
@@ -33,10 +37,10 @@ const getOSSettingsNavItems = (
       Card: DiskEncryption,
     },
     {
-      title: "Custom settings",
-      urlSection: "custom-settings",
+      title: "Configuration profiles",
+      urlSection: "configuration-profiles",
       path: PATHS.CONTROLS_CUSTOM_SETTINGS,
-      Card: CustomSettings,
+      Card: ConfigurationProfiles,
     },
     {
       title: "Certificates",
@@ -50,6 +54,13 @@ const getOSSettingsNavItems = (
       Card: Passwords,
       urlSection: "passwords",
       path: PATHS.CONTROLS_PASSWORDS,
+      exclude: isTechnician,
+    },
+    {
+      title: "Host names",
+      Card: HostNameTemplate,
+      urlSection: "host-name-template",
+      path: PATHS.CONTROLS_HOST_NAME_TEMPLATE,
       exclude: isTechnician,
     },
   ];

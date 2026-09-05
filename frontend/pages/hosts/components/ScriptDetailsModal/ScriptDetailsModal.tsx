@@ -10,15 +10,14 @@ import { useQuery } from "react-query";
 import FileSaver from "file-saver";
 
 import { AppContext } from "context/app";
-import { NotificationContext } from "context/notification";
 import scriptAPI from "services/entities/scripts";
 import { IHostScript } from "interfaces/script";
 
+import { notify } from "components/ToastNotification";
 import Modal from "components/Modal";
 import ModalFooter from "components/ModalFooter";
 import Button from "components/buttons/Button";
 import Spinner from "components/Spinner";
-import Icon from "components/Icon";
 import Textarea from "components/Textarea";
 import DataError from "components/DataError";
 import ActionsDropdown from "components/ActionsDropdown";
@@ -104,8 +103,6 @@ const ScriptDetailsModal = ({
     isAnyTeamMaintainer
   );
 
-  const { renderFlash } = useContext(NotificationContext);
-
   // handle multiple possibilities for `selectedScriptDetails`
   let scriptId: number | null = null;
   if (selectedScriptId) {
@@ -122,7 +119,7 @@ const ScriptDetailsModal = ({
     data: scriptContent,
     error: isSelectedScriptContentError,
     isLoading: isLoadingSelectedScriptContent,
-  } = useQuery<any, Error>(
+  } = useQuery<string, Error>(
     ["scriptContent", scriptId],
     () =>
       scriptId
@@ -144,7 +141,7 @@ const ScriptDetailsModal = ({
 
   const getScriptContent = async () => {
     try {
-      const content = selectedScriptContent || scriptContent;
+      const content = selectedScriptContent || scriptContent || "";
       const formatDate = format(new Date(), "yyyy-MM-dd");
       const filename = `${formatDate} ${
         selectedScriptDetails?.name || "Script details"
@@ -152,7 +149,7 @@ const ScriptDetailsModal = ({
       const file = new File([content], filename);
       FileSaver.saveAs(file);
     } catch {
-      renderFlash("error", "Couldn’t Download. Please try again.");
+      notify.error("Couldn’t download. Please try again.");
     }
   };
 
@@ -200,22 +197,22 @@ const ScriptDetailsModal = ({
             <>
               <Button
                 className={`${baseClass}__action-button`}
-                variant="icon"
+                variant="subdued"
                 onClick={() => onClickDownload()}
-              >
-                <Icon name="download" />
-              </Button>
+                icon="download"
+                ariaLabel="Download script"
+              />
               <GitOpsModeTooltipWrapper
                 position="bottom"
                 renderChildren={(disableChildren) => (
                   <Button
                     disabled={disableChildren}
                     className={`${baseClass}__action-button`}
-                    variant="icon"
+                    variant="subdued"
                     onClick={onDelete}
-                  >
-                    <Icon name="trash" color="ui-fleet-black-75" />
-                  </Button>
+                    icon="trash"
+                    ariaLabel="Delete script"
+                  />
                 )}
               />
             </>
@@ -242,10 +239,11 @@ const ScriptDetailsModal = ({
                       selectedScriptDetails as IHostScript
                     )}
                     menuPlacement="top"
+                    variant="subdued"
                   />
                 </div>
               )}
-              <Button onClick={onCancel}>Done</Button>
+              <Button onClick={onCancel}>Close</Button>
             </>
           )
         }

@@ -19,6 +19,7 @@ Below is the JSON payload that is sent to Fleet Device Management Inc:
   "numTeams": 999,
   "numQueries": 999,
   "numPolicies": 999,
+  "numPoliciesAutomationEnabledSoftware": 999,
   "numLabels": 999,
   "softwareInventoryEnabled": true,
   "vulnDetectionEnabled": true,
@@ -27,6 +28,13 @@ Below is the JSON payload that is sent to Fleet Device Management Inc:
   "mdmMacOsEnabled": true,
   "hostExpiryEnabled": true,
   "mdmWindowsEnabled": false,
+  "mdmAndroidEnabled": false,
+  "numHostsFleetMDMEnrolledMacOS": 999,
+  "numHostsFleetMDMEnrolledWindows": 999,
+  "numMDMAppleProfiles": 999,
+  "numMDMWindowsProfiles": 999,
+  "numMDMAppleDeclarations": 999,
+  "numMDMAndroidProfiles": 999,
   "liveQueryDisabled": false,
   "numWeeklyActiveUsers": 999,
   "numWeeklyPolicyViolationDaysActual": 999,
@@ -38,18 +46,46 @@ Below is the JSON payload that is sent to Fleet Device Management Inc:
   "numSoftwareCPEs": 999,
   "numSoftwareCVEs": 999,
   "numHostsNotResponding": 9,
+  "numHostsFleetDesktopEnabled": 999,
   "aiFeaturesDisabled": true,
   "maintenanceWindowsEnabled": true,
   "maintenanceWindowsConfigured": true,
+  "oktaConditionalAccessConfigured": true,
+  "entraConditionalAccessConfigured": true,
+  "conditionalAccessBypassDisabled": false,
+  "conditionalAccessEnabled": true,
   "numHostsFleetDesktopEnabled": 999,
+  "numFleetsManagedAdminAccountEnabled": 999,
+  "anyFleetRecoveryLockPasswordEnabled": true,
+  "gitOpsModeEnabled": true,
+  "gitOpsModeExceptions": [
+    "labels",
+    "software",
+    "secrets"
+  ],
   "fleetMaintainedAppsMacOS": [
-    "1password/darwin",
-    "slack/darwin",
-    "zoom/darwin"
+    {
+      "name": "1password/darwin",
+      "patchPolicy": true,
+      "softwareAutomation": false
+    },
+    {
+      "name": "slack/darwin",
+      "patchPolicy": true,
+      "softwareAutomation": false
+    }
   ],
   "fleetMaintainedAppsWindows": [
-    "google-chrome/windows",
-    "microsoft-edge/windows"
+    {
+      "name": "google-chrome/windows",
+      "patchPolicy": true,
+      "softwareAutomation": false
+    },
+    {
+      "name": "microsoft-edge/windows",
+      "patchPolicy": true,
+      "softwareAutomation": false
+    }
   ],
   "hostsEnrolledByOperatingSystem": {
     "android": [

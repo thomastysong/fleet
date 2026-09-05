@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -21,6 +22,36 @@ func TestHostLinuxPlatformPackageCompatibility(t *testing.T) {
 		}
 
 		require.True(t, h.PlatformSupportsDebPackages() || h.PlatformSupportsRpmPackages())
+	}
+}
+
+func TestIsLUKSSupported(t *testing.T) {
+	for _, tc := range []struct {
+		platform  string
+		osVersion string
+		expected  bool
+	}{
+		{platform: "ubuntu", expected: true},
+		{platform: "zorin", expected: true},
+		// Fedora hosts report their platform as "rhel", so they are identified by OS version.
+		{platform: "rhel", osVersion: "Fedora Linux 41", expected: true},
+		{platform: "rhel", osVersion: "CentOS Linux 7.9.2009", expected: false},
+		// Arch and its derivatives.
+		{platform: "arch", expected: true},
+		{platform: "archarm", expected: true},
+		{platform: "manjaro", expected: true},
+		{platform: "manjaro-arm", expected: true},
+		{platform: "cachyos", expected: true},
+		{platform: "omarchy", expected: true},
+		// Linux platforms without LUKS support, and non-Linux platforms.
+		{platform: "debian", expected: false},
+		{platform: "darwin", expected: false},
+		{platform: "windows", expected: false},
+	} {
+		t.Run(tc.platform+" "+tc.osVersion, func(t *testing.T) {
+			h := &Host{Platform: tc.platform, OSVersion: tc.osVersion}
+			require.Equal(t, tc.expected, h.IsLUKSSupported())
+		})
 	}
 }
 
@@ -147,6 +178,18 @@ func TestPlatformFromHost(t *testing.T) {
 			expPlatform: "linux",
 		},
 		{
+			host:        "flatcar",
+			expPlatform: "linux",
+		},
+		{
+			host:        "coreos",
+			expPlatform: "linux",
+		},
+		{
+			host:        "omarchy",
+			expPlatform: "linux",
+		},
+		{
 			host:        "darwin",
 			expPlatform: "darwin",
 		},
@@ -216,7 +259,7 @@ func TestMDMEnrollmentStatus(t *testing.T) {
 		},
 		{
 			hostMDM:  HostMDM{Enrolled: true, InstalledFromDep: false, IsPersonalEnrollment: true},
-			expected: "On (personal)",
+			expected: "On (manual - personal)",
 		},
 		{
 			hostMDM:  HostMDM{Enrolled: false, InstalledFromDep: true},
@@ -406,6 +449,259 @@ func TestHasJSONProfileAssigned(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			result := tc.hostMDM.HasJSONProfileAssigned()
 			require.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+func TestMDMNameFromServerURL(t *testing.T) {
+	testCases := []struct {
+		name      string
+		serverURL string
+		expected  string
+	}{
+		{"empty", "", UnknownMDMName},
+		{"unknown", "https://example.com/mdm", UnknownMDMName},
+		{"kandji", "https://example.kandji.io", WellKnownMDMIru},
+		{"iru", "https://mdm.iru.com", WellKnownMDMIru},
+		{"jamf", "https://example.jamfcloud.com", WellKnownMDMJamf},
+		{"jumpcloud", "https://example.jumpcloud.com", WellKnownMDMJumpCloud},
+		{"airwatch", "https://example.airwatch.com", WellKnownMDMVMWare},
+		{"awmdm", "https://example.awmdm.com", WellKnownMDMVMWare},
+		{"microsoft intune", "https://manage.microsoft.com", WellKnownMDMIntune},
+		{"simplemdm", "https://example.simplemdm.com", WellKnownMDMSimpleMDM},
+		{"fleetdm", "https://example.fleetdm.com", WellKnownMDMFleet},
+		{"mosyle", "https://example.mosyle.com", WellKnownMDMMosyle},
+		{"mixed case is normalized", "https://Example.JumpCloud.com", WellKnownMDMJumpCloud},
+		// Ambiguous URLs must resolve deterministically. JumpCloud's MDM is hosted on
+		// AirWatch/awmdm.com infrastructure, so jumpcloud.awmdm.com must resolve to
+		// JumpCloud rather than VMware Workspace ONE.
+		{"jumpcloud on awmdm infrastructure", "https://jumpcloud.awmdm.com", WellKnownMDMJumpCloud},
+		{"zentral cloud", "https://mdm.example.zentral.io/public/mdm/connect/", WellKnownMDMZentral},
+		{"zentral self-hosted", "https://zentral.company.com/public/mdm/connect/", WellKnownMDMZentral},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.expected, MDMNameFromServerURL(tc.serverURL))
+		})
+	}
+}
+
+func TestIsPlaceholderHardwareSerial(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		serial string
+		want   bool
+	}{
+		// Empty / whitespace.
+		{"empty", "", true},
+		{"whitespace only", "   ", true},
+		{"tabs and newline", "\t \n", true},
+
+		// Known OEM/BIOS placeholders, matched case-insensitively and trimmed.
+		{"to be filled exact", "To Be Filled By O.E.M.", true},
+		{"to be filled lower", "to be filled by o.e.m.", true},
+		{"to be filled upper", "TO BE FILLED BY O.E.M.", true},
+		{"to be filled padded", "  To Be Filled By O.E.M.  ", true},
+		{"default string", "Default string", true},
+		{"system serial number", "System Serial Number", true},
+		{"not specified", "Not Specified", true},
+		{"not applicable", "Not Applicable", true},
+		{"none", "None", true},
+		{"oem", "OEM", true},
+		{"o.e.m.", "O.E.M.", true},
+		{"default", "Default", true},
+		{"unknown", "Unknown", true},
+		{"chassis serial number", "Chassis Serial Number", true},
+		{"base board serial number", "Base Board Serial Number", true},
+		{"baseboard serial number", "Baseboard Serial Number", true},
+		{"sequential 123456789", "123456789", true},
+		{"sequential 0123456789", "0123456789", true},
+		{"sequential 1234567890", "1234567890", true},
+		{"sequential 1234567", "1234567", true},
+		{"n/a", "N/A", true},
+		{"na", "na", true},
+		{"invalid", "INVALID", true},
+
+		// Repeated-character heuristic (cannot be enumerated).
+		{"single zero", "0", true},
+		{"all zeros", "00000000", true},
+		{"all x", "xxxxxxx", true},
+		{"all dashes", "-------", true},
+		{"all dots", "........", true},
+
+		// Real, unique serials must NOT be flagged.
+		{"dell service tag", "7XQ2W13", false},
+		{"lenovo serial", "PF0ABCDE", false},
+		{"apple-style serial", "C02ABCDEFGHJ", false},
+		{"vmware unique", "VMware-56 4d 1a 2b 3c", false},
+		{"none as substring", "NONE123", false},
+		{"default as substring", "DEFAULT-7H2K", false},
+		{"leading zeros but real", "00000001", false},
+		{"long alphanumeric", "ABC123XYZ789", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, IsPlaceholderHardwareSerial(tc.serial))
+		})
+	}
+}
+
+// The frontend keys the host page's Enrollment ID row off this exact field name, so pin
+// the wire format: MDMHostData is scanned from a JSON_OBJECT built in SQL, which makes a
+// silent rename easy to miss.
+func TestMDMHostDataIsPersonalEnrollmentJSON(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		b, err := json.Marshal(MDMHostData{IsPersonalEnrollment: want})
+		require.NoError(t, err)
+		require.Contains(t, string(b), fmt.Sprintf(`"is_personal_enrollment":%t`, want))
+	}
+
+	// It is also the key the datastore's JSON_OBJECT emits, so round-tripping through
+	// Scan has to land on the same field.
+	var data MDMHostData
+	require.NoError(t, data.Scan([]byte(`{"is_personal_enrollment": true}`)))
+	require.True(t, data.IsPersonalEnrollment)
+}
+
+func TestHostMDMHostNameSettingJSON(t *testing.T) {
+	// Omitted entirely when there is no enforcement (host_name is a nil pointer
+	// with omitempty), matching the recovery-lock treatment for ineligible hosts.
+	b, err := json.Marshal(HostMDMOSSettings{})
+	require.NoError(t, err)
+	require.NotContains(t, string(b), "host_name")
+
+	// Present with the fleets-forward status/detail contract the frontend consumes.
+	b, err = json.Marshal(HostMDMOSSettings{
+		HostName: &HostMDMHostNameSetting{Status: HostNameSettingFailed, Detail: "boom"},
+	})
+	require.NoError(t, err)
+	require.Contains(t, string(b), `"host_name":{"status":"failed","detail":"boom"}`)
+}
+
+func TestPopulateOSSettingsAndMacOSSettingsMatrix(t *testing.T) {
+	const fvIdent = "com.fleetdm.fleet.mdm.filevault"
+
+	bothOn := DiskEncryptionConfig{MacOSEnabled: true, MacOSEscrowEnabled: true}
+	enforceOnly := DiskEncryptionConfig{MacOSEnabled: true}
+	escrowOnly := DiskEncryptionConfig{MacOSEscrowEnabled: true}
+	offOff := DiskEncryptionConfig{}
+
+	type want struct {
+		status DiskEncryptionStatus // "" means no status
+		action ActionRequiredState  // "" means no action
+	}
+	fvProf := func(op MDMOperationType, status *MDMDeliveryStatus) *HostMDMAppleProfile {
+		return &HostMDMAppleProfile{HostUUID: "abc", Identifier: fvIdent, OperationType: op, Status: status}
+	}
+	w := func(s DiskEncryptionStatus, a ActionRequiredState) want { return want{s, a} }
+
+	// key signals: "none" (no key row), "undecryptable", "unknown" (row, not yet checked), "decryptable"
+	keySignals := map[string]*int{"none": new(-1), "undecryptable": new(0), "unknown": nil, "decryptable": new(1)}
+	// disk signals: "unknown" (not reported), "unencrypted", "encrypted"
+	diskSignals := map[string]*bool{"unknown": nil, "unencrypted": new(false), "encrypted": new(true)}
+
+	keyBasedVerifying := map[string]want{
+		"none": w(DiskEncryptionActionRequired, ActionRequiredRotateKey), "undecryptable": w(DiskEncryptionActionRequired, ActionRequiredRotateKey),
+		"unknown": w(DiskEncryptionVerifying, ""), "decryptable": w(DiskEncryptionVerifying, ""),
+	}
+	keyBasedVerified := map[string]want{
+		"none": w(DiskEncryptionActionRequired, ActionRequiredRotateKey), "undecryptable": w(DiskEncryptionActionRequired, ActionRequiredRotateKey),
+		"unknown": w(DiskEncryptionVerifying, ""), "decryptable": w(DiskEncryptionVerified, ""),
+	}
+	diskBasedVerifying := map[string]want{
+		"unknown": w(DiskEncryptionVerifying, ""), "unencrypted": w(DiskEncryptionActionRequired, ActionRequiredLogOut), "encrypted": w(DiskEncryptionVerifying, ""),
+	}
+	diskBasedVerified := map[string]want{
+		"unknown": w(DiskEncryptionVerifying, ""), "unencrypted": w(DiskEncryptionActionRequired, ActionRequiredLogOut), "encrypted": w(DiskEncryptionVerified, ""),
+	}
+
+	fixedCases := []struct {
+		name string
+		prof *HostMDMAppleProfile
+		want want
+	}{
+		{"no profile", nil, want{}},
+		{"pending install", fvProf(MDMOperationTypeInstall, &MDMDeliveryPending), w(DiskEncryptionEnforcing, "")},
+		{"null status install", fvProf(MDMOperationTypeInstall, nil), w(DiskEncryptionEnforcing, "")},
+		{"failed install", fvProf(MDMOperationTypeInstall, &MDMDeliveryFailed), w(DiskEncryptionFailed, "")},
+		{"pending remove", fvProf(MDMOperationTypeRemove, &MDMDeliveryPending), w(DiskEncryptionRemovingEnforcement, "")},
+		{"failed remove", fvProf(MDMOperationTypeRemove, &MDMDeliveryFailed), w(DiskEncryptionFailed, "")},
+		{"removed", fvProf(MDMOperationTypeRemove, &MDMDeliveryVerifying), want{}},
+	}
+
+	check := func(t *testing.T, cfg DiskEncryptionConfig, prof *HostMDMAppleProfile, rawDecryptable *int, disk *bool, exp want) {
+		var d MDMHostData
+		raw := "null"
+		if rawDecryptable != nil {
+			raw = fmt.Sprintf("%d", *rawDecryptable)
+		}
+		require.NoError(t, d.Scan(fmt.Appendf(nil, `{"raw_decryptable": %s}`, raw)))
+		var profs []HostMDMAppleProfile
+		if prof != nil {
+			profs = []HostMDMAppleProfile{*prof}
+		}
+		d.PopulateOSSettingsAndMacOSSettings(profs, fvIdent, cfg, disk)
+
+		require.NotNil(t, d.MacOSSettings)
+		require.NotNil(t, d.OSSettings)
+		if exp.status == "" {
+			require.Nil(t, d.MacOSSettings.DiskEncryption)
+			require.Nil(t, d.OSSettings.DiskEncryption.Status)
+		} else {
+			require.NotNil(t, d.MacOSSettings.DiskEncryption)
+			require.Equal(t, exp.status, *d.MacOSSettings.DiskEncryption)
+			require.NotNil(t, d.OSSettings.DiskEncryption.Status)
+			require.Equal(t, exp.status, *d.OSSettings.DiskEncryption.Status)
+		}
+		if exp.action == "" {
+			require.Nil(t, d.MacOSSettings.ActionRequired)
+		} else {
+			require.NotNil(t, d.MacOSSettings.ActionRequired)
+			require.Equal(t, exp.action, *d.MacOSSettings.ActionRequired)
+		}
+	}
+
+	for _, combo := range []struct {
+		name     string
+		cfg      DiskEncryptionConfig
+		keyBased bool
+	}{
+		{"enforce on, escrow on", bothOn, true},
+		{"enforce off, escrow on", escrowOnly, true},
+		{"enforce off, escrow off", offOff, true},
+		{"enforce on, escrow off", enforceOnly, false},
+	} {
+		t.Run(combo.name, func(t *testing.T) {
+			for _, c := range fixedCases {
+				for keyName, key := range keySignals {
+					for diskName, disk := range diskSignals {
+						t.Run(fmt.Sprintf("%s/key=%s/disk=%s", c.name, keyName, diskName), func(t *testing.T) {
+							check(t, combo.cfg, c.prof, key, disk, c.want)
+						})
+					}
+				}
+			}
+
+			for _, delivered := range []struct {
+				status                      MDMDeliveryStatus
+				keyBasedWant, diskBasedWant map[string]want
+			}{
+				{MDMDeliveryVerifying, keyBasedVerifying, diskBasedVerifying},
+				{MDMDeliveryVerified, keyBasedVerified, diskBasedVerified},
+			} {
+				for keyName, key := range keySignals {
+					for diskName, disk := range diskSignals {
+						exp := delivered.keyBasedWant[keyName]
+						if !combo.keyBased {
+							exp = delivered.diskBasedWant[diskName]
+						}
+						t.Run(fmt.Sprintf("%s install/key=%s/disk=%s", delivered.status, keyName, diskName), func(t *testing.T) {
+							status := delivered.status
+							check(t, combo.cfg, fvProf(MDMOperationTypeInstall, &status), key, disk, exp)
+						})
+					}
+				}
+			}
 		})
 	}
 }

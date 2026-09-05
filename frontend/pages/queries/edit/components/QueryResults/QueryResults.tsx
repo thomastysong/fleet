@@ -15,7 +15,6 @@ import { ICampaign, ICampaignError } from "interfaces/campaign";
 import { ITarget } from "interfaces/target";
 
 import Button from "components/buttons/Button";
-import Icon from "components/Icon/Icon";
 import TableContainer from "components/TableContainer";
 import TableCount from "components/TableContainer/TableCount";
 import TabNav from "components/TabNav";
@@ -23,6 +22,7 @@ import TabText from "components/TabText";
 import ShowQueryModal from "components/modals/ShowQueryModal";
 import LiveResultsHeading from "components/queries/LiveResults/LiveResultsHeading";
 import AwaitingResults from "components/queries/LiveResults/AwaitingResults";
+import EmptyState from "components/EmptyState";
 import InfoBanner from "components/InfoBanner";
 import CustomLink from "components/CustomLink";
 
@@ -155,15 +155,22 @@ const QueryResults = ({
   };
 
   const renderNoResults = () => {
+    const hostVerb = targetsTotalCount === 1 ? "host is" : "hosts are";
+    const errorsMessage = errors?.length ? (
+      <>
+        {" "}
+        or review the <strong>Errors</strong> tab for details
+      </>
+    ) : null;
     return (
-      <p className="no-results-message">
-        Your live report returned no results.
-        <span>
-          Expecting to see results? Check to see if the host
-          {`${targetsTotalCount > 1 ? "s" : ""}`} you targeted reported
-          &ldquo;Online&rdquo; or check out the &ldquo;Errors&rdquo; table.
-        </span>
-      </p>
+      <EmptyState
+        header="No results returned"
+        info={
+          <>
+            Check whether the {hostVerb} online{errorsMessage}.
+          </>
+        }
+      />
     );
   };
 
@@ -185,11 +192,11 @@ const QueryResults = ({
         <Button
           className={`${baseClass}__show-query-btn`}
           onClick={onShowQueryModal}
-          variant="inverse"
+          variant="secondary"
+          icon="eye"
+          iconPosition="right"
         >
-          <>
-            Show query <Icon name="eye" />
-          </>
+          Show query
         </Button>
         <Button
           className={`${baseClass}__export-btn`}
@@ -198,12 +205,11 @@ const QueryResults = ({
               ? onExportErrorsResults
               : onExportQueryResults
           }
-          variant="inverse"
+          variant="secondary"
+          icon="download"
+          iconPosition="right"
         >
-          <>
-            Export {tableType}
-            <Icon name="download" />
-          </>
+          Export {tableType}
         </Button>
       </div>
     );
@@ -234,6 +240,7 @@ const QueryResults = ({
             tableType === "results" ? setFilteredResults : setFilteredErrors
           }
           renderCount={() => renderCount(tableType)}
+          getRowId={(_row, index) => String(index)}
         />
       </div>
     );
@@ -264,7 +271,11 @@ const QueryResults = ({
   });
 
   return (
-    <div className={baseClass}>
+    // `notranslate`: Chrome's auto-translate wraps text nodes in <font> elements,
+    // detaching nodes React holds refs to. As live results stream in and cells
+    // unmount, React's removeChild throws NotFoundError and error-boundaries the
+    // page (#48277). Excluding this streaming subtree from translation avoids it.
+    <div className={`${baseClass} notranslate`}>
       <LiveResultsHeading
         numHostsTargeted={targetsTotalCount}
         numHostsResponded={uiHostCounts.total}
@@ -274,7 +285,7 @@ const QueryResults = ({
         }
         numHostsRespondedErrors={uiHostCounts.failed}
         isFinished={isQueryFinished}
-        onClickDone={onQueryDone}
+        onClickClose={onQueryDone}
         onClickRunAgain={onRunAgain}
         onClickStop={onStopQuery}
       />

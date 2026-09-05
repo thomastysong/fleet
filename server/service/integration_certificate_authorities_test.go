@@ -14,9 +14,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	eeservice "github.com/fleetdm/fleet/v4/ee/server/service"
-	"github.com/fleetdm/fleet/v4/server/datastore/mysql"
+	"github.com/fleetdm/fleet/v4/ee/server/service/scep/sceptest"
+	"github.com/fleetdm/fleet/v4/server/datastore/mysql/mysqltest"
 	"github.com/fleetdm/fleet/v4/server/fleet"
+	servermdm "github.com/fleetdm/fleet/v4/server/mdm"
 	apple_mdm "github.com/fleetdm/fleet/v4/server/mdm/apple"
 	"github.com/fleetdm/fleet/v4/server/mdm/apple/mobileconfig"
 	"github.com/fleetdm/fleet/v4/server/mdm/nanomdm/mdm"
@@ -43,9 +44,9 @@ func (s *integrationMDMTestSuite) TestBatchApplyCertificateAuthorities() {
 
 	// TODO(hca): test free version disallows batch endpoint
 
-	ndesSCEPServer := eeservice.NewTestSCEPServer(t)
-	ndesAdminServer := eeservice.NewTestNDESAdminServer(t, "mscep_admin_password", http.StatusOK)
-	dynamicChallengeServer := eeservice.NewTestDynamicChallengeServer(t)
+	ndesSCEPServer := sceptest.NewTestSCEPServer(t)
+	ndesAdminServer := sceptest.NewTestNDESAdminServer(t, "mscep_admin_password", http.StatusOK)
+	dynamicChallengeServer := sceptest.NewTestDynamicChallengeServer(t)
 
 	pathRegex := regexp.MustCompile(`^/mpki/api/v2/profile/([a-zA-Z0-9_-]+)$`)
 	mockDigiCertServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -457,7 +458,7 @@ func (s *integrationMDMTestSuite) TestBatchApplyCertificateAuthorities() {
 			s.checkAppliedCAs(t, s.ds, req.CertificateAuthorities)
 
 			t.Cleanup(func() {
-				mysql.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
+				mysqltest.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
 					_, _ = q.ExecContext(context.Background(), "DELETE FROM certificate_authorities")
 					return nil
 				})
@@ -558,7 +559,7 @@ func (s *integrationMDMTestSuite) TestBatchApplyCertificateAuthorities() {
 			s.checkAppliedCAs(t, s.ds, req.CertificateAuthorities)
 
 			t.Cleanup(func() {
-				mysql.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
+				mysqltest.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
 					_, _ = q.ExecContext(context.Background(), "DELETE FROM certificate_authorities")
 					return nil
 				})
@@ -584,7 +585,7 @@ func (s *integrationMDMTestSuite) TestBatchApplyCertificateAuthorities() {
 			s.checkAppliedCAs(t, s.ds, req.CertificateAuthorities)
 
 			t.Cleanup(func() {
-				mysql.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
+				mysqltest.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
 					_, _ = q.ExecContext(context.Background(), "DELETE FROM certificate_authorities")
 					return nil
 				})
@@ -610,7 +611,7 @@ func (s *integrationMDMTestSuite) TestBatchApplyCertificateAuthorities() {
 			s.checkAppliedCAs(t, s.ds, req.CertificateAuthorities)
 
 			t.Cleanup(func() {
-				mysql.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
+				mysqltest.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
 					_, _ = q.ExecContext(context.Background(), "DELETE FROM certificate_authorities")
 					return nil
 				})
@@ -803,7 +804,7 @@ func (s *integrationMDMTestSuite) TestBatchApplyCertificateAuthorities() {
 			s.checkAppliedCAs(t, s.ds, req.CertificateAuthorities)
 
 			t.Cleanup(func() {
-				mysql.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
+				mysqltest.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
 					_, _ = q.ExecContext(context.Background(), "DELETE FROM certificate_authorities")
 					return nil
 				})
@@ -1028,7 +1029,7 @@ func (s *integrationMDMTestSuite) TestBatchApplyCertificateAuthorities() {
 			s.checkAppliedCAs(t, s.ds, req.CertificateAuthorities)
 
 			t.Cleanup(func() {
-				mysql.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
+				mysqltest.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
 					_, _ = q.ExecContext(context.Background(), "DELETE FROM certificate_authorities")
 					return nil
 				})
@@ -1289,7 +1290,7 @@ func (s *integrationMDMTestSuite) TestBatchApplyCertificateAuthorities() {
 			s.checkAppliedCAs(t, s.ds, req.CertificateAuthorities)
 
 			t.Cleanup(func() {
-				mysql.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
+				mysqltest.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
 					_, _ = q.ExecContext(context.Background(), "DELETE FROM certificate_authorities")
 					return nil
 				})
@@ -1415,7 +1416,7 @@ func (s *integrationMDMTestSuite) TestBatchApplyCertificateAuthorities() {
 			s.checkAppliedCAs(t, s.ds, req.CertificateAuthorities)
 
 			t.Cleanup(func() {
-				mysql.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
+				mysqltest.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
 					_, _ = q.ExecContext(context.Background(), "DELETE FROM certificate_authorities")
 					return nil
 				})
@@ -1565,6 +1566,134 @@ func (s *integrationMDMTestSuite) checkAppliedCAs(t *testing.T, ds fleet.Datasto
 	}
 }
 
+// TestUpdateNDESCertificateAuthority covers PATCH /certificate_authorities/{id} for the NDES
+// CA. The admin URL, username and password authenticate against NDES as a set, so a change to
+// any of them has to be validated against the NDES server, not just a change to the admin URL.
+func (s *integrationMDMTestSuite) TestUpdateNDESCertificateAuthority() {
+	t := s.T()
+
+	const (
+		ndesUsername    = "ndes-username"
+		ndesPassword    = "ndes-password"
+		newNdesUsername = "new-ndes-username"
+		newNdesPassword = "new-ndes-password" //nolint:gosec // G101: test value, not a real credential
+	)
+
+	scepServer := sceptest.NewTestSCEPServer(t)
+
+	// an NDES admin server that only serves a challenge to the credentials above
+	var authenticatedRequests atomic.Int64
+	ndesAdminServer := sceptest.NewTestNDESAdminServerWithAuth(t, func(username, password string) bool {
+		return (username == ndesUsername || username == newNdesUsername) &&
+			(password == ndesPassword || password == newNdesPassword)
+	}, &authenticatedRequests)
+
+	var createResp createCertificateAuthorityResponse
+	s.DoJSON("POST", "/api/latest/fleet/certificate_authorities", fleet.CertificateAuthorityPayload{
+		NDESSCEPProxy: &fleet.NDESSCEPProxyCA{
+			URL:      scepServer.URL + "/scep",
+			AdminURL: ndesAdminServer.URL + "/mscep_admin/",
+			Username: ndesUsername,
+			Password: ndesPassword,
+		},
+	}, http.StatusOK, &createResp)
+	require.NotZero(t, createResp.ID)
+	caPath := fmt.Sprintf("/api/latest/fleet/certificate_authorities/%d", createResp.ID)
+
+	patchNDES := func(update fleet.NDESSCEPProxyCAUpdatePayload, expectedStatus int) *http.Response {
+		return s.Do("PATCH", caPath, fleet.CertificateAuthorityUpdatePayload{
+			NDESSCEPProxyCAUpdatePayload: &update,
+		}, expectedStatus)
+	}
+
+	requireStoredUsername := func(expected string) {
+		var getResp getCertificateAuthorityResponse
+		s.DoJSON("GET", caPath, getCertificateAuthorityRequest{}, http.StatusOK, &getResp)
+		require.NotNil(t, getResp.Username)
+		require.Equal(t, expected, *getResp.Username)
+	}
+
+	t.Run("username change with invalid credentials is rejected", func(t *testing.T) {
+		// The password has to accompany a username change, so this is the smallest payload
+		// the UI sends when only the username is edited.
+		res := patchNDES(fleet.NDESSCEPProxyCAUpdatePayload{
+			Username: new("wrong-username"),
+			Password: new(ndesPassword),
+		}, http.StatusBadRequest)
+		require.Contains(t, extractServerErrorText(res.Body), "Invalid NDES SCEP admin URL or credentials")
+
+		requireStoredUsername(ndesUsername)
+	})
+
+	t.Run("password change with invalid credentials is rejected", func(t *testing.T) {
+		res := patchNDES(fleet.NDESSCEPProxyCAUpdatePayload{
+			Password: new("wrong-password"),
+		}, http.StatusBadRequest)
+		require.Contains(t, extractServerErrorText(res.Body), "Invalid NDES SCEP admin URL or credentials")
+	})
+
+	t.Run("unreachable admin URL is reported as a connection problem", func(t *testing.T) {
+		unreachableServer := httptest.NewServer(http.NotFoundHandler())
+		unreachableServer.Close() // closed on purpose so the port refuses connections
+
+		res := patchNDES(fleet.NDESSCEPProxyCAUpdatePayload{
+			AdminURL: new(unreachableServer.URL + "/mscep_admin/"),
+			Password: new(ndesPassword),
+		}, http.StatusBadRequest)
+		require.Contains(t, extractServerErrorText(res.Body), "Couldn't connect to NDES SCEP admin URL")
+	})
+
+	t.Run("password change with valid credentials is validated and saved", func(t *testing.T) {
+		before := authenticatedRequests.Load()
+
+		patchNDES(fleet.NDESSCEPProxyCAUpdatePayload{
+			Password: new(newNdesPassword),
+		}, http.StatusOK)
+
+		// The update is only valid because Fleet asked the NDES server about it.
+		require.Greater(t, authenticatedRequests.Load(), before)
+	})
+
+	t.Run("unchanged credentials are saved without asking the NDES server", func(t *testing.T) {
+		before := authenticatedRequests.Load()
+
+		patchNDES(fleet.NDESSCEPProxyCAUpdatePayload{
+			Username: new(ndesUsername),
+			Password: new(newNdesPassword), // saved by the previous subtest
+		}, http.StatusOK)
+
+		require.Equal(t, before, authenticatedRequests.Load())
+	})
+
+	t.Run("username change with valid credentials is validated and saved", func(t *testing.T) {
+		before := authenticatedRequests.Load()
+
+		patchNDES(fleet.NDESSCEPProxyCAUpdatePayload{
+			Username: new(newNdesUsername),
+			Password: new(newNdesPassword),
+		}, http.StatusOK)
+
+		require.Greater(t, authenticatedRequests.Load(), before)
+		requireStoredUsername(newNdesUsername)
+	})
+
+	t.Run("masked password is rejected", func(t *testing.T) {
+		before := authenticatedRequests.Load()
+
+		// The GET endpoint returns the password masked. Changing NDES credentials requires
+		// re-supplying the actual password, so PATCHing the mask back is rejected before
+		// Fleet ever contacts the NDES server.
+		res := patchNDES(fleet.NDESSCEPProxyCAUpdatePayload{
+			Username: new("some-other-username"),
+			Password: new(fleet.MaskedPassword),
+		}, http.StatusBadRequest)
+		require.Contains(t, extractServerErrorText(res.Body), "Invalid NDES SCEP password")
+
+		require.Equal(t, before, authenticatedRequests.Load())
+		requireStoredUsername(newNdesUsername) // saved by the previous subtest
+	})
+}
+
 func (s *integrationMDMTestSuite) TestSCEPChallengeExpirationRetriesSmallStep() {
 	t := s.T()
 	ctx := context.Background()
@@ -1584,12 +1713,15 @@ func (s *integrationMDMTestSuite) TestSCEPChallengeExpirationRetriesSmallStep() 
 	host, mdmDevice := createHostThenEnrollMDM(s.ds, s.server.URL, t)
 	setupPusher(s, t, mdmDevice)
 	s.awaitTriggerProfileSchedule(t)
+	s.awaitRunAppleMDMWorkerSchedule()
 	installs, removes := checkNextPayloads(t, mdmDevice, false)
 	s.signedProfilesMatch(
 		defaultProfiles,
 		installs,
 	)
 	require.Empty(t, removes)
+	err = s.keyValueStore.Delete(ctx, fleet.MDMProfileProcessingKeyPrefix+":"+host.UUID)
+	require.NoError(t, err)
 
 	// setup: start smallstep scep server
 	scepServer := scep_server.StartTestSCEPServer(t)
@@ -1638,7 +1770,7 @@ func (s *integrationMDMTestSuite) TestSCEPChallengeExpirationRetriesSmallStep() 
 	p := generateTestProfileSmallstepSCEP("$FLEET_VAR_SMALLSTEP_SCEP_CHALLENGE_STEP_WIFI", "$FLEET_VAR_SCEP_RENEWAL_ID", "$FLEET_VAR_SMALLSTEP_SCEP_PROXY_URL_STEP_WIFI")
 	body, headers := generateNewProfileMultipartRequest(t, "foobar.mobileconfig", []byte(p), s.token, nil)
 	_ = s.DoRawWithHeaders("POST", "/api/latest/fleet/configuration_profiles", body.Bytes(), http.StatusOK, headers)
-	mysql.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
+	mysqltest.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
 		return sqlx.GetContext(ctx, q, &profUUID, "SELECT profile_uuid FROM mdm_apple_configuration_profiles WHERE name = ?", "Smallstep Fleet WIFI")
 	})
 
@@ -1680,7 +1812,7 @@ func (s *integrationMDMTestSuite) TestSCEPChallengeExpirationRetriesSmallStep() 
 	// listHostProfilesDB lists the host profiles for a given host from the database
 	listHostProfilesDB := func(hostUUID string) []hostProfile {
 		var got []hostProfile
-		mysql.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
+		mysqltest.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
 			// for the purpose of this test, we ignore the Fleet-internal profiles
 			// (we only care about the custom profiles)
 			return sqlx.SelectContext(t.Context(), q, &got, `
@@ -1773,36 +1905,68 @@ func (s *integrationMDMTestSuite) TestSCEPChallengeExpirationRetriesSmallStep() 
 	require.Len(t, gotHostProfs, 1)
 	require.Equal(t, expectHostProf, gotHostProfs[0])
 
-	// simulate another failure during SCEP protocol, this time it won't be retried because normal retry limit is 1
+	// simulate additional failures during SCEP protocol until retry limit is exhausted.
+	// Each error when retries < MaxAppleProfileRetries triggers a retry (retries++, status=NULL).
+	// When retries == MaxAppleProfileRetries, the next error marks as failed.
+	expectedChallengeCount := int64(3) // starts at 3 from above
+	for retries := 1; retries < servermdm.MaxAppleProfileRetries; retries++ {
+		// error triggers retry
+		cmd, err = mdmDevice.Err(prevCommandUUID, []mdm.ErrorChain{})
+		require.NoError(t, err)
+		require.Nil(t, cmd)
+
+		expectHostProf.CommandUUID = prevCommandUUID
+		expectHostProf.Status = nil
+		expectHostProf.Retries = retries + 1
+
+		gotHostProfs = listHostProfilesDB(host.UUID)
+		require.Len(t, gotHostProfs, 1)
+		require.Equal(t, expectHostProf, gotHostProfs[0])
+
+		// cron resends with new challenge
+		s.awaitTriggerProfileSchedule(t)
+		expectedChallengeCount++
+		require.Equal(t, expectedChallengeCount, challengeCounter.Load())
+
+		cmd, err = mdmDevice.Idle()
+		require.NoError(t, err)
+		require.NotNil(t, cmd)
+		require.NotEqual(t, prevCommandUUID, cmd.CommandUUID)
+		prevCommandUUID = cmd.CommandUUID
+		require.Equal(t, "InstallProfile", cmd.Command.RequestType)
+
+		expectHostProf.CommandUUID = cmd.CommandUUID
+		expectHostProf.Status = ptr.String("pending")
+
+		gotHostProfs = listHostProfilesDB(host.UUID)
+		require.Len(t, gotHostProfs, 1)
+		require.Equal(t, expectHostProf, gotHostProfs[0])
+	}
+
+	// final error: retries == MaxAppleProfileRetries, should mark as failed
 	cmd, err = mdmDevice.Err(prevCommandUUID, []mdm.ErrorChain{})
-	require.NoError(t, err) // error report accepted by server
-	require.Nil(t, cmd)     // no new command
+	require.NoError(t, err)
+	require.Nil(t, cmd)
 
-	// update expectations for host profile DB state after failure
-	expectHostProf.CommandUUID = prevCommandUUID // unchanged
-	expectHostProf.Status = ptr.String("failed") // should now be failed
-	expectHostProf.Retries = 1                   // unchanged
+	expectHostProf.CommandUUID = prevCommandUUID
+	expectHostProf.Status = ptr.String("failed")
+	expectHostProf.Retries = servermdm.MaxAppleProfileRetries
 
-	// check DB state after failure
 	gotHostProfs = listHostProfilesDB(host.UUID)
 	require.Len(t, gotHostProfs, 1)
 	require.Equal(t, expectHostProf, gotHostProfs[0])
 
-	// MDM checkin should not expect new command
 	cmd, err = mdmDevice.Idle()
 	require.NoError(t, err)
 	require.Nil(t, cmd)
 
-	// trigger another profile sync, which should not resend SCEP profile
 	s.awaitTriggerProfileSchedule(t)
-	require.Equal(t, int64(3), challengeCounter.Load()) // challenge endpoint not called again because no retry should be attempted
+	require.Equal(t, expectedChallengeCount, challengeCounter.Load())
 
-	// MDM checkin should not expect new command
 	cmd, err = mdmDevice.Idle()
 	require.NoError(t, err)
 	require.Nil(t, cmd)
 
-	// check DB state to confirm no changes
 	gotHostProfs = listHostProfilesDB(host.UUID)
 	require.Len(t, gotHostProfs, 1)
 	require.Equal(t, expectHostProf, gotHostProfs[0])
@@ -1810,7 +1974,7 @@ func (s *integrationMDMTestSuite) TestSCEPChallengeExpirationRetriesSmallStep() 
 	// manually resend the profile installation, which ignores retry limit
 	// FIXME: manual resend doesn't change retries, but maybe it should reset to 0
 	_ = s.Do("POST", fmt.Sprintf("/api/v1/fleet/hosts/%d/configuration_profiles/%s/resend", host.ID, profUUID), nil, http.StatusAccepted)
-	require.Equal(t, int64(3), challengeCounter.Load()) // challenge endpoint not called until reconcilation runs
+	require.Equal(t, expectedChallengeCount, challengeCounter.Load()) // challenge endpoint not called until reconcilation runs
 
 	// MDM checkin should not expect new command until reconciliation runs
 	cmd, err = mdmDevice.Idle()
@@ -1818,9 +1982,9 @@ func (s *integrationMDMTestSuite) TestSCEPChallengeExpirationRetriesSmallStep() 
 	require.Nil(t, cmd) // no new command should be issued yet
 
 	// update expectations for host profile DB state after manual resend
-	expectHostProf.Status = nil                  // status should be cleared to allow retry
-	expectHostProf.Retries = 1                   // unchanged for manual resend
-	expectHostProf.CommandUUID = prevCommandUUID // unchanged until reconcilation runs
+	expectHostProf.Status = nil                               // status should be cleared to allow retry
+	expectHostProf.Retries = servermdm.MaxAppleProfileRetries // unchanged for manual resend
+	expectHostProf.CommandUUID = prevCommandUUID              // unchanged until reconcilation runs
 
 	// check DB state after manual resend request
 	gotHostProfs = listHostProfilesDB(host.UUID)
@@ -1828,9 +1992,10 @@ func (s *integrationMDMTestSuite) TestSCEPChallengeExpirationRetriesSmallStep() 
 	require.Equal(t, expectHostProf, gotHostProfs[0])
 
 	// trigger another profile sync, which should resend SCEP profile
-	require.Equal(t, int64(3), challengeCounter.Load()) // challenge endpoint not called until reconcilation runs
+	require.Equal(t, expectedChallengeCount, challengeCounter.Load()) // challenge endpoint not called until reconcilation runs
 	s.awaitTriggerProfileSchedule(t)
-	require.Equal(t, int64(4), challengeCounter.Load()) // challenge endpoint called again during host profile reconciliation
+	expectedChallengeCount++
+	require.Equal(t, expectedChallengeCount, challengeCounter.Load()) // challenge endpoint called again during host profile reconciliation
 
 	// MDM checkin should expect InstallProfile command with SCEP profile with new challenge
 	cmd, err = mdmDevice.Idle()
@@ -1842,9 +2007,9 @@ func (s *integrationMDMTestSuite) TestSCEPChallengeExpirationRetriesSmallStep() 
 	require.Equal(t, expectPayloadWithChallenge(), parseCommandPayload(cmd)) // challenge value should be updated
 
 	// update expectations for host profile DB state
-	expectHostProf.CommandUUID = cmd.CommandUUID  // should be updated to new command UUID
-	expectHostProf.Status = ptr.String("pending") // should now be pending again
-	expectHostProf.Retries = 1                    // unchanged for manual resend
+	expectHostProf.CommandUUID = cmd.CommandUUID              // should be updated to new command UUID
+	expectHostProf.Status = ptr.String("pending")             // should now be pending again
+	expectHostProf.Retries = servermdm.MaxAppleProfileRetries // unchanged for manual resend
 
 	// check DB state
 	gotHostProfs = listHostProfilesDB(host.UUID)
@@ -1852,7 +2017,7 @@ func (s *integrationMDMTestSuite) TestSCEPChallengeExpirationRetriesSmallStep() 
 	require.Equal(t, expectHostProf, gotHostProfs[0])
 
 	// simulate challenge expiration by backdating challenge_retrieved_at
-	mysql.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
+	mysqltest.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
 		_, _ = q.ExecContext(context.Background(), "UPDATE host_mdm_managed_certificates SET challenge_retrieved_at = DATE_SUB(challenge_retrieved_at, INTERVAL 270 SECOND) WHERE host_uuid = ?", host.UUID)
 		return nil
 	})
@@ -1888,9 +2053,10 @@ func (s *integrationMDMTestSuite) TestSCEPChallengeExpirationRetriesSmallStep() 
 	require.Nil(t, cmd)
 
 	// trigger another profile sync, which should resend the SCEP profile installation
-	require.Equal(t, int64(4), challengeCounter.Load()) // challenge endpoint not called until reconcilation runs
+	require.Equal(t, expectedChallengeCount, challengeCounter.Load()) // challenge endpoint not called until reconcilation runs
 	s.awaitTriggerProfileSchedule(t)
-	require.Equal(t, int64(5), challengeCounter.Load()) // challenge endpoint called with host profile reconciliation
+	expectedChallengeCount++
+	require.Equal(t, expectedChallengeCount, challengeCounter.Load()) // challenge endpoint called with host profile reconciliation
 
 	// MDM checkin should expect InstallProfile command with SCEP profile with new challenge
 	cmd, err = mdmDevice.Idle()
@@ -1908,6 +2074,385 @@ func (s *integrationMDMTestSuite) TestSCEPChallengeExpirationRetriesSmallStep() 
 	gotHostProfs = listHostProfilesDB(host.UUID)
 	require.Len(t, gotHostProfs, 1)
 	require.Equal(t, expectHostProf, gotHostProfs[0])
+}
+
+// TestSCEPChallengeExpirationRetriesNDES is the NDES counterpart to
+// TestSCEPChallengeExpirationRetriesSmallStep. It drives an NDES SCEP profile
+// through the install/retry/resend lifecycle and, critically, exercises the
+// expired-challenge path: when the MDM client performs a SCEP PKIOperation
+// after the cached challenge has expired, Fleet should intercept it, resend the
+// profile with a fresh challenge, and not let the resulting (stale) command
+// failure corrupt the profile's DB state.
+//
+// This mirrors the Smallstep test: for an Apple profile, the expired-challenge
+// branch in ee/server/service/scep/scep_proxy.go routes through
+// ResendHostCertificateProfile, which clears command_uuid and resets the retry
+// counter (an expired challenge is a timing condition, not a host install
+// failure). The key invariants asserted below are flagged with "INVARIANT"
+// comments.
+func (s *integrationMDMTestSuite) TestSCEPChallengeExpirationRetriesNDES() {
+	t := s.T()
+	ctx := context.Background()
+	s.setSkipWorkerJobs(t)
+
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Test setup
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	// setup: create enroll secret, host, enroll to MDM
+	err := s.ds.ApplyEnrollSecrets(ctx, nil, []*fleet.EnrollSecret{{Secret: t.Name()}})
+	require.NoError(t, err)
+	defaultProfiles := [][]byte{
+		setupExpectedFleetdProfile(t, s.server.URL, t.Name(), nil),
+		setupExpectedCAProfile(t, s.ds),
+	}
+	host, mdmDevice := createHostThenEnrollMDM(s.ds, s.server.URL, t)
+	setupPusher(s, t, mdmDevice)
+	s.awaitTriggerProfileSchedule(t)
+	s.awaitRunAppleMDMWorkerSchedule()
+	installs, removes := checkNextPayloads(t, mdmDevice, false)
+	s.signedProfilesMatch(
+		defaultProfiles,
+		installs,
+	)
+	require.Empty(t, removes)
+	err = s.keyValueStore.Delete(ctx, fleet.MDMProfileProcessingKeyPrefix+":"+host.UUID)
+	require.NoError(t, err)
+
+	// setup: start smallstep-backed SCEP server (the SCEP protocol server is
+	// the same for NDES; only the challenge source differs)
+	scepServer := scep_server.StartTestSCEPServer(t)
+
+	// setup: start a mock NDES admin server that returns a fresh challenge
+	// password on each request. NDES challenge passwords are single-use, so
+	// every fetch must produce a new value.
+	challengeCounter := atomic.Int64{}
+	challengeValue := atomic.Value{}
+	ndesAdminServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// NDES challenge passwords are single-use and rotate on each fetch.
+		// (Note: the NDES admin URL is reached via an NTLM negotiator that may
+		// send an unauthenticated probe first, so we don't assert on the
+		// Authorization header here.)
+		challengeCounter.Add(1)
+		newChallengeValue := strings.ReplaceAll(uuid.New().String(), "-", "")
+		challengeValue.Store(newChallengeValue)
+		w.WriteHeader(http.StatusOK)
+		// Fleet parses the challenge out of this exact HTML shape (see
+		// GetNDESSCEPChallenge / challengeRegex).
+		_, _ = w.Write([]byte(fmt.Sprintf(
+			`<HTML><BODY>The enrollment challenge password is: <B> %s </B></BODY></HTML>`, newChallengeValue)))
+	}))
+	t.Cleanup(ndesAdminServer.Close)
+
+	// setup: create the NDES CA in Fleet (singleton). Creating/validating it
+	// fetches a challenge from the admin server.
+	_ = s.Do("POST", "/api/v1/fleet/spec/certificate_authorities", batchApplyCertificateAuthoritiesRequest{
+		CertificateAuthorities: fleet.GroupedCertificateAuthorities{
+			NDESSCEP: &fleet.NDESSCEPProxyCA{
+				URL:      scepServer.URL + "/scep",
+				AdminURL: ndesAdminServer.URL + "/mscep_admin/",
+				Username: "testuser",
+				Password: "testpassword",
+			},
+		},
+		DryRun: false,
+	}, http.StatusOK)
+	require.Positive(t, challengeCounter.Load(), "challenge endpoint should be called during CA validation")
+
+	// setup: create a configuration profile that uses the NDES CA for SCEP
+	var profUUID string
+	p := generateTestProfileNDESSCEP("$FLEET_VAR_NDES_SCEP_CHALLENGE", "$FLEET_VAR_SCEP_RENEWAL_ID", "$FLEET_VAR_NDES_SCEP_PROXY_URL")
+	body, headers := generateNewProfileMultipartRequest(t, "ndes.mobileconfig", []byte(p), s.token, nil)
+	_ = s.DoRawWithHeaders("POST", "/api/latest/fleet/configuration_profiles", body.Bytes(), http.StatusOK, headers)
+	mysqltest.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
+		return sqlx.GetContext(ctx, q, &profUUID, "SELECT profile_uuid FROM mdm_apple_configuration_profiles WHERE name = ?", "NDES Fleet WIFI")
+	})
+
+	// scepProfileURL is the expected SCEP proxy URL after variable substitution
+	// (see BuildNDESSCEPProxyURL). NDES appends ",NDES" as the CA-name component.
+	scepProfileURL := fmt.Sprintf("%s%s%s", s.server.URL, apple_mdm.SCEPProxyPath,
+		url.PathEscape(fmt.Sprintf("%s,%s,NDES", host.UUID, profUUID)))
+
+	// expectPayloadWithChallenge executes the profile template with the current
+	// (most recently fetched) challenge value and the other substituted Fleet
+	// variables.
+	expectPayloadWithChallenge := func() string {
+		challengeVal, ok := challengeValue.Load().(string)
+		require.True(t, ok, "challenge value not set")
+		return generateTestProfileNDESSCEP(
+			challengeVal,
+			"fleet-"+profUUID,
+			scepProfileURL,
+		)
+	}
+
+	// parseCommandPayload extracts the profile payload from an InstallProfile command
+	parseCommandPayload := func(cmd *mdm.Command) string {
+		var fullCmd micromdm.CommandPayload
+		require.NoError(t, plist.Unmarshal(cmd.Raw, &fullCmd))
+		p7, err := pkcs7.Parse(fullCmd.Command.InstallProfile.Payload)
+		require.NoError(t, err)
+		return string(p7.Content)
+	}
+
+	// hostProfile represents the relevant fields from host_mdm_apple_profiles for verification
+	type hostProfile struct {
+		ProfileUUID       string  `db:"profile_uuid"`
+		ProfileIdentifier string  `db:"profile_identifier"`
+		ProfileName       string  `db:"profile_name"`
+		Status            *string `db:"status"`
+		OperationType     *string `db:"operation_type"`
+		Retries           int     `db:"retries"`
+		CommandUUID       string  `db:"command_uuid"`
+	}
+
+	listHostProfilesDB := func(hostUUID string) []hostProfile {
+		var got []hostProfile
+		mysqltest.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
+			// ignore the Fleet-internal profiles; we only care about the custom NDES profile
+			return sqlx.SelectContext(t.Context(), q, &got, `
+				SELECT profile_uuid, profile_identifier, profile_name, status, operation_type, retries, command_uuid
+				FROM host_mdm_apple_profiles
+				WHERE host_uuid = ? AND profile_identifier NOT IN (?, ?)`,
+				hostUUID, mobileconfig.FleetdConfigPayloadIdentifier, mobileconfig.FleetCARootConfigPayloadIdentifier)
+		})
+		return got
+	}
+
+	// expectHostProf is the running expectation for the custom NDES profile's DB row
+	expectHostProf := hostProfile{
+		ProfileUUID:       profUUID,
+		ProfileIdentifier: "NDES Fleet WIFI",
+		ProfileName:       "NDES Fleet WIFI",
+		OperationType:     new("install"),
+		Status:            nil,
+		Retries:           0,
+		CommandUUID:       "",
+	}
+
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Test scenarios
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	// reconcile fetches a fresh challenge and enqueues the InstallProfile command
+	beforeReconcile := challengeCounter.Load()
+	s.awaitTriggerProfileSchedule(t)
+	require.Greater(t, challengeCounter.Load(), beforeReconcile, "challenge endpoint should be called during host profile reconciliation")
+
+	// MDM checkin should deliver the InstallProfile command with the SCEP profile
+	cmd, err := mdmDevice.Idle()
+	require.NoError(t, err)
+	require.NotNil(t, cmd)
+	prevCommandUUID := cmd.CommandUUID
+	require.Equal(t, "InstallProfile", cmd.Command.RequestType)
+	require.Equal(t, expectPayloadWithChallenge(), parseCommandPayload(cmd))
+	prevChallenge, _ := challengeValue.Load().(string)
+
+	expectHostProf.CommandUUID = cmd.CommandUUID
+	expectHostProf.Status = new("pending")
+	expectHostProf.Retries = 0
+
+	gotHostProfs := listHostProfilesDB(host.UUID)
+	require.Len(t, gotHostProfs, 1)
+	require.Equal(t, expectHostProf, gotHostProfs[0])
+
+	// Drive failures until the retry limit is exhausted. Each failure below the
+	// limit triggers a resend with a brand-new challenge (the core behavior the
+	// user asked about). When retries == MaxAppleProfileRetries, the next
+	// failure marks the profile failed.
+	for retries := range servermdm.MaxAppleProfileRetries {
+		// device reports failure for the current install command
+		cmd, err = mdmDevice.Err(prevCommandUUID, []mdm.ErrorChain{})
+		require.NoError(t, err)
+		require.Nil(t, cmd)
+
+		expectHostProf.CommandUUID = prevCommandUUID
+		expectHostProf.Status = nil
+		expectHostProf.Retries = retries + 1
+		gotHostProfs = listHostProfilesDB(host.UUID)
+		require.Len(t, gotHostProfs, 1)
+		require.Equal(t, expectHostProf, gotHostProfs[0])
+
+		// cron resends with a new challenge
+		s.awaitTriggerProfileSchedule(t)
+		cmd, err = mdmDevice.Idle()
+		require.NoError(t, err)
+		require.NotNil(t, cmd)
+		require.NotEqual(t, prevCommandUUID, cmd.CommandUUID)
+		require.Equal(t, "InstallProfile", cmd.Command.RequestType)
+		// a fresh, different challenge should have been fetched and embedded
+		newChallenge, _ := challengeValue.Load().(string)
+		require.NotEqual(t, prevChallenge, newChallenge, "expected a new NDES challenge on resend")
+		require.Equal(t, expectPayloadWithChallenge(), parseCommandPayload(cmd))
+		prevChallenge = newChallenge
+		prevCommandUUID = cmd.CommandUUID
+
+		expectHostProf.CommandUUID = cmd.CommandUUID
+		expectHostProf.Status = new("pending")
+		gotHostProfs = listHostProfilesDB(host.UUID)
+		require.Len(t, gotHostProfs, 1)
+		require.Equal(t, expectHostProf, gotHostProfs[0])
+	}
+
+	// final failure: retries == MaxAppleProfileRetries, profile is marked failed
+	cmd, err = mdmDevice.Err(prevCommandUUID, []mdm.ErrorChain{})
+	require.NoError(t, err)
+	require.Nil(t, cmd)
+
+	expectHostProf.CommandUUID = prevCommandUUID
+	expectHostProf.Status = new("failed")
+	expectHostProf.Retries = servermdm.MaxAppleProfileRetries
+	gotHostProfs = listHostProfilesDB(host.UUID)
+	require.Len(t, gotHostProfs, 1)
+	require.Equal(t, expectHostProf, gotHostProfs[0])
+
+	// manually resend the profile (ignores retry limit). This brings status
+	// back to pending so the host has a live, in-flight SCEP command we can
+	// then expire — matching the real-world setup for the expiry bug.
+	_ = s.Do("POST", fmt.Sprintf("/api/v1/fleet/hosts/%d/configuration_profiles/%s/resend", host.ID, profUUID), nil, http.StatusAccepted)
+	s.awaitTriggerProfileSchedule(t)
+	cmd, err = mdmDevice.Idle()
+	require.NoError(t, err)
+	require.NotNil(t, cmd)
+	require.NotEqual(t, prevCommandUUID, cmd.CommandUUID)
+	prevCommandUUID = cmd.CommandUUID
+	require.Equal(t, "InstallProfile", cmd.Command.RequestType)
+	require.Equal(t, expectPayloadWithChallenge(), parseCommandPayload(cmd))
+
+	expectHostProf.CommandUUID = cmd.CommandUUID
+	expectHostProf.Status = new("pending")
+	expectHostProf.Retries = servermdm.MaxAppleProfileRetries // manual resend doesn't reset retries
+	gotHostProfs = listHostProfilesDB(host.UUID)
+	require.Len(t, gotHostProfs, 1)
+	require.Equal(t, expectHostProf, gotHostProfs[0])
+
+	// simulate challenge expiration by backdating challenge_retrieved_at past
+	// NDESChallengeInvalidAfter (57m). 2 hours is comfortably beyond that.
+	mysqltest.ExecAdhocSQL(t, s.ds, func(q sqlx.ExtContext) error {
+		res, execErr := q.ExecContext(t.Context(),
+			"UPDATE host_mdm_managed_certificates SET challenge_retrieved_at = DATE_SUB(challenge_retrieved_at, INTERVAL 2 HOUR) WHERE host_uuid = ? AND profile_uuid = ?",
+			host.UUID, profUUID)
+		require.NoError(t, execErr)
+		rows, err := res.RowsAffected()
+		require.NoError(t, err)
+		require.Equal(t, int64(1), rows, "expected to backdate exactly the NDES profile's managed certificate row")
+		return nil
+	})
+
+	// MDM client performs a SCEP PKIOperation after the challenge has expired;
+	// Fleet intercepts and returns an error rather than forwarding it.
+	resp, err := http.Get(scepProfileURL + "?operation=PKIOperation&message=" + base64.URLEncoding.EncodeToString([]byte("dummy")))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Contains(t, extractServerErrorText(resp.Body), "challenge password has expired")
+
+	// INVARIANT: the expired challenge resends via ResendHostCertificateProfile,
+	// which clears command_uuid and resets retries so the resend is clean and
+	// unbounded (status back to NULL).
+	expectHostProf.Status = nil
+	expectHostProf.Retries = 0
+	expectHostProf.CommandUUID = ""
+	gotHostProfs = listHostProfilesDB(host.UUID)
+	require.Len(t, gotHostProfs, 1)
+	require.Equal(t, expectHostProf, gotHostProfs[0])
+
+	// The MDM client now reports the failure for the install command that was
+	// in flight when the challenge expired. Because the command_uuid should
+	// have been cleared above, this stale failure must be a no-op and must NOT
+	// corrupt the profile state.
+	cmd, err = mdmDevice.Err(prevCommandUUID, []mdm.ErrorChain{})
+	require.NoError(t, err)
+	require.Nil(t, cmd)
+
+	// INVARIANT: because command_uuid was cleared above, this stale failure ACK
+	// matches no row and is a no-op — it must not flip the profile to "failed"
+	// or otherwise change the DB state, so the resend can still proceed.
+	gotHostProfs = listHostProfilesDB(host.UUID)
+	require.Len(t, gotHostProfs, 1)
+	require.Equal(t, expectHostProf, gotHostProfs[0])
+
+	// reconcile should resend the profile with a fresh challenge
+	cmd, err = mdmDevice.Idle()
+	require.NoError(t, err)
+	require.Nil(t, cmd) // nothing until reconcile runs
+	s.awaitTriggerProfileSchedule(t)
+
+	cmd, err = mdmDevice.Idle()
+	require.NoError(t, err)
+	require.NotNil(t, cmd, "expected the SCEP profile to be resent after challenge expiration")
+	require.Equal(t, "InstallProfile", cmd.Command.RequestType)
+	require.NotEqual(t, prevCommandUUID, cmd.CommandUUID)
+	require.Equal(t, expectPayloadWithChallenge(), parseCommandPayload(cmd))
+
+	expectHostProf.Status = new("pending")
+	expectHostProf.Retries = 0
+	expectHostProf.CommandUUID = cmd.CommandUUID
+	gotHostProfs = listHostProfilesDB(host.UUID)
+	require.Len(t, gotHostProfs, 1)
+	require.Equal(t, expectHostProf, gotHostProfs[0])
+}
+
+func generateTestProfileNDESSCEP(challenge, ou, url string) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>PayloadContent</key>
+    <array>
+       <dict>
+          <key>PayloadContent</key>
+          <dict>
+             <key>Challenge</key>
+             <string>%s</string>
+             <key>Key Type</key>
+             <string>RSA</string>
+             <key>Key Usage</key>
+             <integer>5</integer>
+             <key>Keysize</key>
+             <integer>2048</integer>
+             <key>Subject</key>
+                    <array>
+                        <array>
+                          <array>
+                            <string>CN</string>
+                            <string>SerialNumber WIFI</string>
+                          </array>
+                        </array>
+                        <array>
+                          <array>
+                            <string>OU</string>
+                            <string>%s</string>
+                          </array>
+                        </array>
+                    </array>
+             <key>URL</key>
+             <string>%s</string>
+          </dict>
+          <key>PayloadDisplayName</key>
+          <string>WIFI SCEP</string>
+          <key>PayloadIdentifier</key>
+          <string>com.apple.security.scep.8ACC34A5-72F9-42B7-9A98-7AD9A9CCA3AF</string>
+          <key>PayloadType</key>
+          <string>com.apple.security.scep</string>
+          <key>PayloadUUID</key>
+          <string>8ACC34A5-72F9-42B7-9A98-7AD9A9CCA3AF</string>
+          <key>PayloadVersion</key>
+          <integer>1</integer>
+       </dict>
+    </array>
+    <key>PayloadDisplayName</key>
+    <string>NDES Fleet WIFI</string>
+    <key>PayloadIdentifier</key>
+    <string>NDES Fleet WIFI</string>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadUUID</key>
+    <string>3BD1BD65-1D2C-4E9E-9E18-9BCD400CDEDF</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+</dict>
+</plist>`, challenge, ou, url)
 }
 
 func generateTestProfileSmallstepSCEP(challenge, ou, url string) string {

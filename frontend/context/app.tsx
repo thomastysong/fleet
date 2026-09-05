@@ -75,6 +75,8 @@ interface ISetAndroidEnterpriseDeletedAction {
 interface IAbmExpiry {
   earliestExpiry: string;
   needsAbmTermsRenewal: boolean;
+  hasInvalidABMToken: boolean;
+  invalidAbmTokenOrgNames: string[];
 }
 
 interface ISetABMExpiryAction {
@@ -182,6 +184,8 @@ type InitialStateType = {
   isApplePnsExpired: boolean;
   isVppExpired: boolean;
   needsAbmTermsRenewal: boolean;
+  hasInvalidABMToken: boolean;
+  invalidAbmTokenOrgNames: string[];
   willAppleBmExpire: boolean;
   willApplePnsExpire: boolean;
   willVppExpire: boolean;
@@ -260,6 +264,8 @@ export const initialState = {
   isApplePnsExpired: false,
   isVppExpired: false,
   needsAbmTermsRenewal: false,
+  hasInvalidABMToken: false,
+  invalidAbmTokenOrgNames: [],
   willAppleBmExpire: false,
   willApplePnsExpire: false,
   willVppExpire: false,
@@ -339,6 +345,24 @@ const setPermissions = (
   };
 };
 
+export const sortAvailableTeams = (
+  availableFleets: ITeamSummary[],
+  user: IUser | null
+): ITeamSummary[] => {
+  const sortedFleets = [...availableFleets]
+    .sort((a, b) => sort.caseInsensitiveAsc(a.name, b.name))
+    .filter(
+      (t) =>
+        t.name !== APP_CONTEXT_ALL_TEAMS_SUMMARY.name &&
+        t.name !== APP_CONTEXT_NO_TEAM_SUMMARY.name
+    );
+  if (user && permissions.isOnGlobalTeam(user)) {
+    sortedFleets.unshift(APP_CONTEXT_ALL_TEAMS_SUMMARY);
+    sortedFleets.push(APP_CONTEXT_NO_TEAM_SUMMARY);
+  }
+  return sortedFleets;
+};
+
 const reducer = (state: InitialStateType, action: IAction) => {
   switch (action.type) {
     case ACTIONS.SET_USER_SETTINGS: {
@@ -349,27 +373,9 @@ const reducer = (state: InitialStateType, action: IAction) => {
       };
     }
     case ACTIONS.SET_AVAILABLE_TEAMS: {
-      const { user, availableTeams } = action;
-
-      let sortedTeams = availableTeams.sort(
-        (a: ITeamSummary, b: ITeamSummary) =>
-          sort.caseInsensitiveAsc(a.name, b.name)
-      );
-      sortedTeams = sortedTeams.filter(
-        (t) =>
-          t.name !== APP_CONTEXT_ALL_TEAMS_SUMMARY.name &&
-          t.name !== APP_CONTEXT_NO_TEAM_SUMMARY.name
-      );
-      if (user && permissions.isOnGlobalTeam(user)) {
-        sortedTeams.unshift(
-          APP_CONTEXT_ALL_TEAMS_SUMMARY,
-          APP_CONTEXT_NO_TEAM_SUMMARY
-        );
-      }
-
       return {
         ...state,
-        availableTeams: sortedTeams,
+        availableTeams: sortAvailableTeams(action.availableTeams, action.user),
       };
     }
     case ACTIONS.SET_CURRENT_USER: {
@@ -413,13 +419,20 @@ const reducer = (state: InitialStateType, action: IAction) => {
     }
     case ACTIONS.SET_ABM_EXPIRY: {
       const { abmExpiry } = action;
-      const { earliestExpiry, needsAbmTermsRenewal } = abmExpiry;
+      const {
+        earliestExpiry,
+        needsAbmTermsRenewal,
+        hasInvalidABMToken,
+        invalidAbmTokenOrgNames,
+      } = abmExpiry;
       return {
         ...state,
         abmExpiry,
         isAppleBmExpired: hasLicenseExpired(earliestExpiry),
         willAppleBmExpire: willExpireWithinXDays(earliestExpiry, 30),
         needsAbmTermsRenewal,
+        hasInvalidABMToken,
+        invalidAbmTokenOrgNames,
       };
     }
     case ACTIONS.SET_APNS_EXPIRY: {
@@ -592,6 +605,8 @@ const AppProvider = ({ children }: Props): JSX.Element => {
       isApplePnsExpired: state.isApplePnsExpired,
       isVppExpired: state.isVppExpired,
       needsAbmTermsRenewal: state.needsAbmTermsRenewal,
+      hasInvalidABMToken: state.hasInvalidABMToken,
+      invalidAbmTokenOrgNames: state.invalidAbmTokenOrgNames,
       willAppleBmExpire: state.willAppleBmExpire,
       willApplePnsExpire: state.willApplePnsExpire,
       willVppExpire: state.willVppExpire,
@@ -691,6 +706,8 @@ const AppProvider = ({ children }: Props): JSX.Element => {
       state.isWindowsMdmEnabledAndConfigured,
       state.isAndroidMdmEnabledAndConfigured,
       state.needsAbmTermsRenewal,
+      state.hasInvalidABMToken,
+      state.invalidAbmTokenOrgNames,
       state.noSandboxHosts,
       state.sandboxExpiry,
       state.vppExpiry,

@@ -1,6 +1,5 @@
 import Button from "components/buttons/Button";
-import EmptyTable from "components/EmptyTable";
-import Icon from "components/Icon";
+import EmptyState from "components/EmptyState";
 import TableContainer from "components/TableContainer";
 import TableCount from "components/TableContainer/TableCount";
 import React, { useCallback, useState } from "react";
@@ -13,6 +12,7 @@ import FileSaver from "file-saver";
 import Spinner from "components/Spinner";
 import { HumanTimeDiffWithFleetLaunchCutoff } from "components/HumanTimeDiffWithDateTip";
 import TooltipWrapper from "components/TooltipWrapper";
+import TooltipTruncatedText from "components/TooltipTruncatedText";
 import {
   getPerformanceImpactDescription,
   getPerformanceImpactIndicatorTooltip,
@@ -108,21 +108,22 @@ const HQRTable = ({
         <Button
           className={`${baseClass}__show-query-btn`}
           onClick={onShowQuery}
-          variant="inverse"
+          variant="secondary"
+          size="small"
+          icon="eye"
+          iconPosition="right"
         >
-          <>
-            Show query <Icon name="eye" />
-          </>
+          Show query
         </Button>
         <Button
           className={`${baseClass}__export-btn`}
           onClick={onExportQueryResults}
-          variant="inverse"
+          variant="secondary"
+          size="small"
+          icon="download"
+          iconPosition="right"
         >
-          <>
-            Export results
-            <Icon name="download" />
-          </>
+          Export results
         </Button>
       </div>
     );
@@ -131,9 +132,8 @@ const HQRTable = ({
   const renderEmptyState = useCallback(() => {
     if (reportClipped) {
       return (
-        <EmptyTable
+        <EmptyState
           className={`${baseClass}__report-clipped`}
-          graphicName="empty-software"
           header="Report clipped"
           info="This report has paused reporting in Fleet, and no results were saved for this host."
         />
@@ -142,9 +142,8 @@ const HQRTable = ({
     if (!lastFetched) {
       // collecting results
       return (
-        <EmptyTable
+        <EmptyState
           className={`${baseClass}__collecting-results`}
-          graphicName="collecting-results"
           header="Collecting results..."
           info={`Fleet is collecting report results from ${hostName}. Check back later.`}
         />
@@ -152,9 +151,8 @@ const HQRTable = ({
     }
     return (
       // nothing to report
-      <EmptyTable
+      <EmptyState
         className={`${baseClass}__nothing-to-report`}
-        graphicName="empty-software"
         header="Nothing to report"
         info={`This report has run on ${hostName}, but returned no data for this host.`}
       />
@@ -176,8 +174,10 @@ const HQRTable = ({
   const renderTableInfo = useCallback(
     () => (
       <div className={`${baseClass}__query-info`}>
-        <div>
-          <h2>{queryName}</h2>
+        <div className={`${baseClass}__query-info-text`}>
+          <h2>
+            <TooltipTruncatedText value={queryName} fixedPositionStrategy />
+          </h2>
           <h3>{queryDescription}</h3>
         </div>
         <PerformanceImpact queryStats={queryStats} queryId={queryId} />
@@ -211,6 +211,7 @@ const HQRTable = ({
           emptyComponent={() => null}
           defaultSortHeader={columnConfigs[0].id}
           defaultSortDirection="asc"
+          getRowId={(_row, index) => String(index)}
         />
       )}
     </div>

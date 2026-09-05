@@ -6,8 +6,9 @@ import { AppContext } from "context/app";
 import CustomLink from "components/CustomLink";
 import Radio from "components/forms/fields/Radio";
 
-// @ts-ignore
 import InputField from "components/forms/fields/InputField";
+
+import EnrollQrCode from "../EnrollQrCode";
 
 type EnrollmentType = "workProfile" | "fullyManaged";
 
@@ -48,6 +49,7 @@ const AndroidPanel = ({ enrollSecret }: IAndroidPanelProps) => {
         <CustomLink
           url={PATHS.ADMIN_INTEGRATIONS_MDM_ANDROID}
           text="Turn on Android MDM"
+          emphasized
         />{" "}
         to enroll Android hosts.
       </p>
@@ -67,7 +69,7 @@ const AndroidPanel = ({ enrollSecret }: IAndroidPanelProps) => {
           <Radio
             name="enrollmentType"
             id="workProfile"
-            label="Work profile"
+            label="Personal (BYOD)"
             value="workProfile"
             checked={enrollmentType === "workProfile"}
             onChange={() => setEnrollmentType("workProfile")}
@@ -75,20 +77,24 @@ const AndroidPanel = ({ enrollSecret }: IAndroidPanelProps) => {
           <Radio
             name="enrollmentType"
             id="fullyManaged"
-            label="Fully-managed (no work profile)"
+            label="Company-owned (fully-managed)"
             value="fullyManaged"
             checked={enrollmentType === "fullyManaged"}
             onChange={() => setEnrollmentType("fullyManaged")}
           />
         </fieldset>
+        <h3 className="platform-wrapper__panel-heading">
+          Enrollment instructions
+        </h3>
         <InputField
-          label="Enrollment instructions:"
+          label="Share this link with your end users:"
           enableCopy
           readOnly
           inputWrapperClass={`${baseClass}__enroll-link`}
           name="enroll-link"
           value={url}
         />
+        <EnrollQrCode url={url} />
       </form>
     </div>
   );

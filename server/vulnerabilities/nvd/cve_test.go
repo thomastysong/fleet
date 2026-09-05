@@ -1,12 +1,15 @@
 package nvd
 
 import (
+	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -453,6 +456,19 @@ func TestTranslateCPEToCVE(t *testing.T) {
 		// 	},
 		// 	continuesToUpdate: true,
 		// },
+		// Ensure malformed ipswitch whatsup cpe is successfully matched to CVE
+		// See https://github.com/fleetdm/fleet/issues/32662.
+		"cpe:2.3:a:ipswitch:whatsup:2006:-:professional:premium:*:*:*:*": {
+			includedCVEs: []cve{
+				{ID: "CVE-2006-2351"},
+				{ID: "CVE-2006-2352"},
+				{ID: "CVE-2006-2353"},
+				{ID: "CVE-2006-2354"},
+				{ID: "CVE-2006-2355"},
+				{ID: "CVE-2006-2356"},
+				{ID: "CVE-2006-2357"},
+			},
+		},
 		// Tests the expandCPEAliases rule for virtualbox on macOS
 		"cpe:2.3:a:oracle:virtualbox:7.0.6:*:*:*:*:macos:*:*": {
 			includedCVEs: []cve{
@@ -542,66 +558,72 @@ func TestTranslateCPEToCVE(t *testing.T) {
 			excludedCVEs:      []string{"CVE-2024-12254"},
 			continuesToUpdate: true,
 		},
+		// NOTE: VulnCheck (the sole source — NVD has no CPE config for these CVEs)
+		// currently mislabels several CPython version ranges under product
+		// cpe:2.3:a:libexpat_project:libexpat instead of cpe:2.3:a:python:python.
+		// libexpat's real versions are 2.x, so the 3.x ranges clearly belong to CPython.
+		// These entries are commented out below until VulnCheck corrects the feed —
+		// uncomment them once upstream relabels the CVEs back to python:python.
 		"cpe:2.3:a:python:python:3.12.0:-:*:*:*:macos:*:*": {
 			includedCVEs: []cve{
-				{
-					ID:                "CVE-2025-1795",
-					resolvedInVersion: "3.12.3",
-				},
+				// {
+				// 	ID:                "CVE-2025-1795",
+				// 	resolvedInVersion: "3.12.3",
+				// },
 				{
 					ID:                "CVE-2024-7592",
 					resolvedInVersion: "3.12.6",
 				},
-				{
-					ID:                "CVE-2024-6923",
-					resolvedInVersion: "3.12.5",
-				},
-				{
-					ID:                "CVE-2024-0397",
-					resolvedInVersion: "3.12.3",
-				},
-				{
-					ID:                "CVE-2024-12254",
-					resolvedInVersion: "3.12.9",
-				},
+				// {
+				// 	ID:                "CVE-2024-6923",
+				// 	resolvedInVersion: "3.12.5",
+				// },
+				// {
+				// 	ID:                "CVE-2024-0397",
+				// 	resolvedInVersion: "3.12.3",
+				// },
+				// {
+				// 	ID:                "CVE-2024-12254",
+				// 	resolvedInVersion: "3.12.9",
+				// },
 				{
 					ID:                "CVE-2024-9287",
 					resolvedInVersion: "3.12.8",
 				},
-				{
-					ID:                "CVE-2025-0938",
-					resolvedInVersion: "3.12.9",
-				},
+				// {
+				// 	ID:                "CVE-2025-0938",
+				// 	resolvedInVersion: "3.12.9",
+				// },
 				{
 					ID: "CVE-2023-6507",
 					// TODO: fix missing version here (according to vulncheck it was fixed in
 					// 3.12.1, but the generated feed data doesn't have this value)
 					resolvedInVersion: "",
 				},
-				{
-					ID:                "CVE-2024-8088",
-					resolvedInVersion: "3.12.6",
-				},
-				{
-					ID:                "CVE-2024-4032",
-					resolvedInVersion: "3.12.4",
-				},
-				{
-					ID:                "CVE-2024-3219",
-					resolvedInVersion: "3.12.5",
-				},
-				{
-					ID:                "CVE-2024-0450",
-					resolvedInVersion: "3.12.2",
-				},
-				{
-					ID:                "CVE-2023-6597",
-					resolvedInVersion: "3.12.1",
-				},
-				{
-					ID:                "CVE-2024-3220",
-					resolvedInVersion: "3.14.0",
-				},
+				// {
+				// 	ID:                "CVE-2024-8088",
+				// 	resolvedInVersion: "3.12.6",
+				// },
+				// {
+				// 	ID:                "CVE-2024-4032",
+				// 	resolvedInVersion: "3.12.4",
+				// },
+				// {
+				// 	ID:                "CVE-2024-3219",
+				// 	resolvedInVersion: "3.12.5",
+				// },
+				// {
+				// 	ID:                "CVE-2024-0450",
+				// 	resolvedInVersion: "3.12.2",
+				// },
+				// {
+				// 	ID:                "CVE-2023-6597",
+				// 	resolvedInVersion: "3.12.1",
+				// },
+				// {
+				// 	ID:                "CVE-2024-3220",
+				// 	resolvedInVersion: "3.14.0",
+				// },
 				{
 					ID:                "CVE-2024-6232",
 					resolvedInVersion: "3.12.6",
@@ -611,41 +633,41 @@ func TestTranslateCPEToCVE(t *testing.T) {
 		},
 		"cpe:2.3:a:python:python:3.14.0:alpha1:*:*:*:macos:*:*": {
 			includedCVEs: []cve{
-				{
-					ID:                "CVE-2024-12254",
-					resolvedInVersion: "3.14.0a3",
-				},
+				// {
+				// 	ID:                "CVE-2024-12254",
+				// 	resolvedInVersion: "3.14.0a3",
+				// },
 				{
 					ID:                "CVE-2024-9287",
 					resolvedInVersion: "",
 				},
-				{
-					ID:                "CVE-2025-0938",
-					resolvedInVersion: "3.14.0a5",
-				},
+				// {
+				// 	ID:                "CVE-2025-0938",
+				// 	resolvedInVersion: "3.14.0a5",
+				// },
 			},
 			continuesToUpdate: true,
 		},
 		"cpe:2.3:a:python:python:3.14.0:alpha2:*:*:*:macos:*:*": {
 			includedCVEs: []cve{
-				{
-					ID:                "CVE-2024-12254",
-					resolvedInVersion: "3.14.0a3",
-				},
-				{
-					ID:                "CVE-2025-0938",
-					resolvedInVersion: "3.14.0a5",
-				},
+				// {
+				// 	ID:                "CVE-2024-12254",
+				// 	resolvedInVersion: "3.14.0a3",
+				// },
+				// {
+				// 	ID:                "CVE-2025-0938",
+				// 	resolvedInVersion: "3.14.0a5",
+				// },
 			},
 			continuesToUpdate: true,
 		},
 		"cpe:2.3:a:python:python:3.14.0:alpha3:*:*:*:macos:*:*": {
 			excludedCVEs: []string{"CVE-2024-12254"},
 			includedCVEs: []cve{
-				{
-					ID:                "CVE-2025-0938",
-					resolvedInVersion: "3.14.0a5",
-				},
+				// {
+				// 	ID:                "CVE-2025-0938",
+				// 	resolvedInVersion: "3.14.0a5",
+				// },
 			},
 			continuesToUpdate: true,
 		},
@@ -658,12 +680,23 @@ func TestTranslateCPEToCVE(t *testing.T) {
 			continuesToUpdate: true,
 		},
 		"cpe:2.3:a:docker:desktop:4.43.2:*:*:*:*:macos:*:*": {
-			includedCVEs:      []cve{{ID: "CVE-2025-9074", resolvedInVersion: "4.44.3"}},
+			includedCVEs:      []cve{{ID: "CVE-2026-2664", resolvedInVersion: "4.62.0"}},
 			continuesToUpdate: true,
 		},
 		"cpe:2.3:a:docker:desktop:4.39.0:*:*:*:*:windows:*:*": {
-			includedCVEs:      []cve{{ID: "CVE-2025-9074", resolvedInVersion: "4.44.3"}},
+			includedCVEs:      []cve{{ID: "CVE-2026-2664", resolvedInVersion: "4.62.0"}},
 			continuesToUpdate: true,
+		},
+		// #41586 - Admin By Request false positives on macOS/Linux
+		// These CVEs are Windows-only but NVD data uses target_sw=* so they would match any platform without our fix.
+		"cpe:2.3:a:fasttracksoftware:admin_by_request:5.2:*:*:*:*:macos:*:*": {
+			excludedCVEs: []string{"CVE-2019-17201", "CVE-2019-17202"},
+		},
+		"cpe:2.3:a:fasttracksoftware:admin_by_request:5.2:*:*:*:*:windows:*:*": {
+			includedCVEs: []cve{
+				{ID: "CVE-2019-17201", resolvedInVersion: "6.2.0.0"},
+				{ID: "CVE-2019-17202", resolvedInVersion: "6.2.0.0"},
+			},
 		},
 	}
 
@@ -1247,6 +1280,14 @@ func TestExpandCPEAliases(t *testing.T) {
 	python3130RC1Alias.Version = "3.13.0rc1"
 	python3130RC1Alias.Update = ""
 
+	ipswitchWhatsup := &wfn.Attributes{
+		Vendor:  "ipswitch",
+		Product: "whatsup",
+		Version: "2006",
+	}
+	ipswitchWhatsupAlias := *ipswitchWhatsup
+	ipswitchWhatsupAlias.Product = "whatsup_professional"
+
 	pgadminMacOS := &wfn.Attributes{
 		Vendor:   "pgadmin",
 		Product:  "pgadmin",
@@ -1318,6 +1359,11 @@ func TestExpandCPEAliases(t *testing.T) {
 			expectedAliases: []*wfn.Attributes{python3130RC1, &python3130RC1Alias},
 		},
 		{
+			name:            "ipswitch whatsup alias",
+			cpeItem:         ipswitchWhatsup,
+			expectedAliases: []*wfn.Attributes{ipswitchWhatsup, &ipswitchWhatsupAlias},
+		},
+		{
 			name:    "pgadmin on macos",
 			cpeItem: pgadminMacOS,
 			expectedAliases: []*wfn.Attributes{
@@ -1341,6 +1387,259 @@ func TestExpandCPEAliases(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			aliases := expandCPEAliases(tc.cpeItem)
 			require.Equal(t, tc.expectedAliases, aliases)
+		})
+	}
+}
+
+// nvdFeedItemJSON returns a single NVD CVE_Items entry vulnerable below the
+// given version, matching either a testvendor:testprod software CPE (kind
+// "software") or an apple macOS CPE (kind "os").
+func nvdFeedItemJSON(cveID, kind, versionEndExcluding string) string {
+	cpe23URI := "cpe:2.3:a:testvendor:testprod:*:*:*:*:*:*:*:*"
+	if kind == "os" {
+		cpe23URI = "cpe:2.3:o:apple:macos:*:*:*:*:*:*:*:*"
+	}
+	return fmt.Sprintf(`{
+		"cve": {
+			"CVE_data_meta": {"ID": %q},
+			"description": {"description_data": [{"lang": "en", "value": "test vulnerability"}]}
+		},
+		"configurations": {
+			"CVE_data_version": "4.0",
+			"nodes": [{
+				"operator": "OR",
+				"cpe_match": [{
+					"vulnerable": true,
+					"cpe23Uri": %q,
+					"versionEndExcluding": %q
+				}]
+			}]
+		},
+		"impact": {},
+		"publishedDate": "2023-01-01T00:00Z",
+		"lastModifiedDate": "2023-01-01T00:00Z"
+	}`, cveID, cpe23URI, versionEndExcluding)
+}
+
+// writeTestNVDFeedItems writes a minimal gzipped NVD 1.1 feed file containing
+// the given raw CVE_Items entries (see nvdFeedItemJSON).
+func writeTestNVDFeedItems(t *testing.T, dir, name string, items []string) {
+	t.Helper()
+	feed := fmt.Sprintf(`{
+		"CVE_data_type": "CVE",
+		"CVE_data_format": "MITRE",
+		"CVE_data_version": "4.0",
+		"CVE_Items": [%s]
+	}`, strings.Join(items, ","))
+
+	f, err := os.Create(filepath.Join(dir, name))
+	require.NoError(t, err)
+	gz := gzip.NewWriter(f)
+	_, err = gz.Write([]byte(feed))
+	require.NoError(t, err)
+	require.NoError(t, gz.Close())
+	require.NoError(t, f.Close())
+}
+
+// writeTestNVDFeedFile writes a minimal gzipped NVD 1.1 feed file with one
+// software item per given CVE ID, each affecting testvendor:testprod
+// versions below 2.0.
+func writeTestNVDFeedFile(t *testing.T, dir, name string, cveIDs ...string) {
+	t.Helper()
+	var items []string
+	for _, cveID := range cveIDs {
+		items = append(items, nvdFeedItemJSON(cveID, "software", "2.0"))
+	}
+	writeTestNVDFeedItems(t, dir, name, items)
+}
+
+func TestTranslateCPEToCVEFlushesMatchesInChunks(t *testing.T) {
+	// Not parallel: overrides the package-level flush threshold.
+	orig := matchFlushSize
+	matchFlushSize = 2
+	t.Cleanup(func() { matchFlushSize = orig })
+
+	ctx := t.Context()
+
+	vulnPath := t.TempDir()
+	writeTestNVDFeedFile(t, vulnPath, "nvdcve-1.1-2023.json.gz",
+		"CVE-2023-1111", "CVE-2023-2222", "CVE-2023-3333", "CVE-2023-4444", "CVE-2023-5555")
+	writeTestNVDFeedFile(t, vulnPath, "nvdcve-1.1-2024.json.gz", "CVE-2024-6666")
+
+	ds := new(mock.Store)
+	ds.ListSoftwareCPEsFunc = func(ctx context.Context) ([]fleet.SoftwareCPE, error) {
+		return []fleet.SoftwareCPE{
+			{ID: 1, SoftwareID: 10, CPE: "cpe:2.3:a:testvendor:testprod:1.0:*:*:*:*:*:*:*"},
+		}, nil
+	}
+	ds.ListOperatingSystemsForPlatformFunc = func(ctx context.Context, platform string) ([]fleet.OperatingSystem, error) {
+		return nil, nil
+	}
+
+	var insertCalls int
+	var inserted []fleet.SoftwareVulnerability
+	ds.InsertSoftwareVulnerabilitiesFunc = func(ctx context.Context, vulns []fleet.SoftwareVulnerability, src fleet.VulnerabilitySource) ([]fleet.SoftwareVulnerability, error) {
+		insertCalls++
+		inserted = append(inserted, vulns...)
+		return vulns, nil
+	}
+	ds.InsertOSVulnerabilitiesFunc = func(ctx context.Context, vulns []fleet.OSVulnerability, src fleet.VulnerabilitySource) (int64, error) {
+		return int64(len(vulns)), nil
+	}
+	ds.DeleteOutOfDateVulnerabilitiesFunc = func(ctx context.Context, source fleet.VulnerabilitySource, olderThan time.Time) error {
+		return nil
+	}
+	ds.DeleteOutOfDateOSVulnerabilitiesFunc = func(ctx context.Context, source fleet.VulnerabilitySource, olderThan time.Time) error {
+		return nil
+	}
+
+	collected, err := TranslateCPEToCVE(ctx, ds, vulnPath, slog.New(slog.DiscardHandler), true, time.Now().UTC().Add(-time.Hour))
+	require.NoError(t, err)
+
+	allCVEs := []string{
+		"CVE-2023-1111", "CVE-2023-2222", "CVE-2023-3333", "CVE-2023-4444", "CVE-2023-5555",
+		"CVE-2024-6666",
+	}
+
+	// Sanity: all CVEs from both feed files match the seeded CPE.
+	var cves []string
+	for _, v := range inserted {
+		require.Equal(t, uint(10), v.SoftwareID)
+		cves = append(cves, v.CVE)
+	}
+	require.ElementsMatch(t, allCVEs, cves)
+
+	// Matches must be flushed to the datastore in bounded chunks rather than
+	// accumulated for the whole corpus: holding every matched (software, CVE)
+	// pair in memory is what drove multi-GB peaks on large fleets. With a
+	// threshold of 2 and 6 matches, the sink flushes exactly 3 times.
+	require.Equal(t, 3, insertCalls)
+
+	// collectVulns keeps returning the newly inserted vulnerabilities.
+	var collectedCVEs []string
+	for _, v := range collected {
+		collectedCVEs = append(collectedCVEs, v.CVE)
+	}
+	require.ElementsMatch(t, allCVEs, collectedCVEs)
+
+	require.True(t, ds.DeleteOutOfDateVulnerabilitiesFuncInvoked)
+	require.True(t, ds.DeleteOutOfDateOSVulnerabilitiesFuncInvoked)
+}
+
+func TestTranslateCPEToCVESkipsStaleDeletesOnError(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		// setupFeed writes the feed file(s) for the case into dir.
+		setupFeed          func(t *testing.T, dir string)
+		softwareInsertErr  error
+		osInsertErr        error
+		wantErr            bool
+		wantCollectedCVEs  []string
+		wantSoftwareDelete bool
+		wantOSDelete       bool
+	}{
+		{
+			name: "feed file fails to load",
+			setupFeed: func(t *testing.T, dir string) {
+				writeTestNVDFeedFile(t, dir, "nvdcve-1.1-2023.json.gz", "CVE-2023-1111")
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "nvdcve-1.1-2024.json.gz"), []byte("not a gzip"), 0o644))
+				writeTestNVDFeedFile(t, dir, "nvdcve-1.1-2025.json.gz", "CVE-2025-2222")
+			},
+			// The corrupted file is reported, but the scan continues: matches
+			// from the healthy files are still inserted and collected.
+			// Aborting instead would suppress their automations forever —
+			// earlier chunks are already committed, so the next run would
+			// classify them as already known.
+			wantErr:           true,
+			wantCollectedCVEs: []string{"CVE-2023-1111", "CVE-2025-2222"},
+			// With part of the corpus unread, rows not re-matched this run
+			// can't be assumed stale, so both deletes are skipped.
+			wantSoftwareDelete: false,
+			wantOSDelete:       false,
+		},
+		{
+			name: "software insert fails",
+			setupFeed: func(t *testing.T, dir string) {
+				writeTestNVDFeedItems(t, dir, "nvdcve-1.1-2023.json.gz", []string{
+					nvdFeedItemJSON("CVE-2023-1111", "software", "2.0"),
+					nvdFeedItemJSON("CVE-2023-2222", "os", "16.0"),
+				})
+			},
+			softwareInsertErr: errors.New("insert failed"),
+			wantCollectedCVEs: nil,
+			// Each stream's delete is gated independently: only the software
+			// delete is skipped.
+			wantSoftwareDelete: false,
+			wantOSDelete:       true,
+		},
+		{
+			name: "os insert fails",
+			setupFeed: func(t *testing.T, dir string) {
+				writeTestNVDFeedItems(t, dir, "nvdcve-1.1-2023.json.gz", []string{
+					nvdFeedItemJSON("CVE-2023-1111", "software", "2.0"),
+					nvdFeedItemJSON("CVE-2023-2222", "os", "16.0"),
+				})
+			},
+			osInsertErr:       errors.New("insert failed"),
+			wantCollectedCVEs: []string{"CVE-2023-1111"},
+			// Only the OS delete is skipped.
+			wantSoftwareDelete: true,
+			wantOSDelete:       false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+
+			vulnPath := t.TempDir()
+			tc.setupFeed(t, vulnPath)
+
+			ds := new(mock.Store)
+			ds.ListSoftwareCPEsFunc = func(ctx context.Context) ([]fleet.SoftwareCPE, error) {
+				return []fleet.SoftwareCPE{
+					{ID: 1, SoftwareID: 10, CPE: "cpe:2.3:a:testvendor:testprod:1.0:*:*:*:*:*:*:*"},
+				}, nil
+			}
+			ds.ListOperatingSystemsForPlatformFunc = func(ctx context.Context, platform string) ([]fleet.OperatingSystem, error) {
+				return []fleet.OperatingSystem{{ID: 20, Platform: "darwin", Version: "15.1"}}, nil
+			}
+			ds.InsertSoftwareVulnerabilitiesFunc = func(ctx context.Context, vulns []fleet.SoftwareVulnerability, src fleet.VulnerabilitySource) ([]fleet.SoftwareVulnerability, error) {
+				if tc.softwareInsertErr != nil {
+					return nil, tc.softwareInsertErr
+				}
+				return vulns, nil
+			}
+			ds.InsertOSVulnerabilitiesFunc = func(ctx context.Context, vulns []fleet.OSVulnerability, src fleet.VulnerabilitySource) (int64, error) {
+				if tc.osInsertErr != nil {
+					return 0, tc.osInsertErr
+				}
+				return int64(len(vulns)), nil
+			}
+			ds.DeleteOutOfDateVulnerabilitiesFunc = func(ctx context.Context, source fleet.VulnerabilitySource, olderThan time.Time) error {
+				return nil
+			}
+			ds.DeleteOutOfDateOSVulnerabilitiesFunc = func(ctx context.Context, source fleet.VulnerabilitySource, olderThan time.Time) error {
+				return nil
+			}
+
+			collected, err := TranslateCPEToCVE(ctx, ds, vulnPath, slog.New(slog.DiscardHandler), true, time.Now().UTC().Add(-time.Hour))
+
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			var collectedCVEs []string
+			for _, v := range collected {
+				collectedCVEs = append(collectedCVEs, v.CVE)
+			}
+			require.ElementsMatch(t, tc.wantCollectedCVEs, collectedCVEs)
+
+			require.Equal(t, tc.wantSoftwareDelete, ds.DeleteOutOfDateVulnerabilitiesFuncInvoked)
+			require.Equal(t, tc.wantOSDelete, ds.DeleteOutOfDateOSVulnerabilitiesFuncInvoked)
 		})
 	}
 }

@@ -286,11 +286,9 @@ func (s *Service) CommandAndReportResults(r *mdm.Request, results *mdm.CommandRe
 		cmd.Raw = []byte(expanded)
 	}
 
-	// Expand host-scoped secrets for SetRecoveryLock commands.
-	// SetRecoveryLock is device-only, so UDID is always present and matches host UUID.
-	if cmd.Command.Command.RequestType == fleet.SetRecoveryLockCmdName {
+	expandHostSecrets := func(cmdRaw string, onError func(hostUUID string, errorMsg string)) (expanded string, didError bool) {
 		hostUUID := results.UDID
-		hostExpanded, err := s.store.ExpandHostSecrets(r.Context, string(cmd.Raw), hostUUID)
+		hostExpanded, err := s.store.ExpandHostSecrets(r.Context, cmdRaw, hostUUID)
 		if err != nil {
 			errorMsg := fmt.Sprintf("failed to expand host secrets: %v", err)
 			logger.Info("level", "error", "msg", "expanding host secrets", "err", err)
@@ -308,18 +306,61 @@ func (s *Service) CommandAndReportResults(r *mdm.Request, results *mdm.CommandRe
 			if storeErr := s.store.StoreCommandReport(r, failedResult); storeErr != nil {
 				logger.Info("level", "error", "msg", "storing failed command result", "err", storeErr)
 			}
+
+			onError(hostUUID, errorMsg)
+
+			return "", true
+		}
+
+		return hostExpanded, false
+	}
+
+	// Expand host-scoped secrets for SetRecoveryLock and VerifyRecoveryLock commands.
+	// SetRecoveryLock is device-only, so UDID is always present and matches host UUID.
+	if cmd.Command.Command.RequestType == fleet.SetRecoveryLockCmdName || cmd.Command.Command.RequestType == fleet.VerifyRecoveryLockCmdName {
+		hostExpanded, didError := expandHostSecrets(string(cmd.Raw), func(hostUUID string, errorMsg string) {
 			// Mark the host's recovery lock status as failed so it's not stuck in pending.
-			if storeErr := s.store.SetRecoveryLockFailed(r.Context, hostUUID, errorMsg); storeErr != nil {
+			if storeErr := s.store.SetRecoveryLockFailed(r.Context, hostUUID, cmd.CommandUUID, errorMsg); storeErr != nil {
 				logger.Info("level", "error", "msg", "setting recovery lock failed", "err", storeErr)
 			}
+		})
+		if didError {
 			return nil, nil
 		}
+
+		cmd.Raw = []byte(hostExpanded)
+	}
+
+	// Expand host-scoped secrets for ClearPasscode commands.
+	if cmd.Command.Command.RequestType == fleet.AppleMDMCommandTypeClearPasscode {
+		hostExpanded, didError := expandHostSecrets(string(cmd.Raw), func(hostUUID string, errorMsg string) {
+			// For ClearPasscode command, if we fail to expand host secrets, it likely means the unlock token is missing or invalid.
+			logger.Info("level", "error", "msg", "failed to expand host secrets for ClearPasscode command", "host_uuid", hostUUID, "err", errorMsg)
+		})
+		if didError {
+			return nil, nil
+		}
+
 		cmd.Raw = []byte(hostExpanded)
 	}
 
 	switch cmd.Subtype {
 	case mdm.CommandSubtypeProfileWithSecrets:
-		// Secrets were expanded above. Now we need to base64 encode and sign the configuration profile before returning it to the caller.
+		// Embedded ($FLEET_SECRET_*) secrets were expanded above. Host-scoped
+		// ($FLEET_HOST_SECRET_*) secrets are per-host, so expand them here so the
+		// host-specific value (e.g. the Platform SSO device registration token)
+		// is injected only at delivery time and never stored in the command nor
+		// shown on the /mdm/commands endpoint. This is a no-op when the profile
+		// carries no host secrets.
+		hostExpanded, didError := expandHostSecrets(string(cmd.Raw), func(hostUUID string, errorMsg string) {
+			logger.Info("level", "error", "msg", "failed to expand host secrets for profile", "host_uuid", hostUUID, "err", errorMsg)
+		})
+		if didError {
+			return nil, nil
+		}
+		cmd.Raw = []byte(hostExpanded)
+
+		// Now we need to base64 encode and sign the configuration profile before returning it to the caller.
 		processed, err := s.ps.SignAndEncodeInstallProfile(r.Context, cmd.Raw, cmd.CommandUUID)
 		if err != nil {
 			logger.Info("level", "error", "msg", "signing and encoding profile", "err", err)

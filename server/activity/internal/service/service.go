@@ -14,7 +14,6 @@ import (
 	"github.com/fleetdm/fleet/v4/server/activity/internal/types"
 	"github.com/fleetdm/fleet/v4/server/contexts/ctxerr"
 	platform_authz "github.com/fleetdm/fleet/v4/server/platform/authz"
-	"github.com/fleetdm/fleet/v4/server/ptr"
 	"github.com/hashicorp/go-multierror"
 	"go.opentelemetry.io/otel"
 )
@@ -124,7 +123,8 @@ func (s *Service) ListHostPastActivities(ctx context.Context, hostID uint, opt a
 		return nil, nil, err
 	}
 
-	applyListOptionsDefaults(&opt, "a.created_at")
+	// Use the user-facing key; the datastore allowlist qualifies it to a.created_at.
+	applyListOptionsDefaults(&opt, "created_at")
 	// Convert public options to internal options
 	internalOpt := types.ListOptions{
 		ListOptions:     opt,
@@ -199,7 +199,7 @@ func (s *Service) StreamActivities(systemCtx context.Context, auditLogger api.JS
 			OrderDirection: api.OrderAscending,
 			PerPage:        streamBatchSize,
 			After:          idCursor(afterID),
-			Streamed:       ptr.Bool(false),
+			Streamed:       new(false),
 		})
 		if err != nil {
 			return ctxerr.Wrap(systemCtx, err, "list activities")

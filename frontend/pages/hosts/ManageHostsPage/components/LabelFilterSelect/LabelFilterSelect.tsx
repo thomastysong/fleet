@@ -16,6 +16,7 @@ import {
 } from "utilities/constants";
 import Icon from "components/Icon";
 import Spinner from "components/Spinner";
+import TooltipTruncatedText from "components/TooltipTruncatedText";
 
 import CustomLabelGroupHeading from "../CustomLabelGroupHeading";
 import { createDropdownOptions, IEmptyOption, IGroupOption } from "./helpers";
@@ -67,7 +68,11 @@ const formatOptionLabel = (data: ILabel | IEmptyOption) => {
           className="option-icon"
         />
       )}
-      <span>{displayText}</span>
+      <TooltipTruncatedText
+        className="option-label__text"
+        value={displayText}
+        fixedPositionStrategy
+      />
     </div>
   );
 };
@@ -78,7 +83,7 @@ const LoadingMenu = (
   return (
     <components.Menu {...props}>
       <div className={`${baseClass}__menu-loading`}>
-        <Spinner includeContainer={false} />
+        <Spinner />
       </div>
     </components.Menu>
   );
@@ -92,6 +97,7 @@ interface ILabelFilterSelectProps {
   onChange: (labelId: ILabel) => void;
   onAddLabel: () => void;
   isLoading?: boolean;
+  isDisabled?: boolean;
 }
 
 const LabelFilterSelect = ({
@@ -102,6 +108,7 @@ const LabelFilterSelect = ({
   onChange,
   onAddLabel,
   isLoading = false,
+  isDisabled = false,
 }: ILabelFilterSelectProps) => {
   const [labelQuery, setLabelQuery] = useState("");
 
@@ -196,7 +203,7 @@ const LabelFilterSelect = ({
   };
 
   return (
-    <div className={classes} onClick={toggleMenu}>
+    <div className={classes} onClick={isDisabled ? undefined : toggleMenu}>
       <Select<ILabel | IEmptyOption, false, IGroupOption>
         ref={selectRef}
         name="input-filter-select"
@@ -205,6 +212,7 @@ const LabelFilterSelect = ({
         placeholder="Filter by platform or label"
         value={selectedLabel}
         isSearchable={false}
+        isDisabled={isDisabled}
         components={{
           GroupHeading: CustomLabelGroupHeading,
           DropdownIndicator: CustomDropdownIndicator,

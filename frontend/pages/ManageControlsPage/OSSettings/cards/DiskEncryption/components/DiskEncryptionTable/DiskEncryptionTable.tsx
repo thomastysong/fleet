@@ -8,12 +8,13 @@ import PATHS from "router/paths";
 import { getPathWithQueryParams } from "utilities/url";
 
 import diskEncryptionAPI, {
+  IDiskEncryptionStatusAggregate,
   IDiskEncryptionSummaryResponse,
 } from "services/entities/disk_encryption";
 import { HOSTS_QUERY_PARAMS } from "services/entities/hosts";
 
 import TableContainer from "components/TableContainer";
-import EmptyTable from "components/EmptyTable";
+import EmptyState from "components/EmptyState";
 import DataError from "components/DataError";
 
 import {
@@ -25,7 +26,11 @@ import {
 const baseClass = "disk-encryption-table";
 
 interface IDiskEncryptionTableProps {
+  platform: keyof IDiskEncryptionStatusAggregate;
   currentTeamId?: number;
+  /** macOS enforce-on/escrow-off: hosts never send Fleet a key, so status
+   * tooltips drop the key phrasing. */
+  isMacOSEnforceOnly?: boolean;
   router: InjectedRouter;
 }
 interface IDiskEncryptionRowProps extends Row {
@@ -37,7 +42,9 @@ interface IDiskEncryptionRowProps extends Row {
 }
 
 const DiskEncryptionTable = ({
+  platform,
   currentTeamId,
+  isMacOSEnforceOnly = false,
   router,
 }: IDiskEncryptionTableProps) => {
   const {
@@ -68,7 +75,12 @@ const DiskEncryptionTable = ({
   );
 
   const tableHeaders = generateTableHeaders();
-  const tableData = generateTableData(diskEncryptionStatusData, currentTeamId);
+  const tableData = generateTableData(
+    platform,
+    diskEncryptionStatusData,
+    currentTeamId,
+    isMacOSEnforceOnly
+  );
 
   if (diskEncryptionStatusError) {
     return <DataError />;
@@ -90,7 +102,7 @@ const DiskEncryptionTable = ({
         disablePagination
         disableCount
         emptyComponent={() => (
-          <EmptyTable
+          <EmptyState
             header="No disk encryption status"
             info="Expecting to status data? Try again in a few seconds as the system
               catches up."

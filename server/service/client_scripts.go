@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -138,10 +139,35 @@ func (c *Client) pollForResult(id string) (*fleet.HostScriptResult, error) {
 // no team.
 func (c *Client) ApplyNoTeamScripts(scripts []fleet.ScriptPayload, opts fleet.ApplySpecOptions) ([]fleet.ScriptResponse, error) {
 	verb, path := "POST", "/api/latest/fleet/scripts/batch"
-	var resp batchSetScriptsResponse
+	var resp fleet.BatchSetScriptsResponse
 	err := c.authenticatedRequestWithQuery(map[string]interface{}{"scripts": scripts}, verb, path, &resp, opts.RawQuery())
 
-	return resp.Scripts, err
+	return resp.Scripts, rewrapScriptBatchIndexErr(err, scripts)
+}
+
+// rewrapScriptBatchIndexErr surfaces the offending script's filename when the
+// batch-set scripts endpoint rejects one of them. The server identifies the
+// script only by its position ("scripts[N]"), which is meaningless in fleetctl
+// output; the payload name is the filename, unique within a batch (the server
+// rejects duplicates), so naming it identifies the script unambiguously.
+func rewrapScriptBatchIndexErr(err error, scripts []fleet.ScriptPayload) error {
+	var scErr *StatusCodeErr
+	if !errors.As(err, &scErr) {
+		return err
+	}
+	idxStr, ok := strings.CutPrefix(scErr.Name, "scripts[")
+	if !ok {
+		return err
+	}
+	idxStr, ok = strings.CutSuffix(idxStr, "]")
+	if !ok {
+		return err
+	}
+	idx, convErr := strconv.Atoi(idxStr)
+	if convErr != nil || idx < 0 || idx >= len(scripts) {
+		return err
+	}
+	return fmt.Errorf("script %q: %w", scripts[idx].Name, err)
 }
 
 func (c *Client) validateMacOSSetupScript(fileName string) ([]byte, error) {
@@ -159,7 +185,7 @@ func (c *Client) validateMacOSSetupScript(fileName string) ([]byte, error) {
 func (c *Client) deleteMacOSSetupScript(teamID *uint) error {
 	var query string
 	if teamID != nil {
-		query = fmt.Sprintf("team_id=%d", *teamID)
+		query = fmt.Sprintf("fleet_id=%d", *teamID)
 	}
 
 	verb, path := "DELETE", "/api/latest/fleet/setup_experience/script"
@@ -181,9 +207,9 @@ func (c *Client) uploadMacOSSetupScript(filename string, data []byte, teamID *ui
 		return err
 	}
 
-	// add the team_id field
+	// add the fleet_id field
 	if teamID != nil {
-		if err := w.WriteField("team_id", fmt.Sprint(*teamID)); err != nil {
+		if err := w.WriteField("fleet_id", fmt.Sprint(*teamID)); err != nil {
 			return err
 		}
 	}
@@ -203,7 +229,7 @@ func (c *Client) uploadMacOSSetupScript(filename string, data []byte, teamID *ui
 	defer response.Body.Close()
 
 	var resp setSetupExperienceScriptResponse
-	if err := c.parseResponse(verb, path, response, &resp); err != nil {
+	if err := c.ParseResponse(verb, path, response, &resp); err != nil {
 		return fmt.Errorf("parse response: %w", err)
 	}
 
@@ -213,7 +239,7 @@ func (c *Client) uploadMacOSSetupScript(filename string, data []byte, teamID *ui
 // ListScripts retrieves the saved scripts.
 func (c *Client) ListScripts(query string) ([]*fleet.Script, error) {
 	verb, path := "GET", "/api/latest/fleet/scripts"
-	var responseBody listScriptsResponse
+	var responseBody fleet.ListScriptsResponse
 	err := c.authenticatedRequestWithQuery(nil, verb, path, &responseBody, query)
 	if err != nil {
 		return nil, err
@@ -229,7 +255,7 @@ func (c *Client) GetScriptContents(scriptID uint) ([]byte, error) {
 		return nil, fmt.Errorf("%s %s: %w", verb, path, err)
 	}
 	defer response.Body.Close()
-	err = c.parseResponse(verb, path, response, nil)
+	err = c.ParseResponse(verb, path, response, nil)
 	if err != nil {
 		return nil, fmt.Errorf("parsing script response: %w", err)
 	}
@@ -248,7 +274,7 @@ func (c *Client) GetSetupExperienceScript(teamID uint) (*fleet.Script, error) {
 	verb, path := "GET", "/api/latest/fleet/setup_experience/script"
 	var query string
 	if teamID != 0 {
-		query = fmt.Sprintf("team_id=%d", teamID)
+		query = fmt.Sprintf("fleet_id=%d", teamID)
 	}
 	var responseBody getSetupExperienceScriptResponse
 	err := c.authenticatedRequestWithQuery(nil, verb, path, &responseBody, query)

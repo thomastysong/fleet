@@ -40,9 +40,11 @@ func TestTeams(t *testing.T) {
 		{"TeamsMDMConfig", testTeamsMDMConfig},
 		{"TestTeamsNameUnicode", testTeamsNameUnicode},
 		{"TestTeamsNameEmoji", testTeamsNameEmoji},
+		{"TestTeamConflictsWithName", testTeamConflictsWithName},
 		{"TestTeamsNameSort", testTeamsNameSort},
 		{"TeamIDsWithSetupExperienceIdPEnabled", testTeamIDsWithSetupExperienceIdPEnabled},
 		{"DefaultTeamConfig", testDefaultTeamConfig},
+		{"TeamLitesByIDs", testTeamLitesByIDs},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -122,7 +124,7 @@ func testTeamsGetSetDelete(t *testing.T, ds *Datastore) {
 				Name:       "decl-1",
 				TeamID:     &team.ID,
 				RawJSON:    json.RawMessage(`{"Type": "com.apple.configuration.test", "Identifier": "decl-1"}`),
-			})
+			}, nil)
 			require.NoError(t, err)
 
 			teamLabel, err := ds.NewLabel(t.Context(), &fleet.Label{
@@ -196,6 +198,17 @@ func testTeamsGetSetDelete(t *testing.T, ds *Datastore) {
 					titleID,
 					"delete_test",
 					"delete_test.png",
+				)
+				if err != nil {
+					return err
+				}
+
+				_, err = q.ExecContext(
+					context.Background(),
+					"INSERT INTO software_title_team_pins (team_id, title_id, pinned_version) VALUES (?, ?, ?)",
+					team.ID,
+					titleID,
+					"^1",
 				)
 				if err != nil {
 					return err
@@ -456,6 +469,19 @@ func testTeamsList(t *testing.T, ds *Datastore) {
 		t2.Users = nil
 		require.Equal(t, t1, t2)
 	}
+
+	for _, key := range []string{"id", "name", "created_at", "user_count", "host_count"} {
+		t.Run("order_"+key, func(t *testing.T) {
+			result, err := ds.ListTeams(context.Background(), fleet.TeamFilter{User: &user1}, fleet.ListOptions{OrderKey: key, PerPage: 10})
+			require.NoError(t, err)
+			require.NotEmpty(t, result)
+		})
+	}
+
+	t.Run("rejects_unknown_key", func(t *testing.T) {
+		_, err := ds.ListTeams(context.Background(), fleet.TeamFilter{User: &user1}, fleet.ListOptions{OrderKey: "h.node_key"})
+		require.Error(t, err)
+	})
 }
 
 func testTeamsSummary(t *testing.T, ds *Datastore) {
@@ -844,20 +870,34 @@ func testTeamsMDMConfig(t *testing.T, ds *Datastore) {
 		mdm, err := ds.TeamMDMConfig(ctx, team.ID)
 		require.NoError(t, err)
 
+		// The config round-trips through JSON, which always carries
+		// deadline_days, so it reads back set-but-null rather than unset.
+		// Disk encryption settings are normalized on marshal, so they read
+		// back as explicit false.
 		assert.Equal(t, &fleet.TeamMDM{
+			MacOSSettings: fleet.MacOSSettings{
+				EnableDiskEncryption:          optjson.SetBool(false),
+				EnableEscrowDiskEncryptionKey: optjson.SetBool(false),
+			},
+			LinuxSettings: fleet.LinuxSettings{
+				EnableEscrowDiskEncryptionKey: optjson.SetBool(false),
+			},
 			MacOSUpdates: fleet.AppleOSUpdateSettings{
 				MinimumVersion: optjson.SetString("10.15.0"),
 				Deadline:       optjson.SetString("2025-10-01"),
+				DeadlineDays:   optjson.Int{Set: true},
 				UpdateNewHosts: optjson.Bool{Set: true},
 			},
 			IOSUpdates: fleet.AppleOSUpdateSettings{
 				MinimumVersion: optjson.SetString("11.11.11"),
 				Deadline:       optjson.SetString("2024-04-04"),
+				DeadlineDays:   optjson.Int{Set: true},
 				UpdateNewHosts: optjson.Bool{Set: true},
 			},
 			IPadOSUpdates: fleet.AppleOSUpdateSettings{
 				MinimumVersion: optjson.SetString("12.12.12"),
 				Deadline:       optjson.SetString("2023-03-03"),
+				DeadlineDays:   optjson.Int{Set: true},
 				UpdateNewHosts: optjson.Bool{Set: true},
 			},
 			WindowsUpdates: fleet.WindowsUpdates{
@@ -872,9 +912,14 @@ func testTeamsMDMConfig(t *testing.T, ds *Datastore) {
 				Software:                    optjson.Slice[*fleet.MacOSSetupSoftware]{Set: true, Value: []*fleet.MacOSSetupSoftware{}},
 				ManualAgentInstall:          optjson.SetBool(true),
 				LockEndUserInfo:             optjson.SetBool(false),
+				EnableManagedLocalAccount:   optjson.SetBool(false),
+				EndUserLocalAccountType:     optjson.SetString("admin"),
 			},
 			WindowsSettings: fleet.WindowsSettings{
-				CustomSettings: optjson.SetSlice([]fleet.MDMProfileSpec{{Path: "foo"}, {Path: "bar"}}),
+				CustomSettings:            optjson.SetSlice([]fleet.MDMProfileSpec{{Path: "foo"}, {Path: "bar"}}),
+				EnableManagedLocalAccount: optjson.SetBool(false),
+				EnableDiskEncryption:      optjson.SetBool(false),
+				RequireBitLockerPIN:       optjson.SetBool(false),
 			},
 			AndroidSettings: fleet.AndroidSettings{
 				CustomSettings: optjson.SetSlice([]fleet.MDMProfileSpec{{Path: "baz"}, {Path: "qux"}}),
@@ -921,6 +966,75 @@ func testTeamsNameUnicode(t *testing.T, ds *Datastore) {
 	result, err := ds.TeamByName(context.Background(), equivalentNames[1])
 	assert.NoError(t, err)
 	assert.Equal(t, equivalentNames[0], result.Name)
+}
+
+func testTeamConflictsWithName(t *testing.T, ds *Datastore) {
+	ctx := context.Background()
+
+	// No teams exist → (nil, nil).
+	conflict, err := ds.TeamConflictsWithName(ctx, "anything", 0)
+	require.NoError(t, err)
+	require.Nil(t, conflict)
+
+	// Create a team and confirm excludeID=0 returns it, excludeID=team.ID
+	// returns (nil, nil).
+	team, err := ds.NewTeam(ctx, &fleet.Team{Name: "ABC"})
+	require.NoError(t, err)
+
+	conflict, err = ds.TeamConflictsWithName(ctx, "ABC", 0)
+	require.NoError(t, err)
+	require.NotNil(t, conflict)
+	require.Equal(t, team.ID, conflict.ID)
+
+	conflict, err = ds.TeamConflictsWithName(ctx, "ABC", team.ID)
+	require.NoError(t, err)
+	require.Nil(t, conflict)
+
+	// Collation-equal variants: ASCII case.
+	conflict, err = ds.TeamConflictsWithName(ctx, "abc", 0)
+	require.NoError(t, err)
+	require.Equal(t, team.ID, conflict.ID)
+
+	// Collation-equal variants: NFC normalization (é written as combined vs.
+	// e + combining acute accent).
+	reneeCombined, err := ds.NewTeam(ctx, &fleet.Team{Name: "Renée"})
+	require.NoError(t, err)
+	reneeDecomposed := "Renée" // e + U+0301 COMBINING ACUTE ACCENT
+	conflict, err = ds.TeamConflictsWithName(ctx, reneeDecomposed, 0)
+	require.NoError(t, err)
+	require.Equal(t, reneeCombined.ID, conflict.ID)
+
+	// Deterministic exclude-self under a legacy collation-equal duplicate
+	// pair. The production schema's unique index is on name_bin (binary
+	// collation), so two rows that differ only by case — e.g., "ABC" and
+	// "abc" — coexist as distinct rows but match each other under the
+	// collation-aware WHERE clause used by this method. This is exactly the
+	// scenario that motivated the excludeID parameter.
+	res, err := ds.writer(ctx).ExecContext(ctx,
+		`INSERT INTO teams (name, description, config) VALUES (?, ?, ?)`,
+		"abc", "", []byte("{}"))
+	require.NoError(t, err)
+	dupID64, err := res.LastInsertId()
+	require.NoError(t, err)
+	dupID := uint(dupID64) //nolint:gosec // test code
+
+	// Excluding the original team's id returns the legacy duplicate...
+	conflict, err = ds.TeamConflictsWithName(ctx, "ABC", team.ID)
+	require.NoError(t, err)
+	require.Equal(t, dupID, conflict.ID)
+
+	// ...and excluding the duplicate's id returns the original.
+	conflict, err = ds.TeamConflictsWithName(ctx, "abc", dupID)
+	require.NoError(t, err)
+	require.Equal(t, team.ID, conflict.ID)
+
+	// Only id and name are populated — this is a hot path so extras are not
+	// loaded.
+	require.NotZero(t, conflict.ID)
+	require.NotEmpty(t, conflict.Name)
+	require.Empty(t, conflict.Description)
+	require.Nil(t, conflict.Users)
+	require.Nil(t, conflict.Secrets)
 }
 
 func testTeamsNameEmoji(t *testing.T, ds *Datastore) {
@@ -1101,4 +1215,39 @@ func testDefaultTeamConfig(t *testing.T, ds *Datastore) {
 	assert.Equal(t, "https://updated.com/webhook", finalConfig.WebhookSettings.FailingPoliciesWebhook.DestinationURL)
 	assert.Equal(t, []uint{4, 5}, finalConfig.WebhookSettings.FailingPoliciesWebhook.PolicyIDs)
 	assert.Equal(t, 50, finalConfig.WebhookSettings.FailingPoliciesWebhook.HostBatchSize)
+}
+
+func testTeamLitesByIDs(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+	teamA, err := ds.NewTeam(ctx, &fleet.Team{Name: "lites-a"})
+	require.NoError(t, err)
+	teamB, err := ds.NewTeam(ctx, &fleet.Team{
+		Name: "lites-b",
+		Config: fleet.TeamConfig{WebhookSettings: fleet.TeamWebhookSettings{
+			HostActivitiesWebhook: &fleet.HostActivitiesWebhookSettings{Enable: true, DestinationURL: "https://example.com/hook"},
+		}},
+	})
+	require.NoError(t, err)
+
+	lites, err := ds.TeamLitesByIDs(ctx, nil)
+	require.NoError(t, err)
+	require.Empty(t, lites)
+
+	lites, err = ds.TeamLitesByIDs(ctx, []uint{teamA.ID, teamB.ID, teamB.ID + 1000, 0})
+	require.NoError(t, err)
+	require.Len(t, lites, 3)
+	byID := make(map[uint]*fleet.TeamLite, len(lites))
+	for _, l := range lites {
+		byID[l.ID] = l
+	}
+	liteA, liteB := byID[teamA.ID], byID[teamB.ID]
+	require.NotNil(t, liteA)
+	require.NotNil(t, liteB)
+	require.Equal(t, "lites-a", liteA.Name)
+	noTeam := byID[0]
+	require.NotNil(t, noTeam)
+	require.Equal(t, fleet.ReservedNameNoTeam, noTeam.Name)
+	webhook := liteB.Config.WebhookSettings.HostActivitiesWebhook
+	require.NotNil(t, webhook)
+	require.Equal(t, "https://example.com/hook", webhook.DestinationURL)
 }

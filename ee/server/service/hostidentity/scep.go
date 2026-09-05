@@ -18,7 +18,7 @@ import (
 	"strings"
 
 	"github.com/cenkalti/backoff/v4"
-	"github.com/fleetdm/fleet/v4/ee/server/service/hostidentity/types"
+	"github.com/fleetdm/fleet/v4/ee/pkg/hostidentity/types"
 	"github.com/fleetdm/fleet/v4/server/config"
 	"github.com/fleetdm/fleet/v4/server/contexts/ctxerr"
 	"github.com/fleetdm/fleet/v4/server/dev_mode"
@@ -190,6 +190,13 @@ func renewalMiddleware(ds fleet.Datastore, logger *slog.Logger, next scepserver.
 		hash := sha256.Sum256([]byte(renewalData.SerialNumber))
 		if !ecdsa.VerifyASN1(pubKey, hash[:], sigBytes) {
 			return nil, errors.New("invalid renewal signature")
+		}
+
+		// Enforce that the CSR's CN matches the original certificate's CN.
+		// Without this check, a host with a valid cert could submit a CSR
+		// with a different CN and obtain a certificate for another identity.
+		if m.CSR.Subject.CommonName != oldCertData.CommonName {
+			return nil, errors.New("renewal CSR common name does not match original certificate")
 		}
 
 		logger.InfoContext(ctx, "renewal signature verified", "serial", renewalData.SerialNumber, "cn", oldCertData.CommonName)

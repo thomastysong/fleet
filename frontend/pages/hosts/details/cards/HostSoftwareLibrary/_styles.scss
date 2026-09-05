@@ -35,25 +35,15 @@
     width: 100%;
   }
 
-  .table-container__data-table-block {
-    .data-table-block {
-      .data-table {
-        &__wrapper {
-          overflow-x: auto;
-        }
-      }
-    }
-  }
-
   &__item-actions {
     display: flex;
     flex-direction: row;
-    gap: $pad-medium;
+    gap: $pad-small;
     align-items: center;
   }
 
   &__item-action {
-    min-width: 94px; // Fits the "Reinstall" button without shifting
+    min-width: 94px; // Fits the "Reinstall" button without shifting second item action
 
     .component__tooltip-wrapper {
       margin: 0; // Override 10px vertical margin
@@ -81,8 +71,17 @@
 
     .data-table-block {
       .data-table__table {
+        thead {
+          .installer-actions__header {
+            border-left: none;
+          }
+        }
+
         tbody {
           tr {
+            .name__cell {
+              max-width: 250px;
+            }
             .status__cell {
               display: table-cell;
               min-width: 140px; // Fixed width when status changes after clicking install/uninstall
@@ -92,7 +91,7 @@
               }
             }
 
-            .Actions__cell {
+            .installer-actions__cell {
               display: flex;
 
               // Undoes vertical click margin found on table container tooltips

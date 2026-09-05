@@ -2,7 +2,11 @@
 import sendRequest from "services";
 import endpoints from "utilities/endpoints";
 import helpers from "utilities/helpers";
-import { ILabel, ILabelSummary } from "interfaces/label";
+import {
+  CUSTOM_HOST_VITAL_CRITERION,
+  ILabel,
+  ILabelSummary,
+} from "interfaces/label";
 import { IDynamicLabelFormData } from "pages/labels/components/DynamicLabelForm/DynamicLabelForm";
 import { IManualLabelFormData } from "pages/labels/components/ManualLabelForm/ManualLabelForm";
 import { IHost } from "interfaces/host";
@@ -66,9 +70,15 @@ const generateCreateLabelBody = (formData: INewLabelFormData) => {
       return {
         name: formData.name,
         description: formData.description,
+        // `custom_host_vital_id` is only sent for the custom-vital path
         criteria: {
           vital: formData.vital,
           value: formData.vitalValue,
+          ...(formData.vital === CUSTOM_HOST_VITAL_CRITERION &&
+          formData.customHostVitalId != null &&
+          Number.isFinite(formData.customHostVitalId)
+            ? { custom_host_vital_id: formData.customHostVitalId }
+            : {}),
         },
       };
     default:
@@ -98,6 +108,15 @@ export const getCustomLabels = <T extends { label_type: string; name: string }>(
     });
 };
 
+export const listNamesFromSelectedLabels = (dict: Record<string, boolean>) => {
+  return Object.entries(dict).reduce((acc, [labelName, isSelected]) => {
+    if (isSelected) {
+      acc.push(labelName);
+    }
+    return acc;
+  }, [] as string[]);
+};
+
 export default {
   create: (formData: INewLabelFormData): Promise<ICreateLabelResponse> => {
     const { LABELS } = endpoints;
@@ -115,13 +134,13 @@ export default {
 
     const queryStringParams = {
       include_host_counts: false,
-      team_id: null as null | number | string,
+      fleet_id: null as null | number | string,
     };
     if (teamID === 0) {
-      queryStringParams.team_id = "global";
+      queryStringParams.fleet_id = "global";
     } else if (teamID !== null && teamID > 0) {
       // filter out "all teams" -1
-      queryStringParams.team_id = teamID;
+      queryStringParams.fleet_id = teamID;
     }
 
     const queryString = buildQueryStringFromParams(queryStringParams);
@@ -142,12 +161,12 @@ export default {
     const { LABELS_SUMMARY } = endpoints;
 
     const queryStringParams = {
-      team_id: null as null | number | string,
+      fleet_id: null as null | number | string,
     };
     if (teamID === 0 || (teamID === -1 && treatAllTeamsAsGlobalOnly)) {
-      queryStringParams.team_id = "global";
+      queryStringParams.fleet_id = "global";
     } else if (teamID !== null && teamID > 0) {
-      queryStringParams.team_id = teamID;
+      queryStringParams.fleet_id = teamID;
     }
 
     const queryString = buildQueryStringFromParams(queryStringParams);

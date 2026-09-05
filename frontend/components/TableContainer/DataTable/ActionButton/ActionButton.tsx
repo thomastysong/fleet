@@ -20,7 +20,6 @@ export interface IActionButtonProps {
   variant?: ButtonVariant;
   hideButton?: boolean | ((targetIds: number[]) => boolean);
   iconSvg?: IconNames;
-  iconStroke?: boolean;
   iconColor?: Colors;
   iconPosition?: string;
   isDisabled?: boolean;
@@ -31,7 +30,7 @@ function useActionCallback(
   callbackFn: (targetIds: number[]) => void | undefined
 ) {
   return useCallback(
-    (targetIds: any) => {
+    (targetIds: number[]) => {
       callbackFn(targetIds);
     },
     [callbackFn]
@@ -47,12 +46,13 @@ const ActionButton = (buttonProps: IActionButtonProps): JSX.Element | null => {
     variant = "default",
     hideButton,
     iconSvg,
-    iconStroke = false,
     iconColor,
     iconPosition,
     isDisabled,
     tooltipContent,
   } = buttonProps;
+  const resolvedButtonText =
+    typeof buttonText === "function" ? buttonText(targetIds) : buttonText;
   const onButtonClick = useActionCallback(onClick || noop);
 
   // hideButton is intended to provide a flexible way to specify show/hide conditions via a boolean or a function that evaluates to a boolean
@@ -81,16 +81,15 @@ const ActionButton = (buttonProps: IActionButtonProps): JSX.Element | null => {
       <Button
         onClick={() => onButtonClick(targetIds)}
         variant={variant}
-        iconStroke={iconStroke}
         size="small"
       >
         <>
           {iconPosition === "left" && iconSvg && (
-            <Icon name={iconSvg} color={iconColor} />
+            <Icon name={iconSvg} color={iconColor} size="small" />
           )}
-          {buttonText}
+          {resolvedButtonText}
           {iconPosition !== "left" && iconSvg && (
-            <Icon name={iconSvg} color={iconColor} />
+            <Icon name={iconSvg} color={iconColor} size="small" />
           )}
         </>
       </Button>

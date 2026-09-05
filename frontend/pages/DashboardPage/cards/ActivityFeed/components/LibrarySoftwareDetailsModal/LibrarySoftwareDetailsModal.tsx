@@ -97,7 +97,7 @@ const LibrarySoftwareDetailsModal = ({
         />
         <DataSet title="Package name" value={details.software_package} />
         <DataSet
-          title="Self-Service"
+          title="Self service"
           value={details.self_service ? "Yes" : "No"}
         />
         <DataSet
@@ -116,7 +116,7 @@ const LibrarySoftwareDetailsModal = ({
         />
       </div>
       <div className="modal-cta-wrap">
-        <Button onClick={onCancel}>Done</Button>
+        <Button onClick={onCancel}>Close</Button>
       </div>
     </Modal>
   );

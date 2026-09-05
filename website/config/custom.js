@@ -87,7 +87,7 @@ module.exports.custom = {
 
 
   // Other integrations:
-  // openAiSecret: undefined,
+  // anthropicSecret: undefined,
   // iqSecret: undefined, // You gotta use the base64-encoded API secret.  (Get it in your account settings in LeadIQ.)
   // salesforceIntegrationUsername: undefined,
   // salesforceIntegrationPasskey: undefined,
@@ -126,10 +126,9 @@ module.exports.custom = {
     // ⚗️ Reference, config surface, built-in queries, API, and other documentation
     // 'docs/Using-Fleet/REST-API.md': '',              // « Covered in CODEOWNERS (2023-07-22)
     // 'docs/Contributing/reference/api-for-contributors.md': '', // « Covered in CODEOWNERS (2023-07-22)
-    'schema': 'noahtalerman',                               // Data tables (osquery/fleetd schema) documentation
+    'schema': 'rachaelshaw',                               // Data tables (osquery/fleetd schema) documentation
     'docs/01-Using-Fleet/standard-query-library/standard-query-library.yml': 'rachaelshaw', //« Built-in queries
     'docs/get-started/faq': 'zayhanlon',
-    'docs/Contributing/rituals': 'lukeheath',
     'ee/cis': 'sharon-fdm',//« Fleet Premium only: built-in queries  (built-in policies for CIS benchmarks)  -- FYI: On 2023-07-15, we changed this so that Sharon, Lucas, and Rachel are all maintainers, but where there is a single DRI who is automatically requested approval from.
 
     // Fleet's internal IT and security (+dogfooding)
@@ -137,6 +136,7 @@ module.exports.custom = {
 
     // 🫧 Articles and release notes
     'articles': 'mike-j-thomas',
+    'articles/fleet-usage-statistics.md': 'rachaelshaw', //« Usage stats guide (more specific than the 'articles' catch-all above)
     'CHANGELOG.md': 'lukeheath',
 
     // 🫧 Website (fleetdm.com)
@@ -161,8 +161,8 @@ module.exports.custom = {
     'ee/vulnerability-dashboard/scripts': 'eashaw',
     'ee/vulnerability-dashboard/package.json': 'eashaw',
 
-    // 🫧 Bulk operations dashboard
-    'ee/bulk-operations-dashboard': 'eashaw',// (catch-all)
+    // 🫧 Fleet agent downloader app
+    'ee/fleet-agent-downloader': 'eashaw',// (catch-all)
 
     // Handbook
     'handbook/company/pricing-features-table.yml': 'noahtalerman',
@@ -177,15 +177,16 @@ module.exports.custom = {
     'handbook/it': 'allenhouchins',
     'handbook/sales': 'sampfluger88',
     'handbook/customer-success': 'zayhanlon',
-    'handbook/marketing': 'akuthiala',
+    'handbook/marketing': 'ireedy',
     'handbook/ceo': 'mikermcneil',
     'handbook/README.md': 'mikermcneil',
     'handbook/company/README.md': 'mikermcneil',
     'handbook/company/why-this-way.md': 'mikermcneil',
-    'handbook/company/communications.md': 'mikermcneil',
+    'handbook/company/communications.md': 'ireedy',
     'handbook/company/leadership.md': 'mikermcneil',
     'handbook/it/security.md': 'allenhouchins',
     'handbook/company/go-to-market-operations.md': 'sampfluger88',
+    'handbook/company/brand.md': 'mike-j-thomas',
 
     // 🫧 Other brandfronts
     'README.md': 'mikermcneil',// « GitHub brandfront
@@ -225,33 +226,37 @@ module.exports.custom = {
   githubRepoMaintainersByPath: {// fleetdm/fleet
 
     // Code for core product and integrations
-    'ee/tools/puppet': ['lukeheath', 'gillespi314', 'mna', 'georgekarrv'],
+    'ee/tools/puppet': ['lukeheath', 'mna', 'georgekarrv'],
     'tools/api': ['lukeheath', 'georgekarrv', 'sharon-fdm'],//« Scripts for interacting with the Fleet API
 
     // Reference, config surface, built-in queries, API, and other documentation
     'docs': ['rachaelshaw', 'noahtalerman', 'eashaw'],// (default for docs)
     'docs/01-Using-Fleet/standard-query-library/standard-query-library.yml': ['rachaelshaw', 'noahtalerman', 'eashaw'],// (standard query library)
-    '/docs/get-started/faq': ['ksatter', 'ddribeiro', 'zayhanlon'],
+    '/docs/get-started/faq': ['rynsatterlee', 'ddribeiro', 'zayhanlon'],
+    'docs/solutions': ['ddribeiro', 'allenhouchins'],
     'docs/REST API/rest-api.md': ['rachaelshaw', 'lukeheath'],// (standard query library)
     'schema': ['eashaw', 'lukeheath'],// (Osquery table schema)
     'ee/cis': ['lukeheath', 'sharon-fdm', 'lucasmrod', 'rachelElysia', 'rachaelshaw'],
+    'server/api_endpoints/api_endpoints.yml': 'rachaelshaw',// « API endpoint display names in the Fleet UI (API-only users)
 
     // Fleet's internal IT and security (+dogfooding)
     'it-and-security': ['allenhouchins'],
 
     // Articles and release notes
     'CHANGELOG.md': ['mikermcneil', 'noahtalerman', 'lukeheath'],
-    'articles': ['mike-j-thomas', 'eashaw', 'mikermcneil', 'rachaelshaw', 'lukeheath'],
-    'website/assets/images/articles': ['mike-j-thomas', 'eashaw', 'mikermcneil'],
+    'articles': ['mike-j-thomas', 'eashaw', 'mikermcneil', 'rachaelshaw', 'lukeheath', 'allenhouchins'],
+    'website/assets/images/articles': ['mike-j-thomas', 'eashaw', 'mikermcneil', 'allenhouchins'],
 
     // Website (fleetdm.com)
     'website': ['mikermcneil', 'eashaw'],// (default for website)
-    'website/views': ['eashaw', 'mike-j-thomas', 'johnjeremiah', 'akuthiala'],
+    'website/views': ['eashaw', 'mike-j-thomas'],
     'website/generators': 'eashaw',
     'website/assets': 'eashaw',
     'website/package.json': 'eashaw',
     'website/config/routes.js': ['eashaw', 'mike-j-thomas'],// (for managing website URLs)
     'website/config/policies.js': ['eashaw', 'mikermcneil'],// (for adding new pages and managing permissions)
+    'website/api/controllers/webhooks/receive-from-clay.js': ['sampfluger88'],
+    'website/api/helpers/salesforce': ['sampfluger88'],
 
     // 🫧 Vulnerability dashboard
     'ee/vulnerability-dashboard': ['eashaw', 'mikermcneil'],// (catch-all)
@@ -260,8 +265,8 @@ module.exports.custom = {
     'ee/vulnerability-dashboard/config/routes.js': 'eashaw',
     'ee/vulnerability-dashboard/package.json': 'eashaw',
 
-    // 🫧 Bulk operations dashboard
-    'ee/bulk-operations-dashboard': 'eashaw',
+    // 🫧 Fleet agent downloader app
+    'ee/fleet-agent-downloader': 'eashaw',
 
     // FMA and icons
     'frontend/pages/SoftwarePage/components/icons': 'allenhouchins',
@@ -294,16 +299,17 @@ module.exports.custom = {
     'handbook/README.md': 'mikermcneil', // See https://github.com/fleetdm/fleet/pull/13195
     'handbook/company': 'mikermcneil',
     'handbook/ceo': 'mikermcneil',
+    'handbook/company/brand.md': ['mikermcneil', 'mike-j-thomas'],
     'handbook/company/product-maturity-assessment': ['mikermcneil','noahtalerman','allenhouchins'],
     'handbook/company/open-positions.yml': ['sampfluger88', 'mikermcneil', 'ireedy'],
-    'handbook/company/communications.md': ['mikermcneil', 'sampfluger88'],
+    'handbook/company/communications.md': ['mikermcneil', 'ireedy', 'sampfluger88'],
     'handbook/company/writing.md': ['mike-j-thomas', 'mikermcneil', 'sampfluger88'],
     'handbook/company/go-to-market-operations.md': ['sampfluger88', 'mikermcneil'],
     'handbook/company/leadership.md': ['sampfluger88', 'mikermcneil', 'ireedy'],
     'handbook/it': ['sampfluger88', 'mikermcneil', 'allenhouchins'],
     'handbook/finance': ['sampfluger88', 'mikermcneil', 'rfoo2015'],
     'handbook/sales': ['sampfluger88', 'mikermcneil'],
-    'handbook/marketing': ['sampfluger88', 'mikermcneil', 'akuthiala'],
+    'handbook/marketing': ['sampfluger88', 'mikermcneil', 'ireedy'],
     'handbook/customer-success': ['sampfluger88', ' mikermcneil', 'zayhanlon'],
 
     // 🫧 Pricing and features and dev process
@@ -338,6 +344,8 @@ module.exports.custom = {
     '.github/ISSUE_TEMPLATE/solutions-consulting-task.md': ['allenhouchins'],
     '.github/ISSUE_TEMPLATE/new-nfr-request.yml': ['allenhouchins'],
 
+    // GTM
+    'go-to-market': ['sampfluger88'],
 
     // Repo automation and change control settings
     'CODEOWNERS': ['mikermcneil', 'sampfluger88', 'lukeheath', 'ireedy'], // (« for changing who reviews is automatically requested from for given paths)
@@ -363,7 +371,7 @@ module.exports.custom = {
   //
   // The version of osquery to use when generating schema docs
   // (both in Fleet's query console and on fleetdm.com)
-  versionOfOsquerySchemaToUseWhenGeneratingDocumentation: '5.21.0',
+  versionOfOsquerySchemaToUseWhenGeneratingDocumentation: '5.23.1',
 
 
   //  ███╗   ███╗██╗███████╗ ██████╗
@@ -409,11 +417,13 @@ module.exports.custom = {
     'yahoo.co.uk',     'yahoo.com',    'yahoo.com.ar',     'yahoo.com.au',
     'yahoo.com.br',    'yahoo.com.mx', 'yahoo.com.sg',     'yahoo.de',
     'yahoo.es',        'yahoo.fr',     'yahoo.in',         'yahoo.it',
-    'yandex.ru',       'ymail.com',    'zoho.com',         'zonnet.nl'
+    'yandex.ru',       'ymail.com',    'zoho.com',         'zonnet.nl',
+    'email.tst',
   ],
 
   // For website signups & "Talk to us" form submissions:
   bannedEmailDomainsForWebsiteSubmissions: [
+    'email.tst',
     'example.com',
     'gmail.com',
     'hotmail.ca',
@@ -434,13 +444,14 @@ module.exports.custom = {
     'yahoo.com',
     'yahoo.co.uk',
     'yandex.ru',
-    'ymail.com'
+    'ymail.com',
   ],
 
   // For contact form submissions.
   // Note: We're using a separate list for the contact form because we previously allowed signups/license dispenser purchases with a personal email address.
   bannedEmailDomainsForContactFormSubmissions: [
-    'example.com'
+    'email.tst',
+    'example.com',
   ],
 
   /***************************************************************************
@@ -492,6 +503,9 @@ module.exports.custom = {
   // Deal registration form
   // dealRegistrationContactEmailAddress: '…',
 
+  // Apply form
+  // applicationReplyEmailAddress: '…',
+
   // Render instance trials
   // renderOwnerId: '…',
   // renderApiToken: '…',
@@ -502,8 +516,6 @@ module.exports.custom = {
   // Microsoft compliance proxy
   // compliancePartnerClientId: '…',
   // compliancePartnerClientSecret: '…',
-  // cloudCustomerCompliancePartnerSharedSecret: '…',
-  // alternateCompliancePartnerSharedSecret: '…',
 
 
   // Android proxy

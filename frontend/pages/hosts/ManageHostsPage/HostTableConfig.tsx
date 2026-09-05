@@ -3,7 +3,6 @@
 // definitions for the selection row for some reason when we dont really need it.
 import React from "react";
 import { CellProps, Column } from "react-table";
-import ReactTooltip from "react-tooltip";
 
 import { IDeviceUser, IHost } from "interfaces/host";
 import {
@@ -34,7 +33,6 @@ import {
   hostTeamName,
   tooltipTextWithLineBreaks,
 } from "utilities/helpers";
-import { COLORS } from "styles/var/colors";
 import {
   IHeaderProps,
   IStringCellProps,
@@ -42,7 +40,7 @@ import {
 } from "interfaces/datatable_config";
 import PATHS from "router/paths";
 import { DEFAULT_EMPTY_CELL_VALUE } from "utilities/constants";
-import getHostStatusTooltipText from "../helpers";
+import { getHardwareModelDisplay, getHostStatusTooltipText } from "../helpers";
 
 type IHostTableColumnConfig = Column<IHost> & {
   // This is used to prevent these columns from being hidden. This will be
@@ -60,27 +58,89 @@ type ISelectionCellProps = CellProps<IHost>;
 type IIssuesCellProps = CellProps<IHost, IHost["issues"]>;
 type IDeviceUserCellProps = CellProps<IHost, IHost["device_mapping"]>;
 
-const condenseDeviceUsers = (users: IDeviceUser[]): string[] => {
-  if (!users?.length) {
-    return [];
-  }
-  const condensed =
-    users.length === 4
-      ? users
-          .slice(-4)
+const NEVER_FETCHED_TOOLTIP =
+  "This host has not reported vitals yet, even if it has checked in.";
 
-          .map((u) => u.email)
-          .reverse()
-      : users
-          .slice(-3)
-          .map((u) => u.email)
-          .reverse() || [];
-  return users.length > 4
-    ? condensed.concat(`+${users.length - 3} more`) // TODO: confirm limit
-    : condensed;
+// Max number of individual email lines shown in the tooltip before the
+// remainder collapses into a single "+N more" line.
+const MAX_EMAILS_BEFORE_MORE_LINE = 5;
+
+interface IPrimaryDeviceUser {
+  primaryEmail?: string;
+  suffixCount: number;
+  tooltipLines: string[];
+}
+
+// Both `mdm_idp_accounts` (set at MDM enrollment) and `idp` (set via
+// `PUT /hosts/{id}/device_mapping`) represent IdP-sourced identities and
+// are treated as equivalent by the backend.
+const sourcePriority = (source: string): number => {
+  if (source === "mdm_idp_accounts" || source === "idp") return 0;
+  if (source === "google_chrome_profiles") return 1;
+  return 2;
 };
 
-const lastSeenTime = (status: string, seenTime: string): string => {
+const getPrimaryDeviceUser = (users: IDeviceUser[]): IPrimaryDeviceUser => {
+  if (!users?.length) {
+    return { primaryEmail: undefined, suffixCount: 0, tooltipLines: [] };
+  }
+
+  // Sort by source priority BEFORE deduping so a first-seen non-IdP row
+  // doesn't shadow a lower-priority `mdm_idp_accounts`/`idp` row for the
+  // same address (the backend orders `device_mapping` by `email, source`,
+  // so this happens for any user who supplies their IdP address via
+  // `PUT /hosts/{id}/device_mapping`). Stable sort preserves API ordering
+  // within a priority band.
+  const byPriority = users
+    .map((u, i) => ({ u, i }))
+    .sort((a, b) => {
+      const pa = sourcePriority(a.u.source);
+      const pb = sourcePriority(b.u.source);
+      return pa === pb ? a.i - b.i : pa - pb;
+    })
+    .map(({ u }) => u);
+
+  const seen = new Set<string>();
+  const uniqueUsers = byPriority.filter((u) => {
+    if (seen.has(u.email)) return false;
+    seen.add(u.email);
+    return true;
+  });
+
+  const primary = uniqueUsers[0];
+  const suffixCount = uniqueUsers.length - 1;
+
+  // No other emails to surface in a tooltip, so leave tooltipLines empty.
+  if (suffixCount === 0) {
+    return { primaryEmail: primary.email, suffixCount, tooltipLines: [] };
+  }
+
+  const orderedEmails = uniqueUsers.map((u) => u.email);
+  const remainder = orderedEmails.length - MAX_EMAILS_BEFORE_MORE_LINE;
+
+  // Only collapse into a "+N more" line when it saves at least two entries;
+  // hiding a single email behind a "+1 more" line is worse UX than showing
+  // it inline.
+  return {
+    primaryEmail: primary.email,
+    suffixCount,
+    tooltipLines:
+      remainder > 1
+        ? orderedEmails
+            .slice(0, MAX_EMAILS_BEFORE_MORE_LINE)
+            .concat(`+${remainder} more`)
+        : orderedEmails,
+  };
+};
+
+const lastSeenTime = (
+  status: string,
+  seenTime: string,
+  platform?: string
+): string => {
+  if (platform && isMobilePlatform(platform)) {
+    return "Last seen: Not supported";
+  }
   if (status !== "online") {
     return `Last seen: ${humanHostLastSeen(seenTime)}`;
   }
@@ -119,49 +179,14 @@ const allHostTableHeaders = (teamId?: number): IHostTableColumnConfig[] => [
     accessor: "display_name",
     id: "display_name",
     Cell: (cellProps: IHostTableStringCellProps) => {
-      if (
-        // if the host is pending, we want to disable the link to host details
-        cellProps.row.original.mdm.enrollment_status === "Pending" &&
-        // pending status is only supported for Apple devices
-        (cellProps.row.original.platform === "darwin" ||
-          cellProps.row.original.platform === "ios" ||
-          cellProps.row.original.platform === "ipados") &&
-        // osquery version is populated along with the rest of host details so use it
-        // here to check if we already have host details and don't need to disable the link
-        !cellProps.row.original.osquery_version
-      ) {
-        return (
-          <>
-            <span
-              className="text-cell"
-              data-tip
-              data-for={`host__${cellProps.row.original.id}`}
-            >
-              {cellProps.cell.value}
-            </span>
-            <ReactTooltip
-              effect="solid"
-              backgroundColor={COLORS["tooltip-bg"]}
-              id={`host__${cellProps.row.original.id}`}
-              data-html
-            >
-              <span className={`tooltip__tooltip-text`}>
-                This host was ordered using <br />
-                Apple Business Manager <br />
-                (ABM). You will see host <br />
-                vitals when it is enrolled in Fleet. <br />
-              </span>
-            </ReactTooltip>
-          </>
-        );
-      }
       return (
         <LinkCell
           value={cellProps.cell.value}
           path={PATHS.HOST_DETAILS(cellProps.row.original.id, teamId)}
           title={lastSeenTime(
             cellProps.row.original.status,
-            cellProps.row.original.seen_time
+            cellProps.row.original.seen_time,
+            cellProps.row.original.platform
           )}
         />
       );
@@ -219,9 +244,21 @@ const allHostTableHeaders = (teamId?: number): IHostTableColumnConfig[] => [
     ),
     accessor: "hardware_model",
     id: "hardware_model",
-    Cell: (cellProps: IHostTableStringCellProps) => (
-      <TextCell value={cellProps.cell.value} />
-    ),
+    Cell: (cellProps: IHostTableStringCellProps) => {
+      const { value, tooltip, alwaysShowTooltip } = getHardwareModelDisplay(
+        cellProps.row.original.platform,
+        cellProps.cell.value,
+        cellProps.row.original.hardware_marketing_name
+      );
+      return (
+        <TooltipTruncatedTextCell
+          value={value}
+          tooltip={tooltip}
+          alwaysShowTooltip={alwaysShowTooltip}
+          className="w250"
+        />
+      );
+    },
   },
   // User email
   {
@@ -232,25 +269,23 @@ const allHostTableHeaders = (teamId?: number): IHostTableColumnConfig[] => [
     id: "device_mapping",
     Cell: (cellProps: IDeviceUserCellProps) => {
       // TODO(android): is android supported?
-      const numUsers = cellProps.cell.value?.length || 0;
-      const users = condenseDeviceUsers(cellProps.cell.value || []);
-      if (users.length > 1) {
-        return (
-          <TooltipWrapper
-            tipContent={tooltipTextWithLineBreaks(users)}
-            underline={false}
-            showArrow
-            position="top"
-            tipOffset={10}
-          >
-            <TextCell italic value={`${numUsers} users`} />
-          </TooltipWrapper>
-        );
-      }
-      if (users.length === 1) {
-        return <TextCell value={users[0]} />;
-      }
-      return <TextCell />;
+      const { primaryEmail, suffixCount, tooltipLines } = getPrimaryDeviceUser(
+        cellProps.cell.value || []
+      );
+      return (
+        <TooltipTruncatedTextCell
+          value={primaryEmail}
+          tooltip={
+            tooltipLines.length > 0
+              ? tooltipTextWithLineBreaks(tooltipLines)
+              : undefined
+          }
+          suffix={suffixCount > 0 ? `+${suffixCount}` : undefined}
+          justifySuffixEnd
+          alwaysShowTooltip={suffixCount > 0}
+          className="w250"
+        />
+      );
     },
   },
   // UUID
@@ -276,11 +311,12 @@ const allHostTableHeaders = (teamId?: number): IHostTableColumnConfig[] => [
     accessor: "hardware_serial",
     id: "hardware_serial",
     Cell: (cellProps: IHostTableStringCellProps) => {
-      // TODO(android): is iOS/iPadOS supported?
+      // Personal (BYOD) devices don't report their serial numbers, so show
+      // "Not supported" for them. All other hosts, including managed Android
+      // devices, show the reported serial number.
       if (
-        isAndroid(cellProps.row.original.platform) ||
         isBYODAccountDrivenUserEnrollment(
-          cellProps.row.original.mdm.enrollment_status
+          cellProps.row.original.mdm?.enrollment_status ?? null
         )
       ) {
         return NotSupported;
@@ -316,8 +352,12 @@ const allHostTableHeaders = (teamId?: number): IHostTableColumnConfig[] => [
     Cell: (cellProps: IHostTableStringCellProps) => (
       // TODO(android): android doesn't support refetch?
       <TextCell
-        value={{ timeString: cellProps.cell.value }}
-        formatter={HumanTimeDiffWithFleetLaunchCutoff}
+        value={
+          <HumanTimeDiffWithFleetLaunchCutoff
+            timeString={cellProps.cell.value}
+            neverTooltip={NEVER_FETCHED_TOOLTIP}
+          />
+        }
       />
     ),
   },
@@ -413,27 +453,23 @@ const allHostTableHeaders = (teamId?: number): IHostTableColumnConfig[] => [
   // Status
   {
     title: "Status",
-    Header: (cellProps: IHostTableHeaderProps) => {
+    Header: () => {
       const titleWithToolTip = (
         <TooltipWrapper
           tipContent={
             <>
-              Online hosts will respond to a live report. Offline hosts
-              won&apos;t respond to a live report because they may be shut down,
-              asleep, or not connected to the internet.
+              Only supported on hosts that run Fleet&apos;s agent: macOS,
+              Windows, Linux, and ChromeOS.
             </>
           }
           className="status-header"
+          tooltipClass="host-table-header-tooltip"
+          fixedPositionStrategy
         >
           Status
         </TooltipWrapper>
       );
-      return (
-        <HeaderCell
-          value={cellProps.rows.length === 1 ? "Status" : titleWithToolTip}
-          disableSortBy
-        />
-      );
+      return <HeaderCell value={titleWithToolTip} disableSortBy />;
     },
     disableSortBy: true,
     accessor: "status",
@@ -449,9 +485,11 @@ const allHostTableHeaders = (teamId?: number): IHostTableColumnConfig[] => [
         isAppleDevice(cellProps.row.original.platform)
       ) {
         const tooltip = {
-          tooltipText: getHostStatusTooltipText("---"),
+          tooltipText: getHostStatusTooltipText(DEFAULT_EMPTY_CELL_VALUE),
         };
-        return <StatusIndicator value="---" tooltip={tooltip} />;
+        return (
+          <StatusIndicator value={DEFAULT_EMPTY_CELL_VALUE} tooltip={tooltip} />
+        );
       }
 
       const value = cellProps.cell.value;
@@ -488,13 +526,7 @@ const allHostTableHeaders = (teamId?: number): IHostTableColumnConfig[] => [
     Header: () => {
       const titleWithToolTip = (
         <TooltipWrapper
-          tipContent={
-            <>
-              Settings can be updated remotely on hosts with MDM turned
-              <br />
-              on. To filter by MDM status, head to the Dashboard page.
-            </>
-          }
+          tipContent={<>To filter by MDM status, head to the Dashboard page.</>}
         >
           MDM status
         </TooltipWrapper>
@@ -610,22 +642,75 @@ const allHostTableHeaders = (teamId?: number): IHostTableColumnConfig[] => [
       );
     },
   },
-  // Osquery
+  // Agent
   {
-    title: "Osquery",
-    Header: (cellProps: IHostTableHeaderProps) => (
-      <HeaderCell
-        value="Osquery"
-        isSortedDesc={cellProps.column.isSortedDesc}
-      />
-    ),
-    accessor: "osquery_version",
-    id: "osquery_version",
+    title: "Agent",
+    Header: (cellProps: IHostTableHeaderProps) => {
+      const titleWithToolTip = (
+        <TooltipWrapper
+          tipContent="Only supported on hosts that run Fleet's agent: macOS, Windows, Linux, and ChromeOS."
+          tooltipClass="host-table-header-tooltip"
+          fixedPositionStrategy
+        >
+          Agent
+        </TooltipWrapper>
+      );
+      return (
+        <HeaderCell
+          value={titleWithToolTip}
+          isSortedDesc={cellProps.column.isSortedDesc}
+        />
+      );
+    },
+    accessor: (row) => row.orbit_version || row.osquery_version,
+    id: "agent",
     Cell: (cellProps: IHostTableStringCellProps) => {
-      if (isMobilePlatform(cellProps.row.original.platform)) {
+      const {
+        platform,
+        orbit_version,
+        osquery_version,
+        fleet_desktop_version,
+      } = cellProps.row.original;
+
+      if (isMobilePlatform(platform)) {
         return NotSupported;
       }
-      return <TextCell value={cellProps.cell.value} />;
+
+      // Match the Host details Vitals card: treat a missing/empty orbit version
+      // (including the normalized "---" placeholder) as a vanilla osquery host.
+      const isChromeOrVanillaOsquery =
+        platform === "chrome" ||
+        !orbit_version ||
+        orbit_version === DEFAULT_EMPTY_CELL_VALUE;
+
+      if (isChromeOrVanillaOsquery) {
+        return <TextCell value={osquery_version} />;
+      }
+
+      return (
+        <TextCell
+          value={
+            <TooltipWrapper
+              tipContent={
+                <>
+                  osquery: {osquery_version}
+                  <br />
+                  Orbit: {orbit_version}
+                  {fleet_desktop_version &&
+                    fleet_desktop_version !== DEFAULT_EMPTY_CELL_VALUE && (
+                      <>
+                        <br />
+                        Fleet Desktop: {fleet_desktop_version}
+                      </>
+                    )}
+                </>
+              }
+            >
+              {orbit_version}
+            </TooltipWrapper>
+          }
+        />
+      );
     },
   },
   // Last seen
@@ -668,12 +753,23 @@ const allHostTableHeaders = (teamId?: number): IHostTableColumnConfig[] => [
   // Last restarted
   {
     title: "Last restarted",
-    Header: (cellProps: IHostTableHeaderProps) => (
-      <HeaderCell
-        value="Last restarted"
-        isSortedDesc={cellProps.column.isSortedDesc}
-      />
-    ),
+    Header: (cellProps: IHostTableHeaderProps) => {
+      const titleWithToolTip = (
+        <TooltipWrapper
+          tipContent="Only supported on macOS, Windows, and Linux, where Fleet's agent can measure system uptime."
+          tooltipClass="host-table-header-tooltip"
+          fixedPositionStrategy
+        >
+          Last restarted
+        </TooltipWrapper>
+      );
+      return (
+        <HeaderCell
+          value={titleWithToolTip}
+          isSortedDesc={cellProps.column.isSortedDesc}
+        />
+      );
+    },
     accessor: "last_restarted_at",
     id: "last_restarted_at",
     Cell: (cellProps: IHostTableStringCellProps) => {
@@ -692,6 +788,37 @@ const allHostTableHeaders = (teamId?: number): IHostTableColumnConfig[] => [
       );
     },
   },
+  // Added to Fleet
+  {
+    title: "Added to Fleet",
+    Header: (cellProps: IHostTableHeaderProps) => {
+      const titleWithToolTip = (
+        <TooltipWrapper
+          tipContent={
+            <>
+              The last time the <br /> host enrolled with Fleet.
+            </>
+          }
+        >
+          Added to Fleet
+        </TooltipWrapper>
+      );
+      return (
+        <HeaderCell
+          value={titleWithToolTip}
+          isSortedDesc={cellProps.column.isSortedDesc}
+        />
+      );
+    },
+    accessor: "last_enrolled_at",
+    id: "last_enrolled_at",
+    Cell: (cellProps: IHostTableStringCellProps) => (
+      <TextCell
+        value={{ timeString: cellProps.cell.value }}
+        formatter={HumanTimeDiffWithFleetLaunchCutoff}
+      />
+    ),
+  },
 ];
 
 const defaultHiddenColumns = [
@@ -700,6 +827,8 @@ const defaultHiddenColumns = [
   "device_mapping",
   "primary_mac",
   "public_ip",
+  "primary_ip",
+  "issues",
   "cpu_type",
   // TODO: should those be mdm.<blah>?
   "mdm.server_url",
@@ -710,6 +839,7 @@ const defaultHiddenColumns = [
   "seen_time",
   "hardware_model",
   "hardware_serial",
+  "last_enrolled_at",
 ];
 
 /**
@@ -783,4 +913,5 @@ export {
   defaultHiddenColumns,
   generateAvailableTableHeaders,
   generateVisibleTableColumns,
+  getPrimaryDeviceUser,
 };

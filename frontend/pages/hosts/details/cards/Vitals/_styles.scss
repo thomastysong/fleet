@@ -1,6 +1,17 @@
 .vitals-card {
   @include vertical-card-layout;
 
+  &__header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: $pad-medium;
+  }
+
+  .date-tooltip {
+    cursor: pointer;
+  }
+
   .truncated-tooltip {
     .vitals-card__device-mapping__source {
       color: inherit;
@@ -54,9 +65,10 @@
   }
 
   // OS version with requirement icon + tooltip truncation
-  &__os-version {
+  // MDM status may have an error icon if status is off
+  &__os-version,
+  &__mdm-status {
     display: flex;
-    align-items: center;
     gap: $pad-xsmall;
     min-width: 0;
 
@@ -64,6 +76,13 @@
     .icon {
       flex-shrink: 0;
     }
+  }
+
+  // TooltipWrapper pulls its dashed underline into the element's last pixel
+  // with a negative margin, which DataSet's `dd` then clips away. Keep the
+  // border inside the box so the hover affordance survives on every vital.
+  .component__tooltip-wrapper__underline {
+    margin-bottom: 0;
   }
 
   &__os-version-tooltip {
@@ -81,14 +100,29 @@
     white-space: nowrap;
   }
 
-  &__os-data-set {
-    .component__tooltip-wrapper {
-      margin-left: $pad-xsmall;
-    }
+  &__os-version {
+    display: flex;
+    gap: $pad-xsmall;
 
     .component__tooltip-wrapper__element {
       line-height: inherit;
     }
+  }
+
+  &__mdm-status,
+  &__location {
+    dd {
+      display: flex;
+      gap: $pad-xsmall;
+      margin: -6px; // See underline under link and border with keyboard nav
+      padding: 6px; // See underline under link and border with keyboard nav
+    }
+  }
+
+  &__custom-vital-title {
+    display: inline-flex;
+    align-items: center;
+    gap: $pad-xsmall;
   }
 
   .text-muted {

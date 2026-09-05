@@ -4,6 +4,7 @@ import { InjectedRouter } from "react-router";
 import { isEmpty, omit } from "lodash";
 
 import useDeepEffect from "hooks/useDeepEffect";
+import useGitOpsMode from "hooks/useGitOpsMode";
 
 import PATHS from "router/paths";
 
@@ -33,7 +34,6 @@ import Modal from "components/Modal";
 import Button from "components/buttons/Button";
 import Slider from "components/forms/fields/Slider";
 import Radio from "components/forms/fields/Radio";
-// @ts-ignore
 import InputField from "components/forms/fields/InputField";
 import CustomLink from "components/CustomLink";
 import validUrl from "components/forms/validators/valid_url";
@@ -136,7 +136,7 @@ const ManageAutomationsModal = ({
   const { config: globalConfigFromContext, isFreeTier } = useContext(
     AppContext
   );
-  const gitOpsModeEnabled = globalConfigFromContext?.gitops.gitops_mode_enabled;
+  const { gitOpsModeEnabled } = useGitOpsMode("software");
 
   const maxAgeInNanoseconds = isGlobalSWConfig(softwareConfig)
     ? softwareConfig.vulnerabilities.recent_vulnerability_max_age
@@ -225,6 +225,17 @@ const ManageAutomationsModal = ({
 
   const onURLChange = (value: string) => {
     setDestinationUrl(value);
+  };
+
+  const onURLBlur = () => {
+    // Skip validation whenever the field is disabled (automations off or GitOps
+    // mode) so we don't surface an error on a control the user can't edit. This
+    // must mirror the InputField's `disabled` condition below.
+    if (!softwareAutomationsEnabled || gitOpsModeEnabled) {
+      return;
+    }
+    const { errors: webhookErrors } = validateWebhookURL(destinationUrl);
+    setErrors((prevErrs) => ({ ...omit(prevErrs, "url"), ...webhookErrors }));
   };
 
   const handleSaveAutomation = (evt: React.MouseEvent<HTMLFormElement>) => {
@@ -423,7 +434,7 @@ const ManageAutomationsModal = ({
         {!!selectedIntegration && (
           <Button
             type="button"
-            variant="inverse"
+            variant="secondary"
             onClick={togglePreviewTicketModal}
           >
             Preview ticket
@@ -459,6 +470,7 @@ const ManageAutomationsModal = ({
           type="text"
           value={destinationUrl}
           onChange={onURLChange}
+          onBlur={onURLBlur}
           error={errors.url}
           helpText={
             "For each new vulnerability detected, Fleet will send a JSON payload to this URL with a list of the affected hosts."
@@ -469,11 +481,10 @@ const ManageAutomationsModal = ({
         />
         <Button
           type="button"
-          variant="inverse"
+          variant="secondary"
           onClick={togglePreviewPayloadModal}
-          disabled={!softwareAutomationsEnabled}
         >
-          Preview payload
+          Example payload
         </Button>
       </>
     );
@@ -504,8 +515,7 @@ const ManageAutomationsModal = ({
       <TooltipWrapper
         tipContent={
           <>
-            Add an integration to create
-            <br /> tickets for vulnerability automations.
+            Add an integration to create tickets for vulnerability automations.
           </>
         }
         disableTooltip={hasIntegrations || gomDisabled}
@@ -533,6 +543,7 @@ const ManageAutomationsModal = ({
     );
     return (
       <GitOpsModeTooltipWrapper
+        entityType="software"
         renderChildren={renderRawButton}
         tipOffset={6}
       />
@@ -598,7 +609,7 @@ const ManageAutomationsModal = ({
         </div>
         <div className="modal-cta-wrap">
           {renderSaveButton()}
-          <Button onClick={onReturnToApp} variant="inverse">
+          <Button onClick={onReturnToApp} variant="secondary">
             Cancel
           </Button>
         </div>

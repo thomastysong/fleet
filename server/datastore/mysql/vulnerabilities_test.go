@@ -3,9 +3,11 @@ package mysql
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/fleetdm/fleet/v4/server/fleet"
 	common_mysql "github.com/fleetdm/fleet/v4/server/platform/mysql"
 	"github.com/fleetdm/fleet/v4/server/ptr"
@@ -13,6 +15,30 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/require"
 )
+
+func TestAtomicTableSwapVulnerabilityCountsDropsStaleOldTable(t *testing.T) {
+	mock, ds := mockDatastore(t)
+	defer ds.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta("DROP TABLE IF EXISTS vulnerability_host_counts_swap")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(vulnerabilityHostCountsSwapTableSchema)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta("DROP TABLE IF EXISTS vulnerability_host_counts_old")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`(?s)RENAME TABLE\s+vulnerability_host_counts TO vulnerability_host_counts_old,\s+vulnerability_host_counts_swap TO vulnerability_host_counts`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("DROP TABLE vulnerability_host_counts_old")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	require.NoError(t, ds.atomicTableSwapVulnerabilityCounts(t.Context(), vulnerabilityCounts{}))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
 
 func TestVulnerabilities(t *testing.T) {
 	ds := CreateMySQLDS(t)
@@ -34,6 +60,8 @@ func TestVulnerabilities(t *testing.T) {
 		{"TestCountVulnerabilities", testCountVulnerabilities},
 		{"TestInsertVulnerabilityCounts", testInsertVulnerabilityCounts},
 		{"TestVulnerabilityHostCountBatchInserts", testVulnerabilityHostCountBatchInserts},
+		{"TestVulnerabilityHostCountSwapRecovery", testVulnerabilityHostCountSwapRecovery},
+		{"TestListVulnerabilitiesCursorPagination", testListVulnerabilitiesCursorPagination},
 	}
 
 	for _, c := range cases {
@@ -509,7 +537,7 @@ func testListVulnerabilitiesSort(t *testing.T, ds *Datastore) {
 	require.Equal(t, "CVE-2020-1237", list[3].CVE.CVE)
 	require.Equal(t, "CVE-2020-1236", list[4].CVE.CVE)
 
-	opts.ListOptions.OrderKey = "published"
+	opts.ListOptions.OrderKey = "cve_published"
 	opts.ListOptions.OrderDirection = fleet.OrderAscending
 	list, _, err = ds.ListVulnerabilities(context.Background(), opts)
 	require.NoError(t, err)
@@ -519,6 +547,47 @@ func testListVulnerabilitiesSort(t *testing.T, ds *Datastore) {
 	require.Equal(t, "CVE-2020-1236", list[2].CVE.CVE)
 	require.Equal(t, "CVE-2020-1235", list[3].CVE.CVE)
 	require.Equal(t, "CVE-2020-1237", list[4].CVE.CVE)
+
+	t.Run("rejects_unknown_key", func(t *testing.T) {
+		_, _, err := ds.ListVulnerabilities(context.Background(), fleet.VulnListOptions{
+			ListOptions: fleet.ListOptions{OrderKey: "h.node_key"},
+		})
+		require.Error(t, err)
+	})
+}
+
+func testListVulnerabilitiesCursorPagination(t *testing.T, ds *Datastore) {
+	seedVulnerabilities(t, ds)
+
+	// Test cursor pagination with order keys that previously caused SQL errors
+	// due to ambiguous or unresolvable column names in the WHERE clause.
+	// See https://github.com/fleetdm/fleet/issues/45843
+	cursorTests := []struct {
+		name     string
+		orderKey string
+		after    string
+	}{
+		{"cve", "cve", "CVE-2020-1236"},
+		{"hosts_count", "hosts_count", "70"},
+		{"cve_published", "cve_published", "2020-01-01"},
+	}
+
+	for _, tc := range cursorTests {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := fleet.VulnListOptions{
+				IsEE: true,
+				ListOptions: fleet.ListOptions{
+					PerPage:        3,
+					OrderKey:       tc.orderKey,
+					OrderDirection: fleet.OrderAscending,
+					After:          tc.after,
+				},
+			}
+			list, _, err := ds.ListVulnerabilities(context.Background(), opts)
+			require.NoError(t, err)
+			require.NotEmpty(t, list)
+		})
+	}
 }
 
 func testVulnerabilitiesFilters(t *testing.T, ds *Datastore) {
@@ -924,6 +993,46 @@ func testVulnerabilityHostCountBatchInserts(t *testing.T, ds *Datastore) {
 	for _, vuln := range list {
 		require.Equal(t, uint(2), vuln.HostsCount)
 	}
+}
+
+func testVulnerabilityHostCountSwapRecovery(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+	writer := ds.writer(ctx)
+	defer func() {
+		_, err := writer.ExecContext(ctx, "DROP TABLE IF EXISTS vulnerability_host_counts_old")
+		require.NoError(t, err)
+	}()
+
+	_, err := writer.ExecContext(ctx, "DROP TABLE IF EXISTS vulnerability_host_counts_old")
+	require.NoError(t, err)
+	_, err = writer.ExecContext(ctx, "CREATE TABLE vulnerability_host_counts_old LIKE vulnerability_host_counts")
+	require.NoError(t, err)
+
+	counts := vulnerabilityCounts{
+		Global: []hostCount{{
+			CVE:         "CVE-2026-45100",
+			HostCount:   2,
+			GlobalStats: true,
+		}},
+	}
+	require.NoError(t, ds.atomicTableSwapVulnerabilityCounts(ctx, counts))
+
+	var got []hostCount
+	err = sqlx.SelectContext(ctx, ds.reader(ctx), &got, `
+		SELECT team_id, cve, host_count, global_stats
+		FROM vulnerability_host_counts
+	`)
+	require.NoError(t, err)
+	require.Equal(t, counts.Global, got)
+
+	var oldTableCount int
+	err = sqlx.GetContext(ctx, ds.reader(ctx), &oldTableCount, `
+		SELECT COUNT(*)
+		FROM information_schema.tables
+		WHERE table_schema = DATABASE() AND table_name = 'vulnerability_host_counts_old'
+	`)
+	require.NoError(t, err)
+	require.Zero(t, oldTableCount)
 }
 
 func testOSVersionsByCVEFailsGracefullyWithNoOSVersionRows(t *testing.T, ds *Datastore) {

@@ -31,7 +31,7 @@ export interface IGetDeviceSoftwareResponse {
   };
 }
 
-interface IGetDeviceDetailsRequest {
+interface IGetDeviceDetailsApiParams {
   token: string;
   exclude_software?: boolean;
 }
@@ -45,7 +45,7 @@ export interface IGetDeviceCertificatesResponse {
   count: number;
 }
 
-export interface IGetDeviceCertsRequestParams extends IListOptions {
+export interface IGetDeviceCertsApiParams extends IListOptions {
   token: string;
 }
 
@@ -63,11 +63,16 @@ export interface IGetSetupExperienceStatusesParams {
   token: string;
 }
 
+export interface IInitiateDeviceSSOResponse {
+  /** The IdP URL the browser must navigate to in order to sign in. */
+  url: string;
+}
+
 export default {
   loadHostDetails: ({
     token,
     exclude_software,
-  }: IGetDeviceDetailsRequest): Promise<IDUPDetails> => {
+  }: IGetDeviceDetailsApiParams): Promise<IDUPDetails> => {
     const { DEVICE_USER_DETAILS } = endpoints;
     let path = `${DEVICE_USER_DETAILS}/${token}`;
     if (exclude_software) {
@@ -87,6 +92,24 @@ export default {
   refetch: (deviceAuthToken: string) => {
     const { DEVICE_USER_DETAILS } = endpoints;
     const path = `${DEVICE_USER_DETAILS}/${deviceAuthToken}/refetch`;
+
+    return sendRequest("POST", path);
+  },
+  apnsPing: (deviceAuthToken: string) => {
+    const { DEVICE_USER_APNS_PING } = endpoints;
+    const path = DEVICE_USER_APNS_PING(deviceAuthToken);
+
+    return sendRequest("POST", path);
+  },
+
+  /** Starts the Fleet Desktop SSO flow. Sets the SSO handshake cookie and
+   * returns the IdP URL to navigate to; the session cookie is set server-side
+   * when the IdP calls back. */
+  initiateDeviceSSO: (
+    deviceAuthToken: string
+  ): Promise<IInitiateDeviceSSOResponse> => {
+    const { DEVICE_USER_DETAILS } = endpoints;
+    const path = `${DEVICE_USER_DETAILS}/${deviceAuthToken}/sso`;
 
     return sendRequest("POST", path);
   },
@@ -112,6 +135,23 @@ export default {
     const { DEVICE_SOFTWARE_INSTALL } = endpoints;
     const path = DEVICE_SOFTWARE_INSTALL(deviceToken, softwareTitleId);
 
+    return sendRequest("POST", path);
+  },
+
+  installAllSelfServiceSoftwareInCategory: (
+    deviceToken: string,
+    categoryId?: number,
+    query?: string
+  ) => {
+    const { DEVICE_SOFTWARE_INSTALL_ALL } = endpoints;
+    // `getPathWithQueryParams` drops undefined values, so an omitted
+    // `categoryId` means "install all categories" and an omitted `query`
+    // means "no name filter" — matching the endpoint's optional semantics.
+    // Callers are expected to hand a trimmed query (or an empty string).
+    const path = getPathWithQueryParams(
+      DEVICE_SOFTWARE_INSTALL_ALL(deviceToken),
+      { category_id: categoryId, query: query || undefined }
+    );
     return sendRequest("POST", path);
   },
 
@@ -165,7 +205,7 @@ export default {
     per_page,
     order_key,
     order_direction,
-  }: IGetDeviceCertsRequestParams): Promise<IGetDeviceCertificatesResponse> => {
+  }: IGetDeviceCertsApiParams): Promise<IGetDeviceCertificatesResponse> => {
     const { DEVICE_CERTIFICATES } = endpoints;
     const path = `${DEVICE_CERTIFICATES(token)}?${buildQueryStringFromParams({
       page,

@@ -10,7 +10,9 @@ import (
 	"net/url"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/fleetdm/fleet/v4/pkg/optjson"
@@ -162,7 +164,7 @@ type VulnerabilitySettings struct {
 	DatabasesPath string `json:"databases_path"`
 }
 
-// MDMAppleABMAssignmentInfo represents an user definition of the association
+// MDMAppleABMAssignmentInfo represents a user definition of the association
 // between an ABM token (via organization name) and the teams used to associate
 // hosts when they're ingested during the ABM sync.
 type MDMAppleABMAssignmentInfo struct {
@@ -170,13 +172,57 @@ type MDMAppleABMAssignmentInfo struct {
 	MacOSTeam        string `json:"macos_team" renameto:"macos_fleet"`
 	IOSTeam          string `json:"ios_team" renameto:"ios_fleet"`
 	IpadOSTeam       string `json:"ipados_team" renameto:"ipados_fleet"`
+	BYODTeam         string `json:"byod_team" renameto:"byod_fleet"`
 }
 
-// MDMAppleVolumePurchasingProgramInfo represents an user definition of the association
-// between a VPP token (via location) and the team associations.
+// CleanRemovedTeam unassigns removedTeamName, which for ABM is spelled as a
+// rename to "" ("no fleet").
+func (m *MDMAppleABMAssignmentInfo) CleanRemovedTeam(removedTeamName string) bool {
+	return m.RenameTeam(removedTeamName, "")
+}
+
+func (m *MDMAppleABMAssignmentInfo) RenameTeam(oldName, newName string) bool {
+	// "" spells "no fleet" here (see UpdateABMTokenTeams), so renaming from it
+	// would claim every unassigned platform.
+	if oldName == "" {
+		return false
+	}
+	var renamed bool
+	for _, f := range []*string{&m.MacOSTeam, &m.IOSTeam, &m.IpadOSTeam, &m.BYODTeam} {
+		if *f == oldName {
+			*f, renamed = newName, true
+		}
+	}
+	return renamed
+}
+
+// MDMAppleVolumePurchasingProgramInfo represents a user definition of the association
+// between a VPP token (via organization unit, formerly "location") and the team associations.
 type MDMAppleVolumePurchasingProgramInfo struct {
 	Location string   `json:"location"`
 	Teams    []string `json:"teams" renameto:"fleets"`
+}
+
+func (m *MDMAppleVolumePurchasingProgramInfo) RenameTeam(oldName, newName string) bool {
+	// "" spells "no fleet" here (see UpdateVPPTokenTeams), so renaming from it
+	// would claim every unassigned platform.
+	if oldName == "" {
+		return false
+	}
+
+	var renamed bool
+	for i, t := range m.Teams {
+		if t == oldName {
+			m.Teams[i], renamed = newName, true
+		}
+	}
+	return renamed
+}
+
+func (m *MDMAppleVolumePurchasingProgramInfo) CleanRemovedTeam(removedTeamName string) bool {
+	before := len(m.Teams)
+	m.Teams = slices.DeleteFunc(m.Teams, func(t string) bool { return t == removedTeamName })
+	return len(m.Teams) != before
 }
 
 // MDM is part of AppConfig and defines the mdm settings.
@@ -187,12 +233,13 @@ type MDM struct {
 	// If not set, the server will use Fleet server URL (recommended).
 	AppleServerURL string `json:"apple_server_url"`
 
-	// Deprecated: use AppleBussinessManager instead
-	DeprecatedAppleBMDefaultTeam string `json:"apple_bm_default_team,omitempty"`
+	// Deprecated: use AppleBusinessManager instead
+	DeprecatedAppleBMDefaultTeam string `json:"apple_bm_default_team,omitempty"` //nolint:apiparamcheck // not renaming already-deprecated field
 
-	// AppleBusinessManager defines the associations between ABM tokens
-	// and the teams used to assign hosts when they're ingested from ABM.
-	AppleBusinessManager optjson.Slice[MDMAppleABMAssignmentInfo] `json:"apple_business_manager"`
+	// AppleBusinessManager defines the associations between AB tokens
+	// and the fleets used to assign hosts when they're ingested from Apple
+	// Business.
+	AppleBusinessManager optjson.Slice[MDMAppleABMAssignmentInfo] `json:"apple_business_manager" renameto:"apple_business,inline"`
 
 	// AppleBMEnabledAndConfigured is set to true if Fleet has been
 	// configured with the required Apple BM key pair or token. It can't be set
@@ -200,7 +247,7 @@ type MDM struct {
 	// the server starts.
 	AppleBMEnabledAndConfigured bool `json:"apple_bm_enabled_and_configured"`
 
-	// AppleBMTermsExpired is set to true if an Apple Business Manager request
+	// AppleBMTermsExpired is set to true if an Apple Business request
 	// failed due to Apple's terms and conditions having changed and need the
 	// user to explicitly accept them. It cannot be set manually via the
 	// PATCH /config API, it is only set automatically, internally, by detecting
@@ -238,7 +285,28 @@ type MDM struct {
 	EnableTurnOnWindowsMDMManually bool                     `json:"enable_turn_on_windows_mdm_manually"`
 	EndUserAuthentication          MDMEndUserAuthentication `json:"end_user_authentication"`
 
+	// AppleRequireHardwareAttestation indicates whether to require Managed Device Attestation via ACME(including hardware bound keys) for
+	// certain Apple MDM enrollments.
+	AppleRequireHardwareAttestation bool `json:"apple_require_hardware_attestation"`
+	// OnlyAllowAppleBusinessEnrollment restricts Apple MDM enrollment to devices
+	// assigned to Fleet in Apple Business (ADE). Manual, OTA, and account-driven
+	// (BYOD) enrollment are blocked. When combined with AppleRequireHardwareAttestation,
+	// new SCEP issuance is also blocked so only ACME-attested devices can enroll or renew.
+	OnlyAllowAppleBusinessEnrollment bool `json:"only_allow_apple_business_enrollment"`
+
 	WindowsEntraTenantIDs optjson.Slice[string] `json:"windows_entra_tenant_ids"`
+
+	// WindowsEntraClientIDs is the allowlist of Entra application client IDs (GUIDs) whose tokens are accepted for
+	// Windows automatic enrollment.
+	WindowsEntraClientIDs optjson.Slice[string] `json:"windows_entra_client_ids"`
+
+	// MicrosoftGraphCredentialInvalid reports that at least one stored Microsoft Graph credential has been rejected by
+	// Entra or denied by Graph, so an admin has to supply a new secret or grant consent.
+	MicrosoftGraphCredentialInvalid bool `json:"microsoft_graph_credential_invalid"`
+
+	// WindowsAutomaticEnrollment configures behavior for new user-driven Windows MDM enrollments. The DB row backing it is
+	// the source of truth (by fleet id); this field carries the setting through the config API and GitOps by fleet name.
+	WindowsAutomaticEnrollment optjson.Any[WindowsAutomaticEnrollment] `json:"windows_automatic_enrollment"`
 
 	// WindowsEnabledAndConfigured indicates if Fleet MDM is enabled for Windows.
 	// There is no other configuration required for Windows other than enabling
@@ -248,8 +316,12 @@ type MDM struct {
 
 	EnableDiskEncryption optjson.Bool `json:"enable_disk_encryption"`
 
+	HostNameTemplate optjson.String `json:"name_template"`
+
 	EnableRecoveryLockPassword optjson.Bool `json:"enable_recovery_lock_password"`
 
+	// RequireBitLockerPIN is deprecated: use
+	// WindowsSettings.RequireBitLockerPIN, which it mirrors.
 	RequireBitLockerPIN optjson.Bool `json:"windows_require_bitlocker_pin"`
 
 	WindowsSettings WindowsSettings `json:"windows_settings"`
@@ -260,25 +332,316 @@ type MDM struct {
 	AndroidEnabledAndConfigured bool            `json:"android_enabled_and_configured"`
 	AndroidSettings             AndroidSettings `json:"android_settings"`
 
+	LinuxSettings LinuxSettings `json:"linux_settings"`
+
+	// AppleAccountProvisioning holds the macOS local account provisioning /
+	// Platform SSO password sync configuration. The IdP client secret is stored
+	// in mdm_config_assets, not in this JSON; only the masked value is returned.
+	AppleAccountProvisioning AppleAccountProvisioning `json:"apple_account_provisioning"`
+
 	/////////////////////////////////////////////////////////////////
 	// WARNING: If you add to this struct make sure it's taken into
 	// account in the AppConfig Clone implementation!
 	/////////////////////////////////////////////////////////////////
 }
 
-type DiskEncryptionConfig struct {
-	// Enabled indicates if disk encryption is enabled.
-	Enabled bool
-	// BitLockerPINRequired indicates if a PIN is required for BitLocker disk encryption.
-	BitLockerPINRequired bool
+// IsAppleMDMSCEPBlocked reports whether Apple MDM SCEP endpoints are blocked altogether. This blocks enrollments
+// and renewals, plus those that might have a valid profile lying around with the static SCEP can't enroll.
+func (m MDM) IsAppleMDMSCEPBlocked() bool {
+	return m.OnlyAllowAppleBusinessEnrollment && m.AppleRequireHardwareAttestation
 }
 
-type UIGitOpsModeConfig struct {
-	GitopsModeEnabled bool   `json:"gitops_mode_enabled"`
-	RepositoryURL     string `json:"repository_url"`
+type DiskEncryptionConfig struct {
+	// MacOSEnabled indicates if FileVault enforcement is enabled for macOS hosts.
+	MacOSEnabled bool
+	// MacOSEscrowEnabled indicates if recovery key escrow is enabled for macOS hosts.
+	MacOSEscrowEnabled bool
+	// WindowsEnabled indicates if BitLocker enforcement is enabled for Windows hosts.
+	WindowsEnabled bool
+	// BitLockerPINRequired indicates if a PIN is required for BitLocker disk encryption.
+	BitLockerPINRequired bool
+	// LinuxEscrowEnabled indicates if LUKS key escrow is enabled for Linux hosts.
+	LinuxEscrowEnabled bool
+}
+
+// AllEnabled returns the AND of the four per-platform disk encryption settings
+// — the value the deprecated flat enable_disk_encryption key reports. The
+// BitLocker PIN is a modifier of Windows enforcement, not one of the four.
+func (c DiskEncryptionConfig) AllEnabled() bool {
+	return c.MacOSEnabled && c.MacOSEscrowEnabled && c.WindowsEnabled && c.LinuxEscrowEnabled
+}
+
+// MacOSEnforceOnly reports whether FileVault is enforced without key escrow;
+// disk encryption status then follows the reported disk state, not the key.
+func (c DiskEncryptionConfig) MacOSEnforceOnly() bool {
+	return c.MacOSEnabled && !c.MacOSEscrowEnabled
+}
+
+// MacOSDiskEncryptionSettingsPayload is the macos_settings object accepted by
+// POST /disk_encryption. Nil fields mean "don't change".
+type MacOSDiskEncryptionSettingsPayload struct {
+	EnableDiskEncryption          *bool `json:"enable_disk_encryption"`
+	EnableEscrowDiskEncryptionKey *bool `json:"enable_escrow_disk_encryption_key"`
+}
+
+// WindowsDiskEncryptionSettingsPayload is the windows_settings object accepted
+// by POST /disk_encryption. Nil fields mean "don't change".
+type WindowsDiskEncryptionSettingsPayload struct {
+	EnableDiskEncryption *bool `json:"enable_disk_encryption"`
+	RequireBitLockerPIN  *bool `json:"require_bitlocker_pin"`
+}
+
+// LinuxDiskEncryptionSettingsPayload is the linux_settings object accepted by
+// POST /disk_encryption. Nil fields mean "don't change".
+type LinuxDiskEncryptionSettingsPayload struct {
+	EnableEscrowDiskEncryptionKey *bool `json:"enable_escrow_disk_encryption_key"`
+}
+
+// MDMDiskEncryptionSettingsPayload carries a POST /disk_encryption update
+// through the service layer. The deprecated flat EnableDiskEncryption fans out
+// to every per-platform setting; ResolvePerPlatform applies the fan-out and
+// conflict rules and returns the effective per-platform values.
+type MDMDiskEncryptionSettingsPayload struct {
+	// EnableDiskEncryption is deprecated: when set it applies to all platforms.
+	EnableDiskEncryption *bool
+	RequireBitLockerPIN  *bool
+	MacOSSettings        *MacOSDiskEncryptionSettingsPayload
+	WindowsSettings      *WindowsDiskEncryptionSettingsPayload
+	LinuxSettings        *LinuxDiskEncryptionSettingsPayload
+}
+
+// DiskEncryptionSettingsChanges holds the effective per-platform disk
+// encryption values of a settings write. Nil means "leave unchanged".
+type DiskEncryptionSettingsChanges struct {
+	MacOSEnable   *bool
+	MacOSEscrow   *bool
+	WindowsEnable *bool
+	LinuxEscrow   *bool
+}
+
+// ResolveBitLockerPIN resolves the deprecated windows_require_bitlocker_pin
+// field against its canonical windows_settings.require_bitlocker_pin home:
+// both may be sent when they agree, and the canonical one wins.
+func (p MDMDiskEncryptionSettingsPayload) ResolveBitLockerPIN() (*bool, error) {
+	if p.WindowsSettings == nil || p.WindowsSettings.RequireBitLockerPIN == nil {
+		return p.RequireBitLockerPIN, nil
+	}
+	if p.RequireBitLockerPIN != nil && *p.RequireBitLockerPIN != *p.WindowsSettings.RequireBitLockerPIN {
+		return nil, NewInvalidArgumentError(
+			"windows_require_bitlocker_pin", "conflicts with windows_settings.require_bitlocker_pin",
+		)
+	}
+	return p.WindowsSettings.RequireBitLockerPIN, nil
+}
+
+// ResolvePerPlatform applies the deprecated-key fan-out and conflict rules:
+// the legacy flat value fans out to every per-platform setting, and any
+// per-platform value explicitly sent alongside it must agree with it.
+func (p MDMDiskEncryptionSettingsPayload) ResolvePerPlatform() (DiskEncryptionSettingsChanges, error) {
+	var changes DiskEncryptionSettingsChanges
+	if p.MacOSSettings != nil {
+		changes.MacOSEnable = p.MacOSSettings.EnableDiskEncryption
+		changes.MacOSEscrow = p.MacOSSettings.EnableEscrowDiskEncryptionKey
+	}
+	if p.WindowsSettings != nil {
+		changes.WindowsEnable = p.WindowsSettings.EnableDiskEncryption
+	}
+	if p.LinuxSettings != nil {
+		changes.LinuxEscrow = p.LinuxSettings.EnableEscrowDiskEncryptionKey
+	}
+	if p.EnableDiskEncryption != nil {
+		legacy := *p.EnableDiskEncryption
+		for _, v := range []*bool{changes.MacOSEnable, changes.MacOSEscrow, changes.WindowsEnable, changes.LinuxEscrow} {
+			if v != nil && *v != legacy {
+				return DiskEncryptionSettingsChanges{}, NewInvalidArgumentError(
+					"enable_disk_encryption", "conflicts with per-platform disk encryption settings",
+				)
+			}
+		}
+		changes.MacOSEnable = &legacy
+		changes.MacOSEscrow = &legacy
+		changes.WindowsEnable = &legacy
+		changes.LinuxEscrow = &legacy
+	}
+	return changes, nil
+}
+
+// DiskEncryptionSettingsAllEnabled returns the AND of the four per-platform
+// disk encryption settings — the value the deprecated flat
+// mdm.enable_disk_encryption key reports.
+func (m *MDM) DiskEncryptionSettingsAllEnabled() bool {
+	return m.DiskEncryptionConfig().AllEnabled()
+}
+
+// DiskEncryptionConfig returns the global effective per-platform disk
+// encryption settings.
+func (m *MDM) DiskEncryptionConfig() DiskEncryptionConfig {
+	return DiskEncryptionConfig{
+		MacOSEnabled:         m.MacOSSettings.EnableDiskEncryption.Value,
+		MacOSEscrowEnabled:   m.MacOSSettings.EnableEscrowDiskEncryptionKey.Value,
+		WindowsEnabled:       m.WindowsSettings.EnableDiskEncryption.Value,
+		BitLockerPINRequired: m.BitLockerPINRequired(),
+		LinuxEscrowEnabled:   m.LinuxSettings.EnableEscrowDiskEncryptionKey.Value,
+	}
+}
+
+// ResolveBitLockerPINAlias resolves the deprecated windows_require_bitlocker_pin
+// key against its canonical windows_settings.require_bitlocker_pin home for the
+// config and fleet-spec shapes. Both keys may be sent when they agree, and the
+// canonical one is authoritative; disagreeing values are rejected.
+//
+// This is stricter than the deprecated mdm.enable_disk_encryption toggle, which
+// resolves by which value the request changed: that toggle is derived from the
+// four per-platform settings, so a round-tripped document always carries a value
+// that may legitimately disagree with a per-platform edit. This pair is always
+// mirrored, so a disagreement can only be a contradiction.
+//
+// The returned value is invalid when neither key carries one, meaning "leave the
+// stored value alone".
+func ResolveBitLockerPINAlias(deprecated, canonical optjson.Bool) (optjson.Bool, error) {
+	if canonical.Valid && deprecated.Valid && canonical.Value != deprecated.Value {
+		return optjson.Bool{}, NewInvalidArgumentError("mdm.windows_require_bitlocker_pin",
+			"conflicts with mdm.windows_settings.require_bitlocker_pin")
+	}
+	if canonical.Valid {
+		return canonical, nil
+	}
+	return deprecated, nil
+}
+
+// BitLockerPINRequirementError reports requiring a BitLocker PIN while Windows
+// disk encryption is off, returning the offending field and message, or empty
+// strings when the pair is valid. Turning encryption off blames the encryption
+// field; turning the PIN on blames the PIN field.
+func BitLockerPINRequirementError(oldWindowsEnabled bool, cfg DiskEncryptionConfig) (field, msg string) {
+	if !cfg.BitLockerPINRequired || cfg.WindowsEnabled {
+		return "", ""
+	}
+	if oldWindowsEnabled {
+		return "mdm.windows_settings.enable_disk_encryption", CantDisableDiskEncryptionIfPINRequiredErrMsg
+	}
+	return "mdm.windows_settings.require_bitlocker_pin", CantEnablePINRequiredIfDiskEncryptionEnabled
+}
+
+// BitLockerPINRequired returns the effective BitLocker PIN requirement: the
+// canonical windows_settings.require_bitlocker_pin when set, falling back to
+// the deprecated top-level key.
+func (m *MDM) BitLockerPINRequired() bool {
+	if m.WindowsSettings.RequireBitLockerPIN.Valid {
+		return m.WindowsSettings.RequireBitLockerPIN.Value
+	}
+	return m.RequireBitLockerPIN.Value
+}
+
+// normalizeDiskEncryptionSettings makes every serialization (API responses,
+// stored config JSON) carry explicit booleans for the four per-platform disk
+// encryption settings and the virtual flat toggle. When no per-platform
+// setting was ever set, the flat value (a legacy-only write, or the default
+// false) fans out; otherwise unset per-platform values default to false and
+// the flat toggle is recomputed as the AND of the four.
+func (m *MDM) normalizeDiskEncryptionSettings() {
+	flat := normalizeDiskEncryptionFields(
+		m.EnableDiskEncryption.Valid && m.EnableDiskEncryption.Value,
+		&m.MacOSSettings.EnableDiskEncryption,
+		&m.MacOSSettings.EnableEscrowDiskEncryptionKey,
+		&m.WindowsSettings.EnableDiskEncryption,
+		&m.LinuxSettings.EnableEscrowDiskEncryptionKey,
+	)
+	m.EnableDiskEncryption = optjson.SetBool(flat)
+	m.RequireBitLockerPIN, m.WindowsSettings.RequireBitLockerPIN = normalizeBitLockerPINFields(
+		m.RequireBitLockerPIN, m.WindowsSettings.RequireBitLockerPIN)
+}
+
+// normalizeBitLockerPINFields keeps the deprecated windows_require_bitlocker_pin
+// key and its canonical windows_settings.require_bitlocker_pin home in sync on
+// serialization: the canonical value wins when set, the deprecated one fills in
+// otherwise, and both default to explicit false.
+func normalizeBitLockerPINFields(deprecated, canonical optjson.Bool) (optjson.Bool, optjson.Bool) {
+	switch {
+	case canonical.Valid:
+		return optjson.SetBool(canonical.Value), canonical
+	case deprecated.Valid:
+		return deprecated, optjson.SetBool(deprecated.Value)
+	default:
+		return optjson.SetBool(false), optjson.SetBool(false)
+	}
+}
+
+// normalizeDiskEncryptionFields is the virtual-flat-key rule shared by
+// AppConfig and TeamMDM serialization: when no per-platform setting carries a
+// value, the flat value fans out to all four; otherwise unset per-platform
+// values default to false. Returns the flat (AND of four) value.
+func normalizeDiskEncryptionFields(flatValue bool, fields ...*optjson.Bool) bool {
+	anyPlatformSet := false
+	for _, f := range fields {
+		if f.Valid {
+			anyPlatformSet = true
+			break
+		}
+	}
+	if !anyPlatformSet {
+		for _, f := range fields {
+			*f = optjson.SetBool(flatValue)
+		}
+		return flatValue
+	}
+	all := true
+	for _, f := range fields {
+		if !f.Valid {
+			*f = optjson.SetBool(false)
+		}
+		all = all && f.Value
+	}
+	return all
+}
+
+type GitOpsExceptions struct {
+	Labels   bool `json:"labels"`
+	Software bool `json:"software"`
+	Secrets  bool `json:"secrets"`
+}
+
+type GitOpsConfig struct {
+	GitopsModeEnabled bool             `json:"gitops_mode_enabled"`
+	RepositoryURL     string           `json:"repository_url"`
+	Exceptions        GitOpsExceptions `json:"exceptions"`
+}
+
+// Subset of Appconfig to pull out only the serverURL and the MDM.AppleServerURL
+type AppConfigUrls struct {
+	ServerSettings struct {
+		ServerURL string `json:"server_url"`
+	} `json:"server_settings"`
+	MDM struct {
+		AppleServerURL string `json:"apple_server_url"`
+	} `json:"mdm"`
 }
 
 func (c *AppConfig) MDMUrl() string {
+	if c.MDM.AppleServerURL == "" {
+		return c.ServerSettings.ServerURL
+	}
+	return c.MDM.AppleServerURL
+}
+
+// FleetDesktopBrowserUrl returns the base URL an end user's browser reaches
+// Fleet on, which is the server URL unless fleet_desktop.alternative_browser_host
+// overrides its host.
+func (c *AppConfig) FleetDesktopBrowserUrl() (*url.URL, error) {
+	base, err := url.Parse(c.ServerSettings.ServerURL)
+	if err != nil {
+		return nil, err
+	}
+	if altHost := c.FleetDesktop.AlternativeBrowserHost; altHost != "" {
+		if parsed, err := url.Parse(altHost); err == nil && parsed.Host != "" {
+			altHost = parsed.Host
+		}
+		base.Host = altHost
+	}
+	return base, nil
+}
+
+func (c *AppConfigUrls) MDMUrl() string {
 	if c.MDM.AppleServerURL == "" {
 		return c.ServerSettings.ServerURL
 	}
@@ -337,15 +700,56 @@ type AppleOSUpdateSettings struct {
 	// Deadline the required installation date for Nudge to enforce the required
 	// operating system version.
 	Deadline optjson.String `json:"deadline"`
+	// DeadlineDays is the number of days after an OS version's release date
+	// before the update is enforced. It is only valid when MinimumVersion is
+	// "latest", where the deadline is relative to each version's release rather
+	// than a fixed calendar date.
+	DeadlineDays optjson.Int `json:"deadline_days"`
+}
+
+// AppleOSUpdateLatestVersion is the sentinel MinimumVersion value meaning
+// "enforce the newest version Apple offers for each host's hardware". The
+// target version is resolved per host, and the deadline is derived from that
+// version's release date plus DeadlineDays rather than being a fixed date.
+const AppleOSUpdateLatestVersion = "latest"
+
+// EnforcesLatestVersion returns whether these settings enforce the latest
+// available OS version rather than a specific one.
+func (m AppleOSUpdateSettings) EnforcesLatestVersion() bool {
+	return m.MinimumVersion.Value == AppleOSUpdateLatestVersion
 }
 
 // Configured returns a boolean indicating if updates are configured
 func (m AppleOSUpdateSettings) Configured() bool {
+	if m.EnforcesLatestVersion() {
+		// In "latest" mode the deadline is relative to each version's release
+		// date, so DeadlineDays stands in for Deadline.
+		return m.DeadlineDays.Valid && m.DeadlineDays.Value > 0
+	}
 	return m.Deadline.Value != "" &&
 		m.MinimumVersion.Value != ""
 }
 
 func (m AppleOSUpdateSettings) Validate() error {
+	if m.EnforcesLatestVersion() {
+		if m.Deadline.Value != "" {
+			return errors.New(`deadline cannot be set when minimum_version is set to "latest". Use deadline_days instead`)
+		}
+		if !m.DeadlineDays.Valid {
+			return errors.New(`deadline_days is required when minimum_version is set to "latest"`)
+		}
+		if m.DeadlineDays.Value < 1 {
+			return errors.New("deadline_days must be greater than 0")
+		}
+		return nil
+	}
+
+	// DeadlineDays is meaningless without a version to resolve it against, so
+	// reject it for a specific version and when no version is provided at all.
+	if m.DeadlineDays.Valid {
+		return errors.New(`deadline_days can only be set when minimum_version is set to "latest". Use deadline instead`)
+	}
+
 	// if no settings are provided it's okay to skip further validation
 	if m.MinimumVersion.Value == "" && m.Deadline.Value == "" {
 		// if one is set and empty, the other must be set and empty too, otherwise
@@ -371,7 +775,7 @@ func (m AppleOSUpdateSettings) Validate() error {
 	}
 
 	if _, err := time.Parse("2006-01-02", m.Deadline.Value); err != nil {
-		return errors.New(`deadline accepts YYYY-MM-DD format only (E.g., "2023-06-01.")`)
+		return errors.New(AppleOSVersionDeadlineInvalidMessage)
 	}
 
 	return nil
@@ -395,6 +799,10 @@ func (w WindowsUpdates) Equal(other WindowsUpdates) bool {
 		return false
 	}
 	return true
+}
+
+func (w WindowsUpdates) Configured() bool {
+	return w.DeadlineDays.Valid && w.GracePeriodDays.Valid
 }
 
 func (w WindowsUpdates) Validate() error {
@@ -435,8 +843,21 @@ type MacOSSettings struct {
 	//
 	// NOTE: These are only present here for informational purposes.
 	// (The source of truth for profiles is in MySQL.)
-	CustomSettings                 []MDMProfileSpec `json:"custom_settings" renameto:"configuration_profiles"`
-	DeprecatedEnableDiskEncryption *bool            `json:"enable_disk_encryption,omitempty"`
+	CustomSettings []MDMProfileSpec `json:"custom_settings" renameto:"configuration_profiles"`
+
+	// EnableDiskEncryption enforces FileVault on macOS hosts.
+	EnableDiskEncryption optjson.Bool `json:"enable_disk_encryption"`
+	// EnableEscrowDiskEncryptionKey makes Fleet escrow the FileVault recovery
+	// key of macOS hosts, independently of whether Fleet enforces FileVault.
+	EnableEscrowDiskEncryptionKey optjson.Bool `json:"enable_escrow_disk_encryption_key"`
+
+	// Assets is a slice of Apple DDM asset (com.apple.asset) declaration file
+	// paths. Unlike CustomSettings, assets are not stored on the AppConfig/team
+	// spec: this field is only populated while parsing a GitOps file so the
+	// assets can be applied via their own batch endpoint. It is intentionally
+	// omitted from FromMap; ToMap includes it only so the key passes the team
+	// spec's strict key validation (see applyTeamSpecsRequest.DecodeBody).
+	Assets []MDMProfileSpec `json:"assets,omitempty"`
 
 	// NOTE: make sure to update the ToMap/FromMap methods when adding/updating fields.
 }
@@ -447,8 +868,10 @@ func (s MacOSSettings) GetMDMProfileSpecs() []MDMProfileSpec {
 
 func (s MacOSSettings) ToMap() map[string]interface{} {
 	return map[string]interface{}{
-		"custom_settings":        s.CustomSettings,
-		"enable_disk_encryption": s.DeprecatedEnableDiskEncryption,
+		"custom_settings":                   s.CustomSettings,
+		"enable_disk_encryption":            s.EnableDiskEncryption,
+		"enable_escrow_disk_encryption_key": s.EnableEscrowDiskEncryptionKey,
+		"assets":                            s.Assets,
 	}
 }
 
@@ -513,18 +936,34 @@ func (s *MacOSSettings) FromMap(m map[string]interface{}) (map[string]bool, erro
 		}
 	}
 
-	if v, ok := m["enable_disk_encryption"]; ok {
+	// a nil value means the key was explicitly null (the optjson fields
+	// marshal unset values as null), which is treated as "not provided"
+	if v, ok := m["enable_disk_encryption"]; ok && v != nil {
 		set["enable_disk_encryption"] = true
 		b, ok := v.(bool)
 		if !ok {
 			// error, must be a bool
 			return nil, &json.UnmarshalTypeError{
 				Value: fmt.Sprintf("%T", v),
-				Type:  reflect.TypeOf(s.DeprecatedEnableDiskEncryption).Elem(),
+				Type:  reflect.TypeFor[bool](),
 				Field: "macos_settings.enable_disk_encryption",
 			}
 		}
-		s.DeprecatedEnableDiskEncryption = ptr.Bool(b)
+		s.EnableDiskEncryption = optjson.SetBool(b)
+	}
+
+	if v, ok := m["enable_escrow_disk_encryption_key"]; ok && v != nil {
+		set["enable_escrow_disk_encryption_key"] = true
+		b, ok := v.(bool)
+		if !ok {
+			// error, must be a bool
+			return nil, &json.UnmarshalTypeError{
+				Value: fmt.Sprintf("%T", v),
+				Type:  reflect.TypeFor[bool](),
+				Field: "macos_settings.enable_escrow_disk_encryption_key",
+			}
+		}
+		s.EnableEscrowDiskEncryptionKey = optjson.SetBool(b)
 	}
 
 	return set, nil
@@ -532,24 +971,66 @@ func (s *MacOSSettings) FromMap(m map[string]interface{}) (map[string]bool, erro
 
 // MacOSSetup contains settings related to the setup of DEP enrolled devices.
 type MacOSSetup struct {
-	BootstrapPackage            optjson.String                     `json:"bootstrap_package"`
+	BootstrapPackage            optjson.String                     `json:"bootstrap_package" renameto:"macos_bootstrap_package"`
 	EnableEndUserAuthentication bool                               `json:"enable_end_user_authentication"`
 	LockEndUserInfo             optjson.Bool                       `json:"lock_end_user_info"`
 	MacOSSetupAssistant         optjson.String                     `json:"macos_setup_assistant" renameto:"apple_setup_assistant"`
-	EnableReleaseDeviceManually optjson.Bool                       `json:"enable_release_device_manually"`
-	Script                      optjson.String                     `json:"script"`
+	EnableReleaseDeviceManually optjson.Bool                       `json:"enable_release_device_manually" renameto:"apple_enable_release_device_manually"`
+	Script                      optjson.String                     `json:"script" renameto:"macos_script"`
 	Software                    optjson.Slice[*MacOSSetupSoftware] `json:"software"`
-	ManualAgentInstall          optjson.Bool                       `json:"manual_agent_install"`
+	ManualAgentInstall          optjson.Bool                       `json:"manual_agent_install" renameto:"macos_manual_agent_install"`
 	RequireAllSoftware          bool                               `json:"require_all_software_macos"`
+	RequireAllSoftwareWindows   bool                               `json:"require_all_software_windows"`
+	EnableManagedLocalAccount   optjson.Bool                       `json:"enable_managed_local_account" renameto:"enable_create_local_admin_account" renamescope:"macos_setup,setup_experience"`
+	EndUserLocalAccountType     optjson.String                     `json:"end_user_local_account_type"`
 }
 
+// Validate checks the payload is in a valid state.
+// If needed to compare against old values (for partial patches) use ValidateAgainst instead.
 func (mos *MacOSSetup) Validate() error {
 	if mos == nil {
 		return nil
 	}
 
 	if mos.ManualAgentInstall.Valid && mos.ManualAgentInstall.Value && (!mos.BootstrapPackage.Valid || mos.BootstrapPackage.Value == "") {
-		return NewInvalidArgumentError("macos_setup.manual_agent_install", `Couldn't enable manual_agent_install. To use this option, first specify a bootstrap package.`)
+		return NewInvalidArgumentError("setup_experience.macos_manual_agent_install", `Couldn't enable macos_manual_agent_install. To use this option, first specify a bootstrap package.`)
+	}
+
+	if mos.EndUserLocalAccountType.Valid && !IsValidPrimaryAccountType(mos.EndUserLocalAccountType.Value) {
+		return NewInvalidArgumentError("end_user_local_account_type", `only "admin", "standard", and "none" are supported`)
+	}
+
+	if PrimaryAccountType(mos.EndUserLocalAccountType.Value).RequiresLocalAdminAccount() && (!mos.EnableManagedLocalAccount.Valid || !mos.EnableManagedLocalAccount.Value) {
+		return NewInvalidArgumentError("enable_create_local_admin_account", fmt.Sprintf(`enable_create_local_admin_account is required to be enabled when using %q for the end_user_local_account_type`, mos.EndUserLocalAccountType.Value))
+	}
+
+	return nil
+}
+
+// ValidateAgainst checks the payload is in a valid state, comparing against old values if needed for partial patches.
+func (mos *MacOSSetup) ValidateAgainst(old MacOSSetup) error {
+	if mos == nil {
+		return nil
+	}
+
+	if mos.ManualAgentInstall.Valid && mos.ManualAgentInstall.Value && (!mos.BootstrapPackage.Valid || mos.BootstrapPackage.Value == "") {
+		return NewInvalidArgumentError("setup_experience.macos_manual_agent_install", `Couldn't enable macos_manual_agent_install. To use this option, first specify a bootstrap package.`)
+	}
+
+	if mos.EndUserLocalAccountType.Valid && !IsValidPrimaryAccountType(mos.EndUserLocalAccountType.Value) {
+		return NewInvalidArgumentError("end_user_local_account_type", `only "admin", "standard", and "none" are supported`)
+	}
+
+	accountType := mos.EndUserLocalAccountType
+	if !accountType.Set || !accountType.Valid || accountType.Value == "" {
+		accountType = old.EndUserLocalAccountType
+	}
+	enableManagedLocalAccount := mos.EnableManagedLocalAccount
+	if !enableManagedLocalAccount.Set {
+		enableManagedLocalAccount = old.EnableManagedLocalAccount
+	}
+	if PrimaryAccountType(accountType.Value).RequiresLocalAdminAccount() && (!enableManagedLocalAccount.Valid || !enableManagedLocalAccount.Value) {
+		return NewInvalidArgumentError("enable_create_local_admin_account", fmt.Sprintf(`enable_create_local_admin_account is required to be enabled when using %q for the end_user_local_account_type`, accountType.Value))
 	}
 
 	return nil
@@ -579,6 +1060,12 @@ func (mos *MacOSSetup) SetDefaultsIfNeeded() {
 	}
 	if !mos.ManualAgentInstall.Valid {
 		mos.ManualAgentInstall = optjson.SetBool(false)
+	}
+	if !mos.EnableManagedLocalAccount.Valid {
+		mos.EnableManagedLocalAccount = optjson.SetBool(false)
+	}
+	if !mos.EndUserLocalAccountType.Valid {
+		mos.EndUserLocalAccountType = optjson.SetString("admin")
 	}
 }
 
@@ -673,7 +1160,7 @@ type AppConfig struct {
 
 	MDM MDM `json:"mdm"`
 
-	UIGitOpsMode UIGitOpsModeConfig `json:"gitops"`
+	GitOpsConfig GitOpsConfig `json:"gitops"`
 
 	// Scripts is a slice of script file paths.
 	//
@@ -713,6 +1200,16 @@ func (c *AppConfig) Obfuscate() {
 	}
 	for _, gcIntegration := range c.Integrations.GoogleCalendar {
 		gcIntegration.ApiKey.SetMasked()
+	}
+	for _, gwIntegration := range c.Integrations.GoogleWorkspace {
+		gwIntegration.ApiKey.SetMasked()
+	}
+	// The Apple account provisioning IdP client secret lives in
+	// mdm_config_assets, never in the AppConfig JSON. Surface the masked value
+	// whenever the feature is configured (token URL present implies a stored
+	// secret), so the API never leaks it but still signals it's set.
+	if c.MDM.AppleAccountProvisioning.Configured() || c.MDM.AppleAccountProvisioning.OAuthIdPClientSecret.Value != "" {
+		c.MDM.AppleAccountProvisioning.OAuthIdPClientSecret = optjson.SetString(MaskedPassword)
 	}
 	// // TODO(hca): confirm that we're properly masking credentials in the new endpoints
 	// if c.Integrations.NDESSCEPProxy.Valid {
@@ -763,6 +1260,7 @@ func (c *AppConfig) Copy() *AppConfig {
 			clone.Features.DetailQueryOverrides[k] = s
 		}
 	}
+	clone.Features.VulnerabilityExposureHistoricalReporting = c.Features.VulnerabilityExposureHistoricalReporting.Copy()
 	if c.AgentOptions != nil {
 		ao := make(json.RawMessage, len(*c.AgentOptions))
 		copy(ao, *c.AgentOptions)
@@ -806,6 +1304,17 @@ func (c *AppConfig) Copy() *AppConfig {
 			}
 		}
 	}
+	if len(c.Integrations.GoogleWorkspace) > 0 {
+		clone.Integrations.GoogleWorkspace = make([]*GoogleWorkspaceIntegration, len(c.Integrations.GoogleWorkspace))
+		for i, g := range c.Integrations.GoogleWorkspace {
+			gWorkspace := *g
+			clone.Integrations.GoogleWorkspace[i] = &gWorkspace
+			if len(g.ApiKey.Values) > 0 {
+				clone.Integrations.GoogleWorkspace[i].ApiKey.Values = make(map[string]string, len(g.ApiKey.Values))
+				maps.Copy(clone.Integrations.GoogleWorkspace[i].ApiKey.Values, g.ApiKey.Values)
+			}
+		}
+	}
 	// // TODO(hca): do we want to cache the new grouped CAs datastore method?
 	// if len(c.Integrations.DigiCert.Value) > 0 {
 	// 	digicert := make([]DigiCertCA, len(c.Integrations.DigiCert.Value))
@@ -823,10 +1332,6 @@ func (c *AppConfig) Copy() *AppConfig {
 		for i, mps := range c.MDM.MacOSSettings.CustomSettings {
 			clone.MDM.MacOSSettings.CustomSettings[i] = *mps.Copy()
 		}
-	}
-	if c.MDM.MacOSSettings.DeprecatedEnableDiskEncryption != nil {
-		b := *c.MDM.MacOSSettings.DeprecatedEnableDiskEncryption
-		clone.MDM.MacOSSettings.DeprecatedEnableDiskEncryption = &b
 	}
 
 	if c.Scripts.Set {
@@ -896,6 +1401,11 @@ func (c *AppConfig) Copy() *AppConfig {
 		copy(clone.MDM.WindowsEntraTenantIDs.Value, c.MDM.WindowsEntraTenantIDs.Value)
 	}
 
+	if c.MDM.WindowsEntraClientIDs.Set {
+		clone.MDM.WindowsEntraClientIDs = optjson.SetSlice(make([]string, len(c.MDM.WindowsEntraClientIDs.Value)))
+		copy(clone.MDM.WindowsEntraClientIDs.Value, c.MDM.WindowsEntraClientIDs.Value)
+	}
+
 	return &clone
 }
 
@@ -909,11 +1419,12 @@ type EnrichedAppConfig struct {
 
 // enrichedAppConfigFields are grouped separately to aid with JSON unmarshaling
 type enrichedAppConfigFields struct {
-	UpdateInterval  *UpdateIntervalConfig  `json:"update_interval,omitempty"`
-	Vulnerabilities *VulnerabilitiesConfig `json:"vulnerabilities,omitempty"`
-	License         *LicenseInfo           `json:"license,omitempty"`
-	Logging         *Logging               `json:"logging,omitempty"`
-	Email           *EmailConfig           `json:"email,omitempty"`
+	UpdateInterval         *UpdateIntervalConfig  `json:"update_interval,omitempty"`
+	Vulnerabilities        *VulnerabilitiesConfig `json:"vulnerabilities,omitempty"`
+	License                *LicenseInfo           `json:"license,omitempty"`
+	Logging                *Logging               `json:"logging,omitempty"`
+	Email                  *EmailConfig           `json:"email,omitempty"`
+	MaxSoftwarePackageSize int64                  `json:"max_software_package_size"`
 }
 
 // UnmarshalJSON implements the json.Unmarshaler interface to make sure we serialize
@@ -1064,6 +1575,10 @@ func (c *AppConfig) ApplyDefaultsForNewInstalls() {
 
 	c.Features.ApplyDefaultsForNewInstalls()
 
+	c.GitOpsConfig.Exceptions.Secrets = true
+	c.GitOpsConfig.Exceptions.Labels = false
+	c.GitOpsConfig.Exceptions.Software = false
+
 	c.ApplyDefaults()
 }
 
@@ -1114,9 +1629,7 @@ func (c AppConfig) MarshalJSON() ([]byte, error) {
 	// requirements are that if this value is not set, defaults to false.
 	// The default mashaler of optjson.Bool will convert this to `null` if
 	// it's not valid.
-	if !c.MDM.EnableDiskEncryption.Valid {
-		c.MDM.EnableDiskEncryption = optjson.SetBool(false)
-	}
+	c.MDM.normalizeDiskEncryptionSettings()
 	if !c.MDM.EnableRecoveryLockPassword.Valid {
 		c.MDM.EnableRecoveryLockPassword = optjson.SetBool(false)
 	}
@@ -1125,6 +1638,15 @@ func (c AppConfig) MarshalJSON() ([]byte, error) {
 	}
 	if !c.MDM.MacOSSetup.LockEndUserInfo.Valid {
 		c.MDM.MacOSSetup.LockEndUserInfo = optjson.SetBool(c.MDM.MacOSSetup.EnableEndUserAuthentication)
+	}
+	if !c.MDM.MacOSSetup.EnableManagedLocalAccount.Valid {
+		c.MDM.MacOSSetup.EnableManagedLocalAccount = optjson.SetBool(false)
+	}
+	if !c.MDM.MacOSSetup.EndUserLocalAccountType.Valid {
+		c.MDM.MacOSSetup.EndUserLocalAccountType = optjson.SetString("admin")
+	}
+	if !c.MDM.WindowsSettings.EnableManagedLocalAccount.Valid {
+		c.MDM.WindowsSettings.EnableManagedLocalAccount = optjson.SetBool(false)
 	}
 	type aliasConfig AppConfig
 	aa := aliasConfig(c)
@@ -1145,30 +1667,122 @@ func (c *AppConfig) assignDeprecatedFields() {
 		c.Features = *c.DeprecatedHostSettings
 	}
 
-	// if disk encryption is not set in the root config
-	// try to read the value from the legacy config
-	if !c.MDM.EnableDiskEncryption.Valid {
-		if c.MDM.MacOSSettings.DeprecatedEnableDiskEncryption != nil {
-			c.didUnmarshalLegacySettings = append(c.didUnmarshalLegacySettings, "mdm.macos_settings.enable_disk_encryption")
-			c.MDM.EnableDiskEncryption = optjson.SetBool(*c.MDM.MacOSSettings.DeprecatedEnableDiskEncryption)
+	// A per-platform disk encryption setting ABSENT from the document inherits
+	// the deprecated flat toggle, healing configs re-saved by a pre-split
+	// server after the fan-out migration ran. Keys explicitly present
+	// (including explicit null) are never overridden.
+	if c.MDM.EnableDiskEncryption.Valid {
+		for _, f := range []*optjson.Bool{
+			&c.MDM.MacOSSettings.EnableDiskEncryption,
+			&c.MDM.MacOSSettings.EnableEscrowDiskEncryptionKey,
+			&c.MDM.WindowsSettings.EnableDiskEncryption,
+			&c.MDM.LinuxSettings.EnableEscrowDiskEncryptionKey,
+		} {
+			if !f.Set {
+				*f = optjson.SetBool(c.MDM.EnableDiskEncryption.Value)
+			}
 		}
+	}
+	// the BitLocker PIN's canonical home inherits the deprecated top-level key
+	// the same way when absent from the document
+	if !c.MDM.WindowsSettings.RequireBitLockerPIN.Set && c.MDM.RequireBitLockerPIN.Valid {
+		c.MDM.WindowsSettings.RequireBitLockerPIN = optjson.SetBool(c.MDM.RequireBitLockerPIN.Value)
 	}
 
 	// ensure the legacy configs are always nil
 	c.DeprecatedHostSettings = nil
-	c.MDM.MacOSSettings.DeprecatedEnableDiskEncryption = nil
 
 	sort.Strings(c.didUnmarshalLegacySettings)
 }
 
 // OrgInfo contains general info about the organization using Fleet.
 type OrgInfo struct {
-	OrgName                   string `json:"org_name"`
-	OrgLogoURL                string `json:"org_logo_url"`
+	OrgName string `json:"org_name"`
+	// Deprecated: use OrgLogoURLDarkMode.
+	OrgLogoURL string `json:"org_logo_url"`
+	// Deprecated: use OrgLogoURLLightMode.
 	OrgLogoURLLightBackground string `json:"org_logo_url_light_background"`
+	OrgLogoURLDarkMode        string `json:"org_logo_url_dark_mode"`
+	OrgLogoURLLightMode       string `json:"org_logo_url_light_mode"`
 	// ContactURL is the URL displayed for users to contact support. By default,
 	// https://fleetdm.com/company/contact is used.
 	ContactURL string `json:"contact_url"`
+}
+
+// Keep deprecated fields (OrgLogoURL and OrgLogoURLLightBackground) in sync
+// with the new fields (OrgLogoURLDarkMode and OrgLogoURLLightMode).
+func (o *OrgInfo) NormalizeLogoFields() *InvalidArgumentError {
+	invalid := &InvalidArgumentError{}
+
+	switch {
+	case o.OrgLogoURL != "" && o.OrgLogoURLDarkMode != "" && o.OrgLogoURL != o.OrgLogoURLDarkMode:
+		invalid.Append("org_logo_url",
+			"cannot specify both org_logo_url and org_logo_url_dark_mode with different values")
+	case o.OrgLogoURL == "" && o.OrgLogoURLDarkMode != "":
+		o.OrgLogoURL = o.OrgLogoURLDarkMode
+	case o.OrgLogoURLDarkMode == "" && o.OrgLogoURL != "":
+		o.OrgLogoURLDarkMode = o.OrgLogoURL
+	}
+
+	switch {
+	case o.OrgLogoURLLightBackground != "" && o.OrgLogoURLLightMode != "" && o.OrgLogoURLLightBackground != o.OrgLogoURLLightMode:
+		invalid.Append("org_logo_url_light_background",
+			"cannot specify both org_logo_url_light_background and org_logo_url_light_mode with different values")
+	case o.OrgLogoURLLightBackground == "" && o.OrgLogoURLLightMode != "":
+		o.OrgLogoURLLightBackground = o.OrgLogoURLLightMode
+	case o.OrgLogoURLLightMode == "" && o.OrgLogoURLLightBackground != "":
+		o.OrgLogoURLLightMode = o.OrgLogoURLLightBackground
+	}
+
+	if invalid.HasErrors() {
+		return invalid
+	}
+	return nil
+}
+
+// orgLogoServingPathPrefix is the relative path Fleet writes into the
+// OrgLogo*URL fields after a successful logo upload (see
+// orgLogoServingURL in server/service/org_logo.go). AbsolutizeLogoURLs
+// uses this to recognize Fleet-hosted logos that need the current
+// ServerURL prepended on read.
+const orgLogoServingPathPrefix = "/api/latest/fleet/logo"
+
+// AbsolutizeLogoURL rewrites a Fleet-hosted relative logo URL into a
+// fully-qualified URL using the supplied serverURL. URLs that don't
+// match the Fleet-hosted serving path (i.e. external URLs set by
+// customers) and empty strings are returned unchanged. Use this when
+// you only need to absolutize one field — see AbsolutizeLogoURLs for
+// the OrgInfo-wide variant.
+func AbsolutizeLogoURL(u, serverURL string) string {
+	if serverURL == "" || !strings.HasPrefix(u, orgLogoServingPathPrefix) {
+		return u
+	}
+	return strings.TrimRight(serverURL, "/") + u
+}
+
+// AbsolutizeLogoURLs applies AbsolutizeLogoURL to all four logo URL
+// fields on OrgInfo (deprecated + mode-aware pairs) in place.
+func (o *OrgInfo) AbsolutizeLogoURLs(serverURL string) {
+	o.OrgLogoURL = AbsolutizeLogoURL(o.OrgLogoURL, serverURL)
+	o.OrgLogoURLLightBackground = AbsolutizeLogoURL(o.OrgLogoURLLightBackground, serverURL)
+	o.OrgLogoURLDarkMode = AbsolutizeLogoURL(o.OrgLogoURLDarkMode, serverURL)
+	o.OrgLogoURLLightMode = AbsolutizeLogoURL(o.OrgLogoURLLightMode, serverURL)
+}
+
+// IsFleetHostedLogoURL reports whether the given URL points at the Fleet logo
+// serving endpoint. Handles both the persisted relative form
+// ("/api/latest/fleet/logo?mode=...") and the absolutized form returned by
+// AbsolutizeLogoURLs. Match must be on the parsed Path so a sibling endpoint
+// like "/api/latest/fleet/logo-proxy" doesn't get falsely identified.
+func IsFleetHostedLogoURL(rawURL string) bool {
+	if rawURL == "" {
+		return false
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return u.Path == orgLogoServingPathPrefix
 }
 
 const DefaultOrgInfoContactURL = "https://fleetdm.com/company/contact"
@@ -1205,18 +1819,85 @@ type HostExpirySettings struct {
 type ActivityExpirySettings struct {
 	ActivityExpiryEnabled bool `json:"activity_expiry_enabled"`
 	ActivityExpiryWindow  int  `json:"activity_expiry_window"`
+
+	// PreserveHostActivitiesOnReenrollment controls whether existing host
+	// activities, MDM commands, etc. are kept when a managed host re-enrolls.
+	// Defaults to true for upgraded installs (preserves prior behavior) and
+	// false for fresh installs.
+	PreserveHostActivitiesOnReenrollment bool `json:"preserve_host_activities_on_reenrollment"`
 }
 
 type Features struct {
-	EnableHostUsers         bool               `json:"enable_host_users"`
-	EnableSoftwareInventory bool               `json:"enable_software_inventory"`
-	AdditionalQueries       *json.RawMessage   `json:"additional_queries,omitempty"`
-	DetailQueryOverrides    map[string]*string `json:"detail_query_overrides,omitempty"`
+	EnableHostUsers         bool                   `json:"enable_host_users"`
+	EnableSoftwareInventory bool                   `json:"enable_software_inventory"`
+	AdditionalQueries       *json.RawMessage       `json:"additional_queries,omitempty"`     //nolint:apiparamcheck // osquery host-details queries
+	DetailQueryOverrides    map[string]*string     `json:"detail_query_overrides,omitempty"` //nolint:apiparamcheck // osquery detail-query overrides
+	HistoricalData          HistoricalDataSettings `json:"historical_data"`
+
+	// VulnerabilityExposureHistoricalReporting holds the GitOps-managed default
+	// filter state for the Vulnerability exposure dashboard chart. It is a
+	// display-only concern: it seeds the chart's filter controls on load and
+	// does NOT affect what vulnerability data is collected. Premium-only.
+	//
+	// All fields are pointers so the config has sparse/PATCH semantics: a field
+	// present in YAML is persisted and respected by the frontend, while an
+	// omitted field stays nil and the frontend falls back to its own built-in
+	// default for that control.
+	VulnerabilityExposureHistoricalReporting *VulnExposureFilterSettings `json:"vulnerability_exposure_historical_reporting,omitempty"`
 
 	/////////////////////////////////////////////////////////////////
 	// WARNING: If you add to this struct make sure it's taken into
 	// account in the Features Clone implementation!
 	/////////////////////////////////////////////////////////////////
+}
+
+// VulnExposureFilterSettings is the persisted default filter state for the
+// Vulnerability exposure (CVE) dashboard chart. Field names/units mirror what
+// the frontend consumes when seeding its filter controls: software categories
+// use the canonical keys (os/browsers/office/adobe), EPSS bounds are expressed
+// as 0–100 (the frontend converts to 0–1 only when calling the chart API).
+//
+// Every field is optional (nil = "not set, use the frontend default"). A
+// present SoftwareFilters slice must list at least one category: a
+// present-but-empty slice is rejected by Validate, because on the chart read
+// path an empty selection collapses to "all categories" and so can never
+// produce the empty chart it implies.
+type VulnExposureFilterSettings struct {
+	SoftwareFilters        *[]string `json:"software_filters,omitempty"`
+	CVSSMin                *float64  `json:"cvss_min,omitempty"`
+	CVSSMax                *float64  `json:"cvss_max,omitempty"`
+	EPSSMin                *float64  `json:"epss_min,omitempty"`
+	EPSSMax                *float64  `json:"epss_max,omitempty"`
+	HasKnownExploit        *bool     `json:"has_known_exploit,omitempty"`
+	ExcludeVulnerabilities *[]string `json:"exclude_vulnerabilities,omitempty"`
+}
+
+// HistoricalDataSettings controls per-dataset collection of the time-series
+// rollups that drive the dashboard charts. Each sub-key corresponds to a
+// chart dataset; `true` means collect, `false` means skip.
+//
+// Sub-key names are the public config keys (used in YAML and audit
+// activities). Internal dataset names (the values returned by Dataset.Name())
+// are translated to sub-keys via the Enabled method.
+type HistoricalDataSettings struct {
+	Uptime          bool `json:"uptime"`
+	Vulnerabilities bool `json:"vulnerabilities"`
+}
+
+// Enabled returns whether collection is enabled for the given internal
+// dataset name. The mapping is the single canonical translation between
+// internal dataset names (e.g. "cve") and config sub-keys (e.g.
+// "vulnerabilities"). Callers SHOULD use this method rather than reading
+// fields directly.
+func (h HistoricalDataSettings) Enabled(dataset string) (bool, error) {
+	switch dataset {
+	case "uptime":
+		return h.Uptime, nil
+	case "cve":
+		return h.Vulnerabilities, nil
+	default:
+		return false, fmt.Errorf("unknown dataset %q", dataset)
+	}
 }
 
 func (f *Features) ApplyDefaultsForNewInstalls() {
@@ -1229,6 +1910,8 @@ func (f *Features) ApplyDefaultsForNewInstalls() {
 
 func (f *Features) ApplyDefaults() {
 	f.EnableHostUsers = true
+	f.HistoricalData.Uptime = true
+	f.HistoricalData.Vulnerabilities = true
 }
 
 // Clone implements cloner for Features.
@@ -1263,7 +1946,115 @@ func (f *Features) Copy() *Features {
 		}
 	}
 
+	clone.VulnerabilityExposureHistoricalReporting = f.VulnerabilityExposureHistoricalReporting.Copy()
+
 	return &clone
+}
+
+// Copy returns a deep copy of the settings, or nil if the receiver is nil.
+func (v *VulnExposureFilterSettings) Copy() *VulnExposureFilterSettings {
+	if v == nil {
+		return nil
+	}
+
+	var clone VulnExposureFilterSettings
+
+	if v.CVSSMin != nil {
+		clone.CVSSMin = new(*v.CVSSMin)
+	}
+	if v.CVSSMax != nil {
+		clone.CVSSMax = new(*v.CVSSMax)
+	}
+	if v.EPSSMin != nil {
+		clone.EPSSMin = new(*v.EPSSMin)
+	}
+	if v.EPSSMax != nil {
+		clone.EPSSMax = new(*v.EPSSMax)
+	}
+	if v.HasKnownExploit != nil {
+		clone.HasKnownExploit = new(*v.HasKnownExploit)
+	}
+	if v.SoftwareFilters != nil {
+		sf := make([]string, len(*v.SoftwareFilters))
+		copy(sf, *v.SoftwareFilters)
+		clone.SoftwareFilters = &sf
+	}
+	if v.ExcludeVulnerabilities != nil {
+		ev := make([]string, len(*v.ExcludeVulnerabilities))
+		copy(ev, *v.ExcludeVulnerabilities)
+		clone.ExcludeVulnerabilities = &ev
+	}
+
+	return &clone
+}
+
+// vulnExposureSoftwareCategories is the set of valid software_filters values.
+// It mirrors the canonical CVE category keys defined in server/chart/api
+// (CVECategoryOS/Browsers/Office/Adobe); kept as a local set here to avoid the
+// base fleet package depending on the chart bounded context.
+var vulnExposureSoftwareCategories = map[string]struct{}{
+	"os":       {},
+	"browsers": {},
+	"office":   {},
+	"adobe":    {},
+}
+
+// vulnExposureCVERegex matches a CVE identifier, mirroring the pattern used in
+// server/service (cveRegex).
+var vulnExposureCVERegex = regexp.MustCompile(`(?i)^CVE-\d{4}-\d{4}\d*$`)
+
+// Validate checks only the fields that are present (non-nil). It is meant to be
+// run against the incoming GitOps/PATCH payload, not against persisted state.
+// Errors are appended to the provided invalid accumulator under keys prefixed
+// with the supplied path (e.g. "org_settings.features" or
+// "<fleet>.settings.features").
+func (v *VulnExposureFilterSettings) Validate(prefix string, invalid *InvalidArgumentError) {
+	if v == nil {
+		return
+	}
+	key := func(field string) string {
+		return prefix + ".vulnerability_exposure_historical_reporting." + field
+	}
+
+	if v.SoftwareFilters != nil {
+		// An empty list is rejected rather than treated as "no categories":
+		// on the chart read path an empty selection is indistinguishable from
+		// "no filter" and resolves to all categories, so it can never produce
+		// the empty chart it implies. Require at least one category instead.
+		if len(*v.SoftwareFilters) == 0 {
+			invalid.Append(key("software_filters"), "must include at least one software category (valid values: os, browsers, office, adobe)")
+		}
+		for _, c := range *v.SoftwareFilters {
+			if _, ok := vulnExposureSoftwareCategories[c]; !ok {
+				invalid.Append(key("software_filters"), fmt.Sprintf("invalid software category %q (valid values: os, browsers, office, adobe)", c))
+			}
+		}
+	}
+
+	validateBounds(invalid, key("cvss_min"), key("cvss_max"), v.CVSSMin, v.CVSSMax, 0, 10, "cvss")
+	validateBounds(invalid, key("epss_min"), key("epss_max"), v.EPSSMin, v.EPSSMax, 0, 100, "epss")
+
+	if v.ExcludeVulnerabilities != nil {
+		for _, cve := range *v.ExcludeVulnerabilities {
+			if !vulnExposureCVERegex.MatchString(cve) {
+				invalid.Append(key("exclude_vulnerabilities"), fmt.Sprintf("invalid CVE identifier %q", cve))
+			}
+		}
+	}
+}
+
+// validateBounds checks an optional [min, max] score range: each present bound
+// must fall within [lo, hi], and when both are present min must be <= max.
+func validateBounds(invalid *InvalidArgumentError, minKey, maxKey string, minVal, maxVal *float64, lo, hi float64, label string) {
+	if minVal != nil && (*minVal < lo || *minVal > hi) {
+		invalid.Append(minKey, fmt.Sprintf("%s_min must be between %g and %g", label, lo, hi))
+	}
+	if maxVal != nil && (*maxVal < lo || *maxVal > hi) {
+		invalid.Append(maxKey, fmt.Sprintf("%s_max must be between %g and %g", label, lo, hi))
+	}
+	if minVal != nil && maxVal != nil && *minVal > *maxVal {
+		invalid.Append(minKey, fmt.Sprintf("%s_min must be less than or equal to %s_max", label, label))
+	}
 }
 
 // FleetDesktopSettings contains settings used to configure Fleet Desktop.
@@ -1273,6 +2064,9 @@ type FleetDesktopSettings struct {
 	// AlternativeBrowserHost if set, Fleet Desktop will use this to open any links;
 	// this is used in scenarios where we want Fleet Desktop traffic to use a custom proxy, for security reasons.
 	AlternativeBrowserHost string `json:"alternative_browser_host"`
+	// SSOEnabled requires end users to authenticate with the IdP configured in
+	// mdm.end_user_authentication, which must be set before this can be enabled.
+	SSOEnabled bool `json:"sso_enabled"`
 }
 
 // DefaultTransparencyURL is the default URL used for the “About Fleet” link in the Fleet Desktop menu.
@@ -1365,6 +2159,19 @@ type ListQueryOptions struct {
 	// Return queries that are scheduled to run on this platform. One of "macos",
 	// "windows", or "linux"
 	Platform *string
+}
+
+// ListHostReportsOptions defines options for listing reports (queries) associated with a host.
+type ListHostReportsOptions struct {
+	ListOptions
+	// IncludeReportsDontStoreResults controls whether queries that don't store
+	// results (discard_data=1 OR logging_type!='snapshot') are included.
+	// false (default): only queries with discard_data=0 AND logging_type='snapshot' are returned.
+	// true: all queries are returned, including ones that don't store results.
+	IncludeReportsDontStoreResults bool
+	// ExcludeIncludeAllQueries hides queries that have any include_all
+	// (require_all=1) labels.
+	ExcludeIncludeAllQueries bool
 }
 
 // ApplySpecOptions are the options available when applying a YAML or JSON spec.
@@ -1509,9 +2316,6 @@ type LicenseInfo struct {
 	Note string `json:"note,omitempty"`
 	// AllowDisableTelemetry allows specific customers to not send analytics
 	AllowDisableTelemetry bool `json:"allow_disable_telemetry,omitempty"`
-	// ManagedCloud indicates whether this Fleet instance is a cloud instance.
-	// Currently only used to display UI features only present on cloud instances.
-	ManagedCloud bool `json:"managed_cloud"`
 }
 
 func (l *LicenseInfo) IsPremium() bool {
@@ -1570,8 +2374,9 @@ type EmailConfig struct {
 }
 
 type SESConfig struct {
-	Region    string `json:"region"`
-	SourceARN string `json:"source_arn"`
+	Region       string `json:"region"`
+	SourceARN    string `json:"source_arn"`
+	SenderDomain string `json:"sender_domain"`
 }
 
 type UpdateIntervalConfig struct {
@@ -1593,6 +2398,7 @@ type VulnerabilitiesConfig struct {
 	DisableDataSync             bool          `json:"disable_data_sync"`
 	RecentVulnerabilityMaxAge   time.Duration `json:"recent_vulnerability_max_age"`
 	DisableWinOSVulnerabilities bool          `json:"disable_win_os_vulnerabilities"`
+	OSVForVulnerabilities       bool          `json:"osv_for_vulnerabilities"`
 }
 
 type LoggingPlugin struct {
@@ -1652,6 +2458,14 @@ type NatsConfig struct {
 	AuditSubject  string `json:"audit_subject"`
 }
 
+// SplunkConfig shadows config.SplunkConfig only exposing a subset of fields
+type SplunkConfig struct {
+	URL        string `json:"url"`
+	Index      string `json:"index"`
+	Source     string `json:"source"`
+	SourceType string `json:"source_type"`
+}
+
 // DeviceGlobalConfig is a subset of AppConfig with information used by the
 // device endpoints
 type DeviceGlobalConfig struct {
@@ -1662,8 +2476,9 @@ type DeviceGlobalConfig struct {
 // DeviceGlobalMDMConfig is a subset of AppConfig.MDM with information used by
 // the device endpoints
 type DeviceGlobalMDMConfig struct {
-	EnabledAndConfigured bool `json:"enabled_and_configured"`
-	RequireAllSoftware   bool `json:"require_all_software_macos"`
+	EnabledAndConfigured             bool `json:"enabled_and_configured"`
+	RequireAllSoftware               bool `json:"require_all_software_macos"`
+	OnlyAllowAppleBusinessEnrollment bool `json:"only_allow_apple_business_enrollment"`
 }
 
 // DeviceFeatures is a subset of AppConfig.Features with information used by
@@ -1688,6 +2503,34 @@ type WindowsSettings struct {
 	// NOTE: These are only present here for informational purposes.
 	// (The source of truth for profiles is in MySQL.)
 	CustomSettings optjson.Slice[MDMProfileSpec] `json:"custom_settings" renameto:"configuration_profiles"`
+
+	// EnableManagedLocalAccount turns on the hidden managed local admin account created by
+	// fleetd on Windows hosts during Autopilot/OOBE enrollment.
+	EnableManagedLocalAccount optjson.Bool `json:"enable_managed_local_account"`
+
+	// EnableDiskEncryption enforces BitLocker on Windows hosts.
+	EnableDiskEncryption optjson.Bool `json:"enable_disk_encryption"`
+
+	// RequireBitLockerPIN requires end users on Windows hosts to set a
+	// BitLocker PIN. Requires EnableDiskEncryption.
+	RequireBitLockerPIN optjson.Bool `json:"require_bitlocker_pin"`
+}
+
+// LinuxSettings contains MDM-related settings specific to Linux hosts.
+type LinuxSettings struct {
+	// EnableEscrowDiskEncryptionKey makes Fleet escrow the LUKS passphrase of
+	// Linux hosts.
+	EnableEscrowDiskEncryptionKey optjson.Bool `json:"enable_escrow_disk_encryption_key"`
+}
+
+// WindowsAutomaticEnrollment are settings for new user-driven Windows MDM enrollments.
+type WindowsAutomaticEnrollment struct {
+	// DefaultFleet is the name of the fleet that new user-driven Windows MDM enrollments are assigned to.
+	// Empty means no default: new hosts stay Unassigned.
+	//
+	// Do NOT read this field for logic: it is the transport/display shape only, and the copy stored in app_config_json can be stale
+	// after a fleet rename or deletion. The source of truth is via Datastore.GetWindowsEnrollmentDefaultFleet
+	DefaultFleet string `json:"default_fleet"`
 }
 
 func (ws WindowsSettings) GetMDMProfileSpecs() []MDMProfileSpec {
@@ -1719,6 +2562,7 @@ type CertificateTemplateSpec struct {
 	Name                     string `json:"name"`
 	CertificateAuthorityName string `json:"certificate_authority_name"`
 	SubjectName              string `json:"subject_name"`
+	SubjectAlternativeName   string `json:"subject_alternative_name,omitempty"`
 }
 
 func (c CertificateTemplateSpec) NameValid() bool {

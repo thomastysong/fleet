@@ -80,7 +80,7 @@ export const MACADMINS_EXTENSION_TABLES: Record<string, QueryablePlatform[]> = {
   munki_info: ["darwin"],
   munki_install: ["darwin"],
   crowdstrike_falcon: ["darwin", "linux"],
-  // network_quality: ["darwin"], // TODO: add this table if/when it is incorporated into orbit
+  network_quality: ["darwin"],
   puppet_info: ["darwin", "linux", "windows"],
   puppet_logs: ["darwin", "linux", "windows"],
   puppet_state: ["darwin", "linux", "windows"],
@@ -96,6 +96,7 @@ export const MACADMINS_EXTENSION_TABLES: Record<string, QueryablePlatform[]> = {
 export const HOST_LINUX_PLATFORMS = [
   "linux",
   "ubuntu", // covers Kubuntu
+  "zorin", // Zorin OS (Ubuntu-based)
   "debian",
   "rhel", // covers Fedora
   "centos",
@@ -116,6 +117,10 @@ export const HOST_LINUX_PLATFORMS = [
   "tuxedo",
   "neon",
   "archarm", // Arch Linux ARM
+  "flatcar", // Flatcar Container Linux
+  "coreos", // CoreOS Container Linux
+  "cachyos", // CachyOS (Arch-based)
+  "omarchy", // Omarchy (Arch-based)
 ] as const;
 
 export const HOST_APPLE_PLATFORMS = ["darwin", "ios", "ipados"] as const;
@@ -170,11 +175,14 @@ export const isMobilePlatform = (platform: string | HostPlatform) =>
 
 export const DISK_ENCRYPTION_SUPPORTED_LINUX_PLATFORMS = [
   "ubuntu", // covers Kubuntu
+  "zorin", // Zorin OS (Ubuntu-based)
   "rhel", // *included here to support Fedora systems. Necessary to cross-check with `os_versions` as well to confrim host is Fedora and not another, non-support rhel-like platform.
   "arch", // Arch Linux
   "archarm", // Arch Linux ARM
   "manjaro",
   "manjaro-arm",
+  "cachyos", // CachyOS (Arch-based)
+  "omarchy", // Omarchy (Arch-based)
 ] as const;
 
 export const isDiskEncryptionSupportedLinuxPlatform = (
@@ -183,7 +191,7 @@ export const isDiskEncryptionSupportedLinuxPlatform = (
 ) => {
   const isFedora =
     platform === "rhel" && os_version.toLowerCase().includes("fedora");
-  return isFedora || platform === "ubuntu";
+  return isFedora || platform === "ubuntu" || platform === "zorin";
 };
 
 const DISK_ENCRYPTION_SUPPORTED_PLATFORMS = [
@@ -247,17 +255,35 @@ export const isSetupExperiencePlatform = (
   return SETUP_EXPERIENCE_PLATFORMS.includes(s as SetupExperiencePlatform);
 };
 
+// --- Disk encryption settings platforms (Controls > OS settings) ---
+
+export const DISK_ENCRYPTION_SETTINGS_PLATFORMS = [
+  "macos",
+  "windows",
+  "linux",
+] as const;
+
+export type DiskEncryptionSettingsPlatform = typeof DISK_ENCRYPTION_SETTINGS_PLATFORMS[number];
+
+export const isDiskEncryptionSettingsPlatform = (
+  s: string | undefined
+): s is DiskEncryptionSettingsPlatform => {
+  return DISK_ENCRYPTION_SETTINGS_PLATFORMS.includes(
+    s as DiskEncryptionSettingsPlatform
+  );
+};
+
 // -- Vulnerability support by platform --
 
 export const VULN_SUPPORTED_PLATFORMS: Platform[] = [
   "darwin",
   "windows",
   "linux", // Added 4.73
+  "android",
 ];
 export const VULN_UNSUPPORTED_PLATFORMS: Platform[] = [
   "ipados",
   "ios",
-  "android",
   "chrome",
 ];
 

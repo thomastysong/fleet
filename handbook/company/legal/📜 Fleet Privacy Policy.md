@@ -1,6 +1,6 @@
 # Fleet Privacy Policy
 
-**Effective Date:** 12/01/2025
+**Effective Date:** 08/17/2026
 
 At Fleet, we take your privacy and data protection seriously. This Privacy Policy explains how Fleet Device Management Inc. (“Fleet,” “we,” “our,” or “us”) collects, uses, shares, and protects personal information across our services, websites, and products. It also explains your rights and choices regarding your information.
 
@@ -115,6 +115,10 @@ When you visit Fleet websites, we may automatically collect:
 - IP address, device and browser type, and language settings
 
 - Pages viewed, referral sources, and usage analytics
+  
+- Company or organization information inferred or identified from your IP address or browsing behavior
+
+- Conversation and interaction data submitted through chat tools on our websites
 
 - Data gathered via cookies, pixels, and similar technologies
 
@@ -129,6 +133,8 @@ Fleet uses this data to:
 
 - Deliver personalized content and marketing communications
 
+- Identify and engage with prospective customers and website visitors
+
 - Serve relevant advertisements through third-party partners
 
 
@@ -142,7 +148,25 @@ Fleet uses cookies and other tracking technologies for:
 
 - Interest-based advertising and email tracking
 
-Users can manage or disable cookies via their browser settings and may opt out of interest-based advertising through our Cookie Policy.
+- Visitor identification and engagement through conversational marketing tools
+
+Users can manage or disable cookies via their browser settings and may opt out of interest-based advertising through our Cookie Policy. Please note that Fleet's website does not currently recognize or respond to browser-initiated Do Not Track (DNT) signals.
+
+### **Third-Party Tools and Platforms**
+
+Fleet uses third-party tools on our websites to support analytics, marketing, and visitor engagement. These tools may collect, process, and enrich data about your visit, including identifying your company or inferred identity based on your IP address or browsing activity. Current tools include, but are not limited to:
+
+- Google Analytics – website traffic and usage analytics
+
+- Pendo – product analytics and in-app engagement
+
+- Qualified – Fleet's website uses Qualified, a conversational marketing and visitor engagement, including AI-assisted chat interactions
+
+Data collected through these tools may be shared with Fleet's CRM and sales platforms to support sales and marketing activities. Each of these providers operates under their own privacy policy, and we encourage you to review those policies for further information.
+
+### **Your Choices**
+
+You may opt out of marketing communications at any time by following the unsubscribe instructions in any communication from us or by contacting us directly at fleetdm.com/contact. Note that opting out of marketing communications does not disable all data collection described in this section.
 
 
 ## **4\. Cross-Border Data Transfers**
@@ -172,13 +196,34 @@ If you are located in the **European Economic Area (EEA)**, **United Kingdom**, 
    We may use your personal information, with your consent, for specific purposes such as marketing, surveys, and research. You may withdraw your consent for these specific purposes or object to processing at any time.
 
 
-## **6\. Security**
+## **6\. EU & UK Representatives**
+
+Fleet has appointed Workstreet as our representative under Article 27 of the EU General Data Protection Regulation (GDPR) and as our representative under the UK GDPR. If you are located in the **European Economic Area (EEA)** or the **United Kingdom**, you may contact the representative for your region about any matter relating to our processing of your personal information, including Article 27 requests.
+
+**EU representative**  
+Ria Pardeep, Workstreet  
+[ria@workstreet.com](mailto:ria@workstreet.com)  
+Workstreet, Bahnhofstraße 8, 30159 Hanover, Germany
+
+**UK representative**  
+Rebecca Sham, Workstreet  
+[rebecca@workstreet.com](mailto:rebecca@workstreet.com)  
+Workstreet, Regus Exeter Business Park, 1 Emperor Way, Exeter, Devon, EX1 3QS, United Kingdom
+
+**Data Protection Officer**  
+Graham Reilly, Workstreet  
+[graham.reilly@workstreet.com](mailto:graham.reilly@workstreet.com)
+
+You may also contact us directly using the details in the "Contact Us" section below.
+
+
+## **7\. Security**
 
 Fleet employs layered administrative, technical, and physical controls to protect your information against unauthorized access, loss, misuse, or alteration.  
 You can learn more about our security practices at [Security | Fleet handbook](https://fleetdm.com/handbook/finance/security) 
 
 
-## **7\. Data Retention**
+## **8\. Data Retention**
 
 Fleet retains personal information only as long as necessary to:
 
@@ -191,15 +236,17 @@ Fleet retains personal information only as long as necessary to:
 Inactive accounts and related data may be deleted after 12 months of inactivity.
 
 
-## **8\. Policy Updates**
+## **9\. Policy Updates**
 
 Fleet may update this Privacy Policy periodically. Updates will be posted on our website with a revised “Effective Date.” For significant changes, Fleet may also provide email notifications.
 
 
-## **9\. Contact Us**
+## **10\. Contact Us**
 
 **Fleet Device Management Inc.**  
 If you have questions, concerns, or data-access requests, please contact us via [fleetdm.com/contact](https://fleetdm.com/contact).
+
+If you are located in the EEA or the United Kingdom, you may also contact our representative for your region as listed in the "EU & UK Representatives" section above.
 
 
 

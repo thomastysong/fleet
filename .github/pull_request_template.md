@@ -8,7 +8,8 @@ If some of the following don't apply, delete the relevant line.
 - [ ] Changes file added for user-visible changes in `changes/`, `orbit/changes/` or `ee/fleetd-chrome/changes`.
   See [Changes files](https://github.com/fleetdm/fleet/blob/main/docs/Contributing/guides/committing-changes.md#changes-files) for more information.
 
-- [ ] Input data is properly validated, `SELECT *` is avoided, SQL injection is prevented (using placeholders for values in statements), JS inline code is prevented especially for url redirects
+- [ ] Input data is properly validated, `SELECT *` is avoided, SQL injection is prevented (using placeholders for values in statements), JS inline code is prevented especially for url redirects, and untrusted data interpolated into shell scripts/commands is validated against shell metacharacters.
+- [ ] Timeouts are implemented and retries are limited to avoid infinite loops
 - [ ] If paths of existing endpoints are modified without backwards compatibility, checked the frontend/CLI for any necessary changes
 
 ## Testing
@@ -23,11 +24,16 @@ For unreleased bug fixes in a release candidate, one of:
 - [ ] Confirmed that the fix is not expected to adversely impact load test results
 - [ ] Alerted the release DRI if additional load testing is needed
 
+## Frontend
+
+- [ ] Attached a screenshot or screen recording of each user-visible change. For changes to existing UI, show the before and after.
+
 ## Database migrations
 
 - [ ] Checked schema for all modified table for columns that will auto-update timestamps during migration.
 - [ ] Confirmed that updating the timestamps is acceptable, and will not cause unwanted side effects.
 - [ ] Ensured the correct collation is explicitly set for character columns (`COLLATE utf8mb4_unicode_ci`).
+- [ ] Ensured the migration can be retried if it was partially applied after a failure.
 
 ## New Fleet configuration settings
 

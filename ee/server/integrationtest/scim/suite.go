@@ -5,9 +5,11 @@ import (
 	"os"
 	"testing"
 
+	"github.com/fleetdm/fleet/v4/server/datastore/mysql/mysqltest"
 	"github.com/fleetdm/fleet/v4/server/fleet"
 	"github.com/fleetdm/fleet/v4/server/service"
 	"github.com/fleetdm/fleet/v4/server/service/integrationtest"
+	"github.com/fleetdm/fleet/v4/server/service/svctest"
 )
 
 type Suite struct {
@@ -23,11 +25,13 @@ func SetUpSuite(t *testing.T, uniqueTestName string) *Suite {
 		License: license,
 	})
 	slogLogger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	users, server := service.RunServerForTestsWithServiceWithDS(t, ctx, ds, fleetSvc, &service.TestServerOpts{
+	users, server := svctest.RunServerForTestsWithServiceWithDS(t, ctx, ds, fleetSvc, &service.TestServerOpts{
 		License:     license,
 		FleetConfig: &fleetCfg,
 		Logger:      slogLogger,
 		EnableSCIM:  true,
+		// Wire the real activity service so tests can assert audit-log activities.
+		DBConns: mysqltest.TestDBConnections(t, ds),
 	})
 
 	s := &Suite{

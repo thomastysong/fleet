@@ -83,9 +83,7 @@ func (ds *Datastore) ShouldSendStatistics(ctx context.Context, frequency time.Du
 			return ctxerr.Wrap(ctx, err, "amount active users")
 		}
 		amountPolicyViolationDaysActual, amountPolicyViolationDaysPossible, err := amountPolicyViolationDaysDB(ctx, ds.reader(ctx))
-		if err == sql.ErrNoRows {
-			ds.logger.DebugContext(ctx, "amount policy violation days", "err", err)
-		} else if err != nil {
+		if err != nil && err != sql.ErrNoRows {
 			return ctxerr.Wrap(ctx, err, "amount policy violation days")
 		}
 		storedErrs, err := ctxerr.Aggregate(ctx)
@@ -116,6 +114,26 @@ func (ds *Datastore) ShouldSendStatistics(ctx context.Context, frequency time.Du
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "fleet maintained apps")
 		}
+		numHostsFleetMDMEnrolledMacOS, numHostsFleetMDMEnrolledWindows, err := numHostsFleetMDMEnrolledDB(ctx, ds.reader(ctx))
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "number of hosts enrolled in Fleet MDM")
+		}
+		numMDMAppleProfiles, err := tableRowsCount(ctx, ds.reader(ctx), "mdm_apple_configuration_profiles")
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "number of Apple configuration profiles")
+		}
+		numMDMWindowsProfiles, err := tableRowsCount(ctx, ds.reader(ctx), "mdm_windows_configuration_profiles")
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "number of Windows configuration profiles")
+		}
+		numMDMAppleDeclarations, err := tableRowsCount(ctx, ds.reader(ctx), "mdm_apple_declarations")
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "number of Apple DDM declarations")
+		}
+		numMDMAndroidProfiles, err := tableRowsCount(ctx, ds.reader(ctx), "mdm_android_configuration_profiles")
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "number of Android configuration profiles")
+		}
 
 		stats.NumHostsEnrolled = amountEnrolledHosts
 		stats.NumHostsABMPending = numHostsABMPending
@@ -136,6 +154,7 @@ func (ds *Datastore) ShouldSendStatistics(ctx context.Context, frequency time.Du
 		stats.MDMMacOsEnabled = appConfig.MDM.EnabledAndConfigured
 		stats.HostExpiryEnabled = appConfig.HostExpirySettings.HostExpiryEnabled
 		stats.MDMWindowsEnabled = appConfig.MDM.WindowsEnabledAndConfigured
+		stats.MDMAndroidEnabled = appConfig.MDM.AndroidEnabledAndConfigured
 		stats.MDMRecoveryLockPasswordEnabled = appConfig.MDM.EnableRecoveryLockPassword.Value
 		stats.LiveQueryDisabled = appConfig.ServerSettings.LiveQueryDisabled
 		stats.NumWeeklyActiveUsers = amountWeeklyUsers
@@ -152,6 +171,11 @@ func (ds *Datastore) ShouldSendStatistics(ctx context.Context, frequency time.Du
 		}
 		stats.AIFeaturesDisabled = appConfig.ServerSettings.AIFeaturesDisabled
 		stats.MaintenanceWindowsConfigured = len(appConfig.Integrations.GoogleCalendar) > 0 && appConfig.Integrations.GoogleCalendar[0].Domain != "" && !appConfig.Integrations.GoogleCalendar[0].ApiKey.IsEmpty()
+		stats.IDPGoogleWorkspaceConfigured = appConfig.Integrations.IsGoogleWorkspaceConfigured()
+
+		stats.AnyVulnerabilitiesWebhookEnabled = appConfig.WebhookSettings.VulnerabilitiesWebhook.Enable
+		stats.GlobalActivityWebhookEnabled = appConfig.WebhookSettings.ActivitiesWebhook.Enable
+		stats.AnyFailingPoliciesWebhookEnabled = appConfig.WebhookSettings.FailingPoliciesWebhook.Enable
 
 		stats.MaintenanceWindowsEnabled = false
 		teams, err := ds.ListTeams(ctx, fleet.TeamFilter{User: &fleet.User{
@@ -163,18 +187,80 @@ func (ds *Datastore) ShouldSendStatistics(ctx context.Context, frequency time.Du
 		for _, team := range teams {
 			if team.Config.Integrations.GoogleCalendar != nil && team.Config.Integrations.GoogleCalendar.Enable {
 				stats.MaintenanceWindowsEnabled = true
-				break
+			}
+			if team.Config.WebhookSettings.FailingPoliciesWebhook.Enable {
+				stats.AnyFailingPoliciesWebhookEnabled = true
+			}
+			if team.Config.WebhookSettings.HostActivitiesWebhook != nil && team.Config.WebhookSettings.HostActivitiesWebhook.Enable {
+				stats.AnyHostActivitiesWebhookEnabled = true
+			}
+		}
+
+		// Check if "No team" / "Unassigned" fleet settings enable any webhooks
+		if !stats.AnyFailingPoliciesWebhookEnabled || !stats.AnyHostActivitiesWebhookEnabled {
+			defaultTeamConfig, err := ds.DefaultTeamConfig(ctx)
+			if err != nil {
+				return ctxerr.Wrap(ctx, err, "default team config")
+			}
+			if defaultTeamConfig.WebhookSettings.FailingPoliciesWebhook.Enable {
+				stats.AnyFailingPoliciesWebhookEnabled = true
+			}
+			if defaultTeamConfig.WebhookSettings.HostActivitiesWebhook != nil && defaultTeamConfig.WebhookSettings.HostActivitiesWebhook.Enable {
+				stats.AnyHostActivitiesWebhookEnabled = true
 			}
 		}
 		stats.NumHostsFleetDesktopEnabled = numHostsFleetDesktopEnabled
 		stats.NumQueries = numQueries
 		stats.FleetMaintainedAppsMacOS = fleetMaintainedAppsMacOS
 		stats.FleetMaintainedAppsWindows = fleetMaintainedAppsWindows
+		stats.NumHostsFleetMDMEnrolledMacOS = numHostsFleetMDMEnrolledMacOS
+		stats.NumHostsFleetMDMEnrolledWindows = numHostsFleetMDMEnrolledWindows
+		stats.NumMDMAppleProfiles = numMDMAppleProfiles
+		stats.NumMDMWindowsProfiles = numMDMWindowsProfiles
+		stats.NumMDMAppleDeclarations = numMDMAppleDeclarations
+		stats.NumMDMAndroidProfiles = numMDMAndroidProfiles
+
+		stats.ConditionalAccessEnabled, err = ds.conditionalAccessEnabledOnATeam(ctx, teams)
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "conditional access enabled on a team")
+		}
 
 		if appConfig.ConditionalAccess != nil {
 			stats.OktaConditionalAccessConfigured = appConfig.ConditionalAccess.OktaConfigured()
 			stats.ConditionalAccessBypassDisabled = !appConfig.ConditionalAccess.BypassEnabled()
 		}
+
+		stats.EntraConditionalAccessConfigured, err = ds.entraConditionalAccessConfigured(ctx)
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "entra conditional access configured")
+		}
+
+		stats.ResultLogDestination = config.Osquery.ResultLogPlugin
+		stats.StatusLogDestination = config.Osquery.StatusLogPlugin
+		stats.AuditLogDestination = config.Activity.AuditLogPlugin
+
+		stats.TicketDestinationConfigured = len(appConfig.Integrations.Jira) > 0 || len(appConfig.Integrations.Zendesk) > 0
+		if appConfig.SSOSettings != nil {
+			stats.SSOConfiguredFleetUsers = appConfig.SSOSettings.EnableSSO
+		}
+		stats.SSOConfiguredEndUsers = !appConfig.MDM.EndUserAuthentication.SSOProviderSettings.IsEmpty()
+		stats.AccountProvisioningConfigured = appConfig.MDM.AppleAccountProvisioning.Configured()
+
+		scimLastRequest, err := ds.ScimLastRequest(ctx)
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "scim last request")
+		}
+		stats.IDPSCIMConfigured = scimLastRequest != nil
+
+		certificateAuthorities, err := ds.ListCertificateAuthorities(ctx)
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "list certificate authorities")
+		}
+		stats.CertificateAuthorityConfigured = len(certificateAuthorities) > 0
+
+		stats.GitOpsModeEnabled = appConfig.GitOpsConfig.GitopsModeEnabled
+		stats.GitOpsModeExceptions = gitOpsExceptionsList(appConfig.GitOpsConfig.Exceptions)
+		stats.FleetDesktopSSOEnabled = appConfig.FleetDesktop.SSOEnabled
 
 		return nil
 	}
@@ -265,7 +351,7 @@ func (ds *Datastore) getTableRowCountsViaInformationSchema(ctx context.Context) 
 		return nil, err
 	}
 
-	var byName = make(map[string]uint)
+	byName := make(map[string]uint)
 	for _, row := range results {
 		byName[row.Table] = row.Rows
 	}
@@ -305,4 +391,58 @@ func fleetMaintainedAppsInUseDB(ctx context.Context, db sqlx.QueryerContext) (ma
 	}
 
 	return macOSApps, windowsApps, nil
+}
+
+func (ds *Datastore) entraConditionalAccessConfigured(ctx context.Context) (bool, error) {
+	// Conditional access is a Fleet Premium feature. Gate on the current license
+	// tier so that an integration left over from a previous Premium license
+	// (e.g. after a downgrade or expiry) isn't reported as configured.
+	if !license.IsPremium(ctx) {
+		return false, nil
+	}
+
+	// Check if the integration is fully configured.
+	integration, err := ds.ConditionalAccessMicrosoftGet(ctx)
+	if err != nil {
+		if fleet.IsNotFound(err) {
+			return false, nil
+		}
+		return false, ctxerr.Wrap(ctx, err, "failed to load the integration")
+	}
+	return integration.SetupDone, nil
+}
+
+// gitOpsExceptionsList returns the names of enabled GitOps mode exceptions, in a stable order.
+// Always returns a non-nil slice so the payload serializes as [] when empty.
+func gitOpsExceptionsList(e fleet.GitOpsExceptions) []string {
+	exceptions := make([]string, 0, 3)
+	if e.Labels {
+		exceptions = append(exceptions, "labels")
+	}
+	if e.Software {
+		exceptions = append(exceptions, "software")
+	}
+	if e.Secrets {
+		exceptions = append(exceptions, "secrets")
+	}
+	return exceptions
+}
+
+func (ds *Datastore) conditionalAccessEnabledOnATeam(ctx context.Context, teams []*fleet.Team) (bool, error) {
+	// Check configuration for "Unassigned" is stored in the main appconfig.
+	cfg, err := ds.AppConfig(ctx)
+	if err != nil {
+		return false, ctxerr.Wrap(ctx, err, "failed to load appconfig")
+	}
+	if cfg.Integrations.ConditionalAccessEnabled.Set && cfg.Integrations.ConditionalAccessEnabled.Value {
+		return true, nil
+	}
+
+	// Check for the setting in teams.
+	for _, team := range teams {
+		if team.Config.Integrations.ConditionalAccessEnabled.Set && team.Config.Integrations.ConditionalAccessEnabled.Value {
+			return true, nil
+		}
+	}
+	return false, nil
 }

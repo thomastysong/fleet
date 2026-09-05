@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/fleetdm/fleet/v4/server/fleet"
 	"github.com/osquery/osquery-go/plugin/table"
 	"github.com/rs/zerolog/log"
 )
@@ -120,7 +121,17 @@ func computeFileSHA256(filePath string) (string, error) {
 	}
 	f, err := os.Open(filePath)
 	if err != nil {
-		return "", fmt.Errorf("couldn't open filepath: %w", err)
+		// The executable named in the bundle's Info.plist may not exist on disk — e.g.
+		// Apple system bundles like XProtect.bundle declare a CFBundleExecutable but ship
+		// no binary at that path. Don't fail the whole table generation (which aborts the
+		// detail query for the host); log at debug and return an empty hash, matching the
+		// empty-path behavior above. Any other open error (permission denied, transient
+		// I/O, etc.) is unexpected, so propagate it rather than silently masking it.
+		if errors.Is(err, os.ErrNotExist) {
+			log.Debug().Err(err).Str("path", filePath).Msg("executable not found on disk, returning empty hash")
+			return "", nil
+		}
+		return "", fmt.Errorf("opening executable to compute sha256: %w", err)
 	}
 	defer f.Close()
 
@@ -145,6 +156,10 @@ func getExecutablePath(ctx context.Context, path string) string {
 	if executableName == "" {
 		return ""
 	}
+
+	// The macOS `defaults read` command encodes supplementary Unicode characters (such as emoji) as
+	// \uXXXX escape sequences using UTF-16 surrogate pairs.
+	executableName = fleet.DecodeUnicodeEscapes(executableName)
 
 	return filepath.Join(path, "/Contents/MacOS/", executableName)
 }

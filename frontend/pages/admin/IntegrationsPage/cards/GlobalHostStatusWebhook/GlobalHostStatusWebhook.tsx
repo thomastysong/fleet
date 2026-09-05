@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useMemo } from "react";
 
 import { IInputFieldParseTarget } from "interfaces/form_field";
 import {
@@ -15,7 +15,6 @@ import Button from "components/buttons/Button";
 import Checkbox from "components/forms/fields/Checkbox";
 // @ts-ignore
 import Dropdown from "components/forms/fields/Dropdown";
-// @ts-ignore
 import InputField from "components/forms/fields/InputField";
 import validUrl from "components/forms/validators/valid_url";
 import GitOpsModeTooltipWrapper from "components/GitOpsModeTooltipWrapper";
@@ -74,7 +73,7 @@ const GlobalHostStatusWebhook = ({
     setFormErrors({});
   };
 
-  const validateForm = () => {
+  const getFormErrors = (): IGlobalHostStatusWebhookFormErrors => {
     const errors: IGlobalHostStatusWebhookFormErrors = {};
 
     if (enableHostStatusWebhook) {
@@ -85,12 +84,14 @@ const GlobalHostStatusWebhook = ({
       }
     }
 
-    setFormErrors(errors);
+    return errors;
   };
 
-  useEffect(() => {
-    validateForm();
-  }, [enableHostStatusWebhook]);
+  // Runs on blur only — enabling the webhook must not surface an error before
+  // the user has had a chance to enter a URL (#40410).
+  const validateForm = () => {
+    setFormErrors(getFormErrors());
+  };
 
   const toggleHostStatusWebhookPreviewModal = () => {
     setShowHostStatusWebhookPreviewModal(!showHostStatusWebhookPreviewModal);
@@ -99,6 +100,12 @@ const GlobalHostStatusWebhook = ({
 
   const onFormSubmit = (evt: React.MouseEvent<HTMLFormElement>) => {
     evt.preventDefault();
+
+    const errors = getFormErrors();
+    setFormErrors(errors);
+    if (Object.keys(errors).length > 0) {
+      return;
+    }
 
     // Formatting of API not UI
     const formDataToSubmit = {
@@ -142,7 +149,7 @@ const GlobalHostStatusWebhook = ({
   );
   return (
     <div className={baseClass}>
-      <SettingsSection title="Host status webhook">
+      <SettingsSection title="Host status alerts">
         <PageDescription
           variant="right-panel"
           content={<>Send an alert if a portion of your hosts go offline.</>}
@@ -168,7 +175,7 @@ const GlobalHostStatusWebhook = ({
             </p>
             <Button
               type="button"
-              variant="inverse"
+              variant="secondary"
               onClick={toggleHostStatusWebhookPreviewModal}
             >
               Preview request
@@ -184,12 +191,7 @@ const GlobalHostStatusWebhook = ({
                   parseTarget
                   onBlur={validateForm}
                   error={formErrors.destination_url}
-                  tooltip={
-                    <>
-                      Provide a URL to deliver <br />
-                      the webhook request to.
-                    </>
-                  }
+                  tooltip="Provide a URL to deliver the webhook request to."
                 />
                 <Dropdown
                   label="Percentage of hosts"
@@ -202,11 +204,8 @@ const GlobalHostStatusWebhook = ({
                   onBlur={validateForm}
                   tooltip={
                     <>
-                      Select the minimum percentage of hosts that
-                      <br />
-                      must fail to check into Fleet in order to trigger
-                      <br />
-                      the webhook request.
+                      Select the minimum percentage of hosts that must fail to
+                      check into Fleet in order to trigger the webhook request.
                     </>
                   }
                 />
@@ -221,13 +220,9 @@ const GlobalHostStatusWebhook = ({
                   onBlur={validateForm}
                   tooltip={
                     <>
-                      Select the minimum number of days that the
-                      <br />
-                      configured <b>Percentage of hosts</b> must fail to
-                      <br />
-                      check into Fleet in order to trigger the
-                      <br />
-                      webhook request.
+                      Select the minimum number of days that the configured{" "}
+                      <strong>Percentage of hosts</strong> must fail to check
+                      into Fleet in order to trigger the webhook request.
                     </>
                   }
                 />
@@ -235,7 +230,6 @@ const GlobalHostStatusWebhook = ({
             )}
           </div>
           <GitOpsModeTooltipWrapper
-            tipOffset={-8}
             renderChildren={(disableChildren) => (
               <Button
                 type="submit"

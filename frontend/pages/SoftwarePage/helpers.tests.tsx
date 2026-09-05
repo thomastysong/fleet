@@ -38,13 +38,13 @@ describe("getSelfServiceTooltip", () => {
     render(tooltip as React.ReactElement);
 
     expect(
-      screen.getByText(/End users can install from self-service\./i)
+      screen.getByText(/End users can install from self service\./i)
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("link", { name: /Learn how to deploy self-service/i })
+      screen.getByRole("link", { name: /Learn how to deploy self service/i })
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("link", { name: /Learn how to deploy self-service/i })
+      screen.getByRole("link", { name: /Learn how to deploy self service/i })
     ).toHaveAttribute(
       "href",
       expect.stringContaining("/deploy-self-service-to-ios")
@@ -73,6 +73,7 @@ const makePolicies = (count: number): ISoftwareInstallPolicy[] =>
   Array.from({ length: count }, (_, i) => ({
     id: i + 1,
     name: `Policy ${i + 1}`,
+    type: i % 2 === 0 ? "patch" : "dynamic" /* alternate types for variety */,
   }));
 
 describe("getAutomaticInstallPoliciesCount", () => {
@@ -170,6 +171,14 @@ describe("getDisplayedSoftwareName", () => {
 
   it("returns the raw name when display_name is empty", () => {
     expect(getDisplayedSoftwareName("Some App", "")).toBe("Some App");
+  });
+
+  it("treats a whitespace-only display_name as absent and falls back to name", () => {
+    expect(getDisplayedSoftwareName("Some App", " ")).toBe("Some App");
+  });
+
+  it("returns the default when display_name and name are both whitespace-only", () => {
+    expect(getDisplayedSoftwareName(" ", " ")).toBe("Software");
   });
 
   it("returns a default when neither name nor display_name is provided", () => {

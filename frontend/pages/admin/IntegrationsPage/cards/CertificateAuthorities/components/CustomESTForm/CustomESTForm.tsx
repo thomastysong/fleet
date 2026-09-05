@@ -1,8 +1,8 @@
 import React, { useMemo } from "react";
 
 import { ICertificateAuthorityPartial } from "interfaces/certificates";
+import { MAX_ENTITY_CHAR_LENGTH } from "utilities/constants";
 
-// @ts-ignore
 import InputField from "components/forms/fields/InputField";
 import Button from "components/buttons/Button";
 import TooltipWrapper from "components/TooltipWrapper";
@@ -64,6 +64,7 @@ const CustomESTForm = ({
         parseTarget
         placeholder="WIFI_CERTIFICATE"
         helpText="Letters, numbers, and underscores only."
+        inputOptions={{ maxLength: MAX_ENTITY_CHAR_LENGTH }}
       />
       <InputField
         label="URL"
@@ -109,7 +110,7 @@ const CustomESTForm = ({
             {submitBtnText}
           </Button>
         </TooltipWrapper>
-        <Button variant="inverse" onClick={onCancel}>
+        <Button variant="secondary" onClick={onCancel}>
           Cancel
         </Button>
       </div>

@@ -14,6 +14,7 @@ import (
 
 	"github.com/fleetdm/fleet/v4/ee/server/service/digicert"
 	"github.com/fleetdm/fleet/v4/ee/server/service/est"
+	"github.com/fleetdm/fleet/v4/ee/server/service/scep"
 	"github.com/fleetdm/fleet/v4/server/authz"
 	"github.com/fleetdm/fleet/v4/server/contexts/viewer"
 	"github.com/fleetdm/fleet/v4/server/fleet"
@@ -239,6 +240,22 @@ func TestCreatingCertificateAuthorities(t *testing.T) {
 		require.Nil(t, createdCA)
 	})
 
+	t.Run("Batch apply errors when no private key is configured", func(t *testing.T) {
+		ds := new(mock.Store)
+		authorizer, err := authz.NewAuthorizer()
+		require.NoError(t, err)
+		svc := &Service{
+			logger: slog.New(slog.NewTextHandler(os.Stdout, nil)),
+			ds:     ds,
+			authz:  authorizer,
+		}
+		svc.config.Server.PrivateKey = ""
+		ctx := viewer.NewContext(context.Background(), viewer.Viewer{User: &fleet.User{GlobalRole: new(fleet.RoleAdmin)}})
+
+		err = svc.BatchApplyCertificateAuthorities(ctx, fleet.GroupedCertificateAuthorities{}, fleet.BatchApplyCertificateAuthoritiesOpts{ViaGitOps: true})
+		require.EqualError(t, err, "Server private key must be configured. Learn more: https://fleetdm.com/learn-more-about/fleet-server-private-key")
+	})
+
 	t.Run("Create DigiCert CA - Happy path", func(t *testing.T) {
 		svc, ctx := baseSetupForCATests()
 
@@ -393,6 +410,26 @@ func TestCreatingCertificateAuthorities(t *testing.T) {
 		require.NotNil(t, createdCA.Challenge)
 		assert.Equal(t, createCustomSCEPRequest.CustomSCEPProxy.Challenge, *createdCA.Challenge)
 		verifyNilFieldsForType(t, createdCA)
+	})
+
+	t.Run("Create Custom SCEP CA - challenge with non-PrintableString characters is accepted", func(t *testing.T) {
+		// Regression test for the reverted PrintableString challenge validation (#49756): characters outside the
+		// ASN.1 PrintableString set (such as "_" and "@") must be accepted.
+		svc, ctx := baseSetupForCATests()
+
+		createRequest := fleet.CertificateAuthorityPayload{
+			CustomSCEPProxy: &fleet.CustomSCEPProxyCA{
+				Name:      "CustomSCEPWIFI",
+				URL:       "https://customscep.example.com",
+				Challenge: "base64url_style@challenge",
+			},
+		}
+
+		_, err := svc.NewCertificateAuthority(ctx, createRequest)
+		require.EqualError(t, err, "mock error to avoid NewActivity panic")
+		require.Len(t, createdCAs, 1)
+		require.NotNil(t, createdCAs[0].Challenge)
+		assert.Equal(t, createRequest.CustomSCEPProxy.Challenge, *createdCAs[0].Challenge)
 	})
 
 	t.Run("Create NDES SCEP CA - Happy path", func(t *testing.T) {
@@ -877,7 +914,7 @@ func TestCreatingCertificateAuthorities(t *testing.T) {
 		svc.scepConfigService = &scep_mock.SCEPConfigService{
 			ValidateSCEPURLFunc: func(_ context.Context, _ string) error { return nil },
 			ValidateNDESSCEPAdminURLFunc: func(_ context.Context, _ fleet.NDESSCEPProxyCA) error {
-				return NewNDESInvalidError("some error")
+				return scep.NewNDESInvalidError("some error")
 			},
 		}
 
@@ -902,7 +939,7 @@ func TestCreatingCertificateAuthorities(t *testing.T) {
 		svc.scepConfigService = &scep_mock.SCEPConfigService{
 			ValidateSCEPURLFunc: func(_ context.Context, _ string) error { return nil },
 			ValidateNDESSCEPAdminURLFunc: func(_ context.Context, _ fleet.NDESSCEPProxyCA) error {
-				return NewNDESPasswordCacheFullError("mock error")
+				return scep.NewNDESPasswordCacheFullError("mock error")
 			},
 		}
 
@@ -927,7 +964,7 @@ func TestCreatingCertificateAuthorities(t *testing.T) {
 		svc.scepConfigService = &scep_mock.SCEPConfigService{
 			ValidateSCEPURLFunc: func(_ context.Context, _ string) error { return nil },
 			ValidateNDESSCEPAdminURLFunc: func(_ context.Context, _ fleet.NDESSCEPProxyCA) error {
-				return NewNDESInsufficientPermissionsError("mock error")
+				return scep.NewNDESInsufficientPermissionsError("mock error")
 			},
 		}
 
@@ -1564,6 +1601,20 @@ func TestUpdatingCertificateAuthorities(t *testing.T) {
 			require.EqualError(t, err, "mock error to avoid NewActivity panic")
 		})
 
+		t.Run("Challenge with non-PrintableString characters is accepted", func(t *testing.T) {
+			// Regression test for the reverted PrintableString challenge validation (#49756).
+			svc, ctx := baseSetupForCATests()
+
+			payload := fleet.CertificateAuthorityUpdatePayload{
+				CustomSCEPProxyCAUpdatePayload: &fleet.CustomSCEPProxyCAUpdatePayload{
+					Challenge: new("updated_challenge@with_special_chars"),
+				},
+			}
+
+			err := svc.UpdateCertificateAuthority(ctx, scepID, payload)
+			require.EqualError(t, err, "mock error to avoid NewActivity panic")
+		})
+
 		t.Run("Bad name", func(t *testing.T) {
 			svc, ctx := baseSetupForCATests()
 
@@ -1685,24 +1736,111 @@ func TestUpdatingCertificateAuthorities(t *testing.T) {
 			require.EqualError(t, err, "Couldn't edit certificate authority. \"password\" must be set when modifying an existing certificate authority: NDES")
 		})
 
-		t.Run("Bad admin URL generic error", func(t *testing.T) {
+		t.Run("Empty admin URL", func(t *testing.T) {
+			svc, ctx := baseSetupForCATests()
+
+			payload := fleet.CertificateAuthorityUpdatePayload{
+				NDESSCEPProxyCAUpdatePayload: &fleet.NDESSCEPProxyCAUpdatePayload{
+					AdminURL: new(""),
+					Password: new("updated-password"),
+				},
+			}
+
+			err := svc.UpdateCertificateAuthority(ctx, ndesID, payload)
+			require.EqualError(t, err, "Couldn't edit certificate authority. Invalid NDES SCEP admin URL. Please correct and try again.")
+		})
+
+		t.Run("Empty username", func(t *testing.T) {
+			svc, ctx := baseSetupForCATests()
+
+			payload := fleet.CertificateAuthorityUpdatePayload{
+				NDESSCEPProxyCAUpdatePayload: &fleet.NDESSCEPProxyCAUpdatePayload{
+					Username: new(""),
+					Password: new("updated-password"),
+				},
+			}
+
+			err := svc.UpdateCertificateAuthority(ctx, ndesID, payload)
+			require.EqualError(t, err, "Couldn't edit certificate authority. Invalid NDES SCEP username. Please correct and try again.")
+		})
+
+		t.Run("Empty password", func(t *testing.T) {
+			svc, ctx := baseSetupForCATests()
+
+			payload := fleet.CertificateAuthorityUpdatePayload{
+				NDESSCEPProxyCAUpdatePayload: &fleet.NDESSCEPProxyCAUpdatePayload{
+					Password: new(""),
+				},
+			}
+
+			err := svc.UpdateCertificateAuthority(ctx, ndesID, payload)
+			require.EqualError(t, err, "Couldn't edit certificate authority. Invalid NDES SCEP password. Please correct and try again.")
+		})
+
+		t.Run("Masked password is rejected", func(t *testing.T) {
+			svc, ctx := baseSetupForCATests()
+
+			// changing NDES credentials requires re-supplying the actual password, so the
+			// mask the GET endpoint returns in place of the real one is not accepted
+			scepConfig := &scep_mock.SCEPConfigService{
+				ValidateNDESSCEPAdminURLFunc: func(_ context.Context, _ fleet.NDESSCEPProxyCA) error {
+					return errors.New("should not be called")
+				},
+			}
+			svc.scepConfigService = scepConfig
+
+			payload := fleet.CertificateAuthorityUpdatePayload{
+				NDESSCEPProxyCAUpdatePayload: &fleet.NDESSCEPProxyCAUpdatePayload{
+					Username: new("updated-username"),
+					Password: new(fleet.MaskedPassword),
+				},
+			}
+
+			err := svc.UpdateCertificateAuthority(ctx, ndesID, payload)
+			require.EqualError(t, err, "Couldn't edit certificate authority. Invalid NDES SCEP password. Please correct and try again.")
+			require.False(t, scepConfig.ValidateNDESSCEPAdminURLFuncInvoked)
+		})
+
+		t.Run("Unchanged credentials skip validation against the NDES server", func(t *testing.T) {
+			svc, ctx := baseSetupForCATests()
+
+			scepConfig := &scep_mock.SCEPConfigService{
+				ValidateNDESSCEPAdminURLFunc: func(_ context.Context, _ fleet.NDESSCEPProxyCA) error {
+					return errors.New("should not be called")
+				},
+			}
+			svc.scepConfigService = scepConfig
+
+			payload := fleet.CertificateAuthorityUpdatePayload{
+				NDESSCEPProxyCAUpdatePayload: &fleet.NDESSCEPProxyCAUpdatePayload{
+					Username: new("ndes-username"),
+					Password: new("ndes-password"),
+				},
+			}
+
+			err := svc.UpdateCertificateAuthority(ctx, ndesID, payload)
+			require.EqualError(t, err, "mock error to avoid NewActivity panic")
+			require.False(t, scepConfig.ValidateNDESSCEPAdminURLFuncInvoked)
+		})
+
+		t.Run("Unreachable admin URL", func(t *testing.T) {
 			svc, ctx := baseSetupForCATests()
 
 			svc.scepConfigService = &scep_mock.SCEPConfigService{
 				ValidateNDESSCEPAdminURLFunc: func(_ context.Context, _ fleet.NDESSCEPProxyCA) error {
-					return errors.New("some error")
+					return errors.New("sending request: dial tcp: connection refused")
 				},
 			}
 
 			payload := fleet.CertificateAuthorityUpdatePayload{
 				NDESSCEPProxyCAUpdatePayload: &fleet.NDESSCEPProxyCAUpdatePayload{
-					AdminURL: ptr.String("https://ndes.example.com"),
-					Password: ptr.String("updated-password"),
+					AdminURL: new("https://ndes.example.com"),
+					Password: new("updated-password"),
 				},
 			}
 
 			err := svc.UpdateCertificateAuthority(ctx, ndesID, payload)
-			require.EqualError(t, err, "Couldn't edit certificate authority. Invalid NDES SCEP admin URL or credentials. Please correct and try again.")
+			require.EqualError(t, err, "Couldn't edit certificate authority. Couldn't connect to NDES SCEP admin URL. Please correct and try again.")
 		})
 
 		t.Run("Bad admin URL NDES Invalid error", func(t *testing.T) {
@@ -1710,7 +1848,7 @@ func TestUpdatingCertificateAuthorities(t *testing.T) {
 
 			svc.scepConfigService = &scep_mock.SCEPConfigService{
 				ValidateNDESSCEPAdminURLFunc: func(_ context.Context, _ fleet.NDESSCEPProxyCA) error {
-					return NewNDESInvalidError("some error")
+					return scep.NewNDESInvalidError("some error")
 				},
 			}
 
@@ -1730,7 +1868,7 @@ func TestUpdatingCertificateAuthorities(t *testing.T) {
 
 			svc.scepConfigService = &scep_mock.SCEPConfigService{
 				ValidateNDESSCEPAdminURLFunc: func(_ context.Context, _ fleet.NDESSCEPProxyCA) error {
-					return NewNDESPasswordCacheFullError("some error")
+					return scep.NewNDESPasswordCacheFullError("some error")
 				},
 			}
 
@@ -1750,7 +1888,7 @@ func TestUpdatingCertificateAuthorities(t *testing.T) {
 
 			svc.scepConfigService = &scep_mock.SCEPConfigService{
 				ValidateNDESSCEPAdminURLFunc: func(_ context.Context, _ fleet.NDESSCEPProxyCA) error {
-					return NewNDESInsufficientPermissionsError("some error")
+					return scep.NewNDESInsufficientPermissionsError("some error")
 				},
 			}
 
@@ -1965,4 +2103,19 @@ func TestDeleteCertificateAuthority(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "certificate authority was not found")
 	})
+}
+
+// TestProcessCustomSCEPProxyCAsChallengeChars is a regression test for the reverted PrintableString challenge validation
+// (#49756): the GitOps/batch path must accept challenges containing characters outside the ASN.1 PrintableString set.
+func TestProcessCustomSCEPProxyCAsChallengeChars(t *testing.T) {
+	svc := &Service{
+		logger: slog.New(slog.NewTextHandler(os.Stdout, nil)),
+		scepConfigService: &scep_mock.SCEPConfigService{
+			ValidateSCEPURLFunc: func(_ context.Context, _ string) error { return nil },
+		},
+	}
+
+	incoming := []fleet.CustomSCEPProxyCA{{Name: "SCEP1", URL: "https://customscep.example.com", Challenge: "base64url_style@challenge"}}
+	err := svc.processCustomSCEPProxyCAs(t.Context(), &fleet.CertificateAuthoritiesBatchOperations{}, incoming, nil)
+	require.NoError(t, err)
 }

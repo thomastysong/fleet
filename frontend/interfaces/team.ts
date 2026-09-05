@@ -7,6 +7,7 @@ import {
 import enrollSecretInterface, { IEnrollSecret } from "./enroll_secret";
 import { ITeamIntegrations } from "./integration";
 import { UserRole } from "./user";
+import { EndUserLocalAccountType, ITokenFleet, ITokenTeam } from "./mdm";
 
 export default PropTypes.shape({
   id: PropTypes.number.isRequired,
@@ -40,32 +41,50 @@ export interface ITeam extends ITeamSummary {
   count?: number;
   created_at?: string;
   features?: IConfigFeatures;
-  agent_options?: {
-    [key: string]: any;
-  };
+  agent_options?: Record<string, unknown>;
   user_count?: number;
   host_count?: number;
   secrets?: IEnrollSecret[];
   role?: UserRole; // role value is included when the team is in the context of a user
   mdm?: {
+    /** @deprecated Virtual key: true only when all per-platform disk
+    encryption settings (`apple_settings`, `windows_settings`,
+    `linux_settings`) are enabled. Read the per-platform fields instead. */
     enable_disk_encryption: boolean;
     enable_recovery_lock_password: boolean;
+    name_template?: string;
+    /** @deprecated Use `windows_settings.require_bitlocker_pin`. */
     windows_require_bitlocker_pin: boolean;
     macos_updates: IAppleDeviceUpdates;
     ios_updates: IAppleDeviceUpdates;
     ipados_updates: IAppleDeviceUpdates;
-    macos_settings: {
-      custom_settings: null; // TODO: types?
+    apple_settings: {
+      configuration_profiles: null; // TODO: types?
       enable_disk_encryption: boolean;
+      enable_escrow_disk_encryption_key?: boolean;
     };
-    macos_setup: {
-      bootstrap_package: string | null;
+    setup_experience: {
+      macos_bootstrap_package: string | null;
       enable_end_user_authentication: boolean;
-      macos_setup_assistant: string | null;
-      enable_release_device_manually: boolean | null;
-      manual_agent_install: boolean | null;
+      apple_setup_assistant: string | null;
+      apple_enable_release_device_manually: boolean | null;
+      macos_manual_agent_install: boolean | null;
       require_all_software_macos: boolean | null;
+      require_all_software_windows: boolean | null;
       lock_end_user_info: boolean | null;
+      enable_create_local_admin_account?: boolean;
+      end_user_local_account_type?: EndUserLocalAccountType;
+    };
+    macos_setup?: {
+      enable_managed_local_account?: boolean;
+    };
+    windows_settings?: {
+      enable_disk_encryption?: boolean;
+      require_bitlocker_pin?: boolean;
+      enable_managed_local_account?: boolean;
+    };
+    linux_settings?: {
+      enable_escrow_disk_encryption_key?: boolean;
     };
     windows_updates: {
       deadline_days: number | null;
@@ -83,7 +102,10 @@ export interface ITeam extends ITeamSummary {
  */
 export type ITeamWebhookSettings = Pick<
   IWebhookSettings,
-  "vulnerabilities_webhook" | "failing_policies_webhook" | "host_status_webhook"
+  | "vulnerabilities_webhook"
+  | "failing_policies_webhook"
+  | "host_status_webhook"
+  | "host_activities_webhook"
 >;
 
 /**
@@ -110,10 +132,10 @@ export interface INewTeamUser {
 /**
  * The shape of the body expected from the API when adding new users to teams
  */
-export interface INewTeamUsersBody {
+export interface INewTeamUsersFormData {
   users: INewTeamUser[];
 }
-export interface IRemoveTeamUserBody {
+export interface IRemoveTeamUserFormData {
   users: { id?: number }[];
 }
 interface INewTeamSecret {
@@ -121,10 +143,10 @@ interface INewTeamSecret {
   secret: string;
   created_at?: string;
 }
-export interface INewTeamSecretBody {
+export interface INewTeamSecretFormData {
   secrets: INewTeamSecret[];
 }
-export interface IRemoveTeamSecretBody {
+export interface IRemoveTeamSecretFormData {
   secrets: { secret: string }[];
 }
 
@@ -144,3 +166,13 @@ export const APP_CONTEXT_NO_TEAM_SUMMARY: ITeamSummary = {
 
 export const isAnyTeamSelected = (currentTeamId?: number) =>
   currentTeamId !== undefined && currentTeamId > APP_CONTEXT_NO_TEAM_ID;
+
+export const getTeamDisplayName = (team: ITokenTeam) =>
+  team.team_id === APP_CONTEXT_NO_TEAM_ID
+    ? APP_CONTEXT_NO_TEAM_SUMMARY.name
+    : team.name;
+
+export const getFleetDisplayName = (fleet: ITokenFleet) =>
+  fleet.fleet_id === APP_CONTEXT_NO_TEAM_ID
+    ? APP_CONTEXT_NO_TEAM_SUMMARY.name
+    : fleet.name;

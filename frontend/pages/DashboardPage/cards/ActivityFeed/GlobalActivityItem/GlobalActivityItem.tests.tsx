@@ -219,6 +219,46 @@ describe("Activity Feed", () => {
     expect(screen.getByText("was added to Fleet by SSO.")).toBeInTheDocument();
   });
 
+  it("renders an edited_macos_min_version activity for a specific version", () => {
+    const activity = createMockActivity({
+      type: ActivityType.EditedMacosMinVersion,
+      details: {
+        team_id: 1,
+        team_name: "Workstations",
+        minimum_version: "14.6.1",
+        deadline: "2026-09-01",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText(/updated the minimum macOS version/)
+    ).toBeInTheDocument();
+    expect(screen.getByText("14.6.1")).toBeInTheDocument();
+    expect(screen.getByText(/deadline: 2026-09-01/)).toBeInTheDocument();
+  });
+
+  it("renders an edited_macos_min_version activity for the latest target", () => {
+    // "latest" is a mode rather than a version, so the sentence must not call it
+    // a minimum, and there's no deadline to report.
+    const activity = createMockActivity({
+      type: ActivityType.EditedMacosMinVersion,
+      details: {
+        team_id: 1,
+        team_name: "Workstations",
+        minimum_version: "latest",
+        deadline: "",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(screen.getByText(/updated macOS version to/)).toBeInTheDocument();
+    expect(screen.getByText("latest")).toBeInTheDocument();
+    expect(screen.getByText("Workstations")).toBeInTheDocument();
+    expect(screen.queryByText(/minimum/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/deadline/)).not.toBeInTheDocument();
+  });
+
   it("renders an edited_agent_options type activity for a team", () => {
     const activity = createMockActivity({
       type: ActivityType.EditedAgentOptions,
@@ -291,6 +331,41 @@ describe("Activity Feed", () => {
 
     expect(
       screen.getByText("Somebody failed", { exact: false })
+    ).toBeInTheDocument();
+  });
+
+  it("renders a user_mfa_requested type activity globally", () => {
+    const activity = createMockActivity({
+      type: ActivityType.UserMFARequested,
+      details: { email: "foo@example.com", public_ip: "192.168.0.1" },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText(
+        "submitted valid credentials for an MFA-enabled account and was sent a verification email from public IP 192.168.0.1.",
+        { exact: false }
+      )
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("foo@example.com", {
+        exact: false,
+      })
+    ).toBeInTheDocument();
+  });
+
+  it("renders a user_mfa_requested without an email", () => {
+    const activity = createMockActivity({
+      type: ActivityType.UserMFARequested,
+      details: { email: "", public_ip: "192.168.0.1" },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText("Somebody submitted valid credentials", { exact: false })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("from public IP 192.168.0.1.", { exact: false })
     ).toBeInTheDocument();
   });
 
@@ -564,22 +639,51 @@ describe("Activity Feed", () => {
     expect(forAllTeams).toBeNull();
   });
 
-  it("renders an 'enabled_disk_encryption' type activity for a team", () => {
+  it("renders an 'edited_disk_encryption_settings' type activity for a fleet", () => {
     const activity = createMockActivity({
-      type: ActivityType.EnabledDiskEncryption,
-      details: { team_name: "Alphas" },
+      type: ActivityType.EditedDiskEncryptionSettings,
+      details: { fleet_name: "Alphas", platform: "windows" },
     });
     render(<GlobalActivityItem activity={activity} isPremiumTier />);
 
     expect(
-      screen.getByText("enforced disk encryption for hosts assigned to the", {
-        exact: false,
-      })
+      screen.getByText(
+        "edited disk encryption settings for Windows hosts assigned to the",
+        { exact: false }
+      )
     ).toBeInTheDocument();
     expect(screen.getByText("Alphas")).toBeInTheDocument();
     expect(screen.getByText(" fleet.", { exact: false })).toBeInTheDocument();
-    const withNoTeams = screen.queryByText("with no team");
-    expect(withNoTeams).toBeNull();
+  });
+
+  it("renders an 'edited_disk_encryption_settings' type activity with a missing platform", () => {
+    const activity = createMockActivity({
+      type: ActivityType.EditedDiskEncryptionSettings,
+      details: { fleet_name: "Alphas" },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText(
+        "edited disk encryption settings for unknown hosts assigned to the",
+        { exact: false }
+      )
+    ).toBeInTheDocument();
+  });
+
+  it("renders an 'edited_disk_encryption_settings' type activity for hosts that are unassigned.", () => {
+    const activity = createMockActivity({
+      type: ActivityType.EditedDiskEncryptionSettings,
+      details: { platform: "linux" },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText(
+        "edited disk encryption settings for Linux hosts that are unassigned."
+      )
+    ).toBeInTheDocument();
+    expect(screen.queryByText("assigned to the")).toBeNull();
   });
 
   it("renders an 'enabled_macos_disk_encryption' type activity for a team", () => {
@@ -601,7 +705,7 @@ describe("Activity Feed", () => {
     expect(withNoTeams).toBeNull();
   });
 
-  it("renders a 'disabled_disk_encryption' type activity for a team", () => {
+  it("renders a 'disabled_macos_disk_encryption' type activity for a team", () => {
     const activity = createMockActivity({
       type: ActivityType.DisabledMacDiskEncryption,
       details: { team_name: "Alphas" },
@@ -622,43 +726,6 @@ describe("Activity Feed", () => {
     expect(withNoTeams).toBeNull();
   });
 
-  it("renders a 'disabled_macos_disk_encryption' type activity for a team", () => {
-    // Test deprecated activity type
-    const activity = createMockActivity({
-      type: ActivityType.DisabledDiskEncryption,
-      details: { team_name: "Alphas" },
-    });
-    render(<GlobalActivityItem activity={activity} isPremiumTier />);
-
-    expect(
-      screen.getByText(
-        "removed disk encryption enforcement for hosts assigned to the",
-        {
-          exact: false,
-        }
-      )
-    ).toBeInTheDocument();
-    expect(screen.getByText("Alphas")).toBeInTheDocument();
-    expect(screen.getByText(" fleet.", { exact: false })).toBeInTheDocument();
-    const withNoTeams = screen.queryByText("with no team");
-    expect(withNoTeams).toBeNull();
-  });
-
-  it("renders an 'enabled_disk_encryption' type activity for hosts that are unassigned.", () => {
-    const activity = createMockActivity({
-      type: ActivityType.EnabledDiskEncryption,
-      details: {},
-    });
-    render(<GlobalActivityItem activity={activity} isPremiumTier />);
-
-    expect(
-      screen.getByText(
-        "enforced disk encryption for hosts that are unassigned."
-      )
-    ).toBeInTheDocument();
-    expect(screen.queryByText("assigned to the")).toBeNull();
-  });
-
   it("renders an 'enabled_macos_disk_encryption' type activity for hosts that are unassigned.", () => {
     // Test deprecated activity type
     const activity = createMockActivity({
@@ -670,24 +737,6 @@ describe("Activity Feed", () => {
     expect(
       screen.getByText(
         "enforced disk encryption for hosts that are unassigned."
-      )
-    ).toBeInTheDocument();
-    expect(screen.queryByText("assigned to the")).toBeNull();
-  });
-
-  it("renders a 'disabled_disk_encryption' type activity for hosts that are unassigned.", () => {
-    const activity = createMockActivity({
-      type: ActivityType.DisabledDiskEncryption,
-      details: {},
-    });
-    render(<GlobalActivityItem activity={activity} isPremiumTier />);
-
-    expect(
-      screen.getByText(
-        "removed disk encryption enforcement for hosts that are unassigned.",
-        {
-          exact: false,
-        }
       )
     ).toBeInTheDocument();
     expect(screen.queryByText("assigned to the")).toBeNull();
@@ -750,11 +799,87 @@ describe("Activity Feed", () => {
     render(<GlobalActivityItem activity={activity} isPremiumTier />);
 
     expect(
-      screen.getByText("rotated the Recovery Lock password for", {
+      screen.getByText("triggered rotation of the Recovery Lock password for", {
         exact: false,
       })
     ).toBeInTheDocument();
     expect(screen.getByText("Alex's Macbook Air")).toBeInTheDocument();
+  });
+
+  it("renders an 'enabled_managed_local_account' activity with the platform, defaulting to macOS", () => {
+    const windowsActivity = createMockActivity({
+      type: ActivityType.EnabledManagedLocalAccount,
+      details: { team_name: "Workstations", platform: "windows" },
+    });
+    const { unmount } = render(
+      <GlobalActivityItem activity={windowsActivity} isPremiumTier />
+    );
+    expect(
+      screen.getByText("Windows hosts assigned to the", { exact: false })
+    ).toBeInTheDocument();
+    unmount();
+
+    // activities created before the platform detail existed omit it, which means macOS
+    const legacyActivity = createMockActivity({
+      type: ActivityType.DisabledManagedLocalAccount,
+      details: {},
+    });
+    render(<GlobalActivityItem activity={legacyActivity} isPremiumTier />);
+    expect(
+      screen.getByText("unassigned macOS hosts.", { exact: false })
+    ).toBeInTheDocument();
+  });
+
+  it("renders a 'rotated_managed_local_account_password' type activity", () => {
+    const activity = createMockActivity({
+      type: ActivityType.RotatedManagedLocalAccountPassword,
+      details: { host_display_name: "Marsh's Macbook Air" },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText(
+        "triggered rotation of the managed local account password for",
+        { exact: false }
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByText("Marsh's Macbook Air")).toBeInTheDocument();
+  });
+
+  it("renders a Fleet-initiated 'rotated_managed_local_account_password' type activity", () => {
+    const activity = createMockActivity({
+      type: ActivityType.RotatedManagedLocalAccountPassword,
+      fleet_initiated: true,
+      details: { host_display_name: "Marsh's Macbook Air" },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(screen.getByText("Fleet")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "triggered rotation of the managed local account password for",
+        { exact: false }
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByText("Marsh's Macbook Air")).toBeInTheDocument();
+  });
+
+  it("renders a 'failed_to_rotate_managed_local_account_password' type activity", () => {
+    const activity = createMockActivity({
+      type: ActivityType.FailedToRotateManagedLocalAccountPassword,
+      fleet_initiated: true,
+      details: { host_display_name: "Marsh's Macbook Air" },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(screen.getByText("Fleet")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "failed to rotate the managed local account password for",
+        { exact: false }
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByText("Marsh's Macbook Air")).toBeInTheDocument();
   });
 
   it("renders an 'enabled_recovery_lock_passwords' type activity for a team", () => {
@@ -891,6 +1016,106 @@ describe("Activity Feed", () => {
         return (
           node?.innerHTML ===
           "<b>Test User </b> changed the macOS Setup Assistant (deleted <b>dep-profile.json</b>) for hosts  that automatically enroll to the <b>Workstations</b> fleet."
+        );
+      })
+    ).toBeInTheDocument();
+  });
+
+  it("renders an 'edited_macos_profile' single-profile edit for a team", () => {
+    const activity = createMockActivity({
+      type: ActivityType.EditedAppleOSProfile,
+      details: {
+        profile_name: "Test Profile",
+        profile_identifier: "com.example.test",
+        team_name: "Workstations",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText((content, node) => {
+        return (
+          node?.innerHTML ===
+          "<b>Test User </b> edited the configuration profile <b>Test Profile</b> for macOS, iOS, and iPadOS hosts assigned to the <b>Workstations</b> fleet."
+        );
+      })
+    ).toBeInTheDocument();
+  });
+
+  it("renders an 'edited_macos_profile' batch edit when no profile_name is set", () => {
+    const activity = createMockActivity({
+      type: ActivityType.EditedAppleOSProfile,
+      details: {
+        team_name: "Workstations",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText((content, node) => {
+        return (
+          node?.innerHTML ===
+          "<b>Test User </b> edited configuration profiles for macOS, iOS, and iPadOS hosts assigned to the <b>Workstations</b> fleet via fleetctl."
+        );
+      })
+    ).toBeInTheDocument();
+  });
+
+  it("renders an 'edited_windows_profile' single-profile edit on free tier", () => {
+    const activity = createMockActivity({
+      type: ActivityType.EditedWindowsProfile,
+      details: {
+        profile_name: "Test Profile",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier={false} />);
+
+    expect(
+      screen.getByText((content, node) => {
+        return (
+          node?.innerHTML ===
+          "<b>Test User </b> edited the configuration profile <b>Test Profile</b> for all Windows hosts."
+        );
+      })
+    ).toBeInTheDocument();
+  });
+
+  it("renders an 'edited_android_profile' single-profile edit for a team", () => {
+    const activity = createMockActivity({
+      type: ActivityType.EditedAndroidProfile,
+      details: {
+        profile_name: "Test Profile",
+        team_name: "Mobile",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText((content, node) => {
+        return (
+          node?.innerHTML ===
+          "<b>Test User </b> edited the configuration profile <b>Test Profile</b> for Android hosts assigned to the <b>Mobile</b> fleet."
+        );
+      })
+    ).toBeInTheDocument();
+  });
+
+  it("renders an 'edited_declaration_profile' single-declaration edit for a team", () => {
+    const activity = createMockActivity({
+      type: ActivityType.EditedDeclarationProfile,
+      details: {
+        profile_name: "Test Declaration",
+        profile_identifier: "com.example.decl",
+        team_name: "Workstations",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText((content, node) => {
+        return (
+          node?.innerHTML ===
+          "<b>Test User </b> edited the declaration (DDM) profile <b>Test Declaration</b> for macOS, iOS, and iPadOS hosts assigned to the <b>Workstations</b> fleet."
         );
       })
     ).toBeInTheDocument();
@@ -1042,6 +1267,85 @@ describe("Activity Feed", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders a global 'enabled_historical_dataset' activity with the dataset label", () => {
+    const activity = createMockActivity({
+      type: ActivityType.EnabledHistoricalDataset,
+      details: { dataset: "uptime", fleet_id: null, fleet_name: null },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText("enabled data collection for", { exact: false })
+    ).toBeInTheDocument();
+    expect(screen.getByText("Hosts online")).toBeInTheDocument();
+    expect(screen.queryByText(/for the /)).toBeNull();
+  });
+
+  it("renders a global 'disabled_historical_dataset' activity with the dataset label", () => {
+    const activity = createMockActivity({
+      type: ActivityType.DisabledHistoricalDataset,
+      details: { dataset: "vulnerabilities", fleet_id: null, fleet_name: null },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText("disabled data collection for", { exact: false })
+    ).toBeInTheDocument();
+    expect(screen.getByText("Vulnerability exposure")).toBeInTheDocument();
+    expect(screen.queryByText(/for the /)).toBeNull();
+  });
+
+  it("renders a fleet-scoped 'enabled_historical_dataset' activity with the fleet suffix", () => {
+    const activity = createMockActivity({
+      type: ActivityType.EnabledHistoricalDataset,
+      details: { dataset: "uptime", fleet_id: 7, fleet_name: "Engineering" },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText("enabled data collection for", { exact: false })
+    ).toBeInTheDocument();
+    expect(screen.getByText("Hosts online")).toBeInTheDocument();
+    expect(screen.getByText("Engineering")).toBeInTheDocument();
+    expect(screen.getByText(/for the/)).toBeInTheDocument();
+  });
+
+  it("renders a fleet-scoped 'disabled_historical_dataset' activity with the fleet suffix", () => {
+    const activity = createMockActivity({
+      type: ActivityType.DisabledHistoricalDataset,
+      details: {
+        dataset: "vulnerabilities",
+        fleet_id: 7,
+        fleet_name: "Engineering",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText("disabled data collection for", { exact: false })
+    ).toBeInTheDocument();
+    expect(screen.getByText("Vulnerability exposure")).toBeInTheDocument();
+    expect(screen.getByText("Engineering")).toBeInTheDocument();
+    expect(screen.getByText(/for the/)).toBeInTheDocument();
+  });
+
+  it("renders an unknown historical dataset key in sentence case", () => {
+    const activity = createMockActivity({
+      type: ActivityType.DisabledHistoricalDataset,
+      details: {
+        dataset: "policy_compliance",
+        fleet_id: null,
+        fleet_name: null,
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText("disabled data collection for", { exact: false })
+    ).toBeInTheDocument();
+    expect(screen.getByText("Policy compliance")).toBeInTheDocument();
+  });
+
   it("renders a 'transferred_hosts' type activity for one host transferred to Unassigned.", () => {
     const activity = createMockActivity({
       type: ActivityType.TransferredHosts,
@@ -1120,6 +1424,93 @@ describe("Activity Feed", () => {
     expect(screen.getByText("Alphas", { exact: false })).toBeInTheDocument();
   });
 
+  it("renders a 'fleet_enrolled' type activity with display name and serial", () => {
+    const activity = createMockActivity({
+      type: ActivityType.FleetEnrolled,
+      details: {
+        host_display_name: "Foobar's Mac",
+        host_serial: "ABCD",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText((_, node) => {
+        return (
+          node?.innerHTML === "<b>Foobar's Mac (ABCD)</b> enrolled in Fleet."
+        );
+      })
+    ).toBeInTheDocument();
+  });
+
+  it("renders a 'fleet_enrolled' type activity with display name only", () => {
+    const activity = createMockActivity({
+      type: ActivityType.FleetEnrolled,
+      details: {
+        host_display_name: "Foobar's Mac",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText((_, node) => {
+        return node?.innerHTML === "<b>Foobar's Mac</b> enrolled in Fleet.";
+      })
+    ).toBeInTheDocument();
+  });
+
+  it("renders a 'fleet_enrolled' type activity with serial only", () => {
+    const activity = createMockActivity({
+      type: ActivityType.FleetEnrolled,
+      details: {
+        host_serial: "ABCD",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText((_, node) => {
+        return (
+          node?.innerHTML ===
+          "A host with serial number <b>ABCD</b> enrolled in Fleet."
+        );
+      })
+    ).toBeInTheDocument();
+  });
+
+  it("renders a 'fleet_enrolled' type activity with no display name and no serial", () => {
+    const activity = createMockActivity({
+      type: ActivityType.FleetEnrolled,
+      details: {},
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText((_, node) => {
+        return node?.innerHTML === "A host enrolled in Fleet.";
+      })
+    ).toBeInTheDocument();
+  });
+
+  it("renders a 'fleet_enrolled' type activity without duplicating serial when display name already contains it", () => {
+    const activity = createMockActivity({
+      type: ActivityType.FleetEnrolled,
+      details: {
+        host_display_name: "MacBookPro18,1 (ABCD)",
+        host_serial: "ABCD",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText((_, node) => {
+        return (
+          node?.innerHTML === "<b>MacBookPro18,1 (ABCD)</b> enrolled in Fleet."
+        );
+      })
+    ).toBeInTheDocument();
+  });
+
   it("renders a 'mdm_enrolled' type for apple if mdm_platform is not provided", () => {
     const activity = createMockActivity({
       type: ActivityType.MdmEnrolled,
@@ -1130,10 +1521,9 @@ describe("Activity Feed", () => {
     render(<GlobalActivityItem activity={activity} isPremiumTier />);
 
     expect(
-      screen.getByText((content, node) => {
-        return (
-          node?.innerHTML ===
-          "<b>Test User </b>An end user turned on MDM features for a host with serial number <b>ABCD (manual)</b>."
+      screen.getByText((_, node) => {
+        return !!node?.innerHTML.endsWith(
+          "An end user turned on MDM features for a host with serial number <b>ABCD (manual)</b>."
         );
       })
     ).toBeInTheDocument();
@@ -1151,10 +1541,47 @@ describe("Activity Feed", () => {
     render(<GlobalActivityItem activity={activity} isPremiumTier />);
 
     expect(
-      screen.getByText((content, node) => {
-        return (
-          node?.innerHTML ===
-          "<b>Test User </b>An end user turned on MDM features for a host with serial number <b>ABCD (automatic)</b>."
+      screen.getByText((_, node) => {
+        return !!node?.innerHTML.endsWith(
+          "An end user turned on MDM features for a host with serial number <b>ABCD (automatic)</b>."
+        );
+      })
+    ).toBeInTheDocument();
+  });
+
+  it("renders a 'mdm_enrolled' type for apple with display name and serial", () => {
+    const activity = createMockActivity({
+      type: ActivityType.MdmEnrolled,
+      details: {
+        host_display_name: "Foobar's Mac",
+        host_serial: "ABCD",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText((_, node) => {
+        return !!node?.innerHTML.endsWith(
+          "An end user turned on MDM features for <b>Foobar's Mac (ABCD) (manual)</b>."
+        );
+      })
+    ).toBeInTheDocument();
+  });
+
+  it("renders a 'mdm_enrolled' type for apple without duplicating serial when display name already contains it", () => {
+    const activity = createMockActivity({
+      type: ActivityType.MdmEnrolled,
+      details: {
+        host_display_name: "MacBookPro18,1 (ABCD)",
+        host_serial: "ABCD",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText((_, node) => {
+        return !!node?.innerHTML.endsWith(
+          "An end user turned on MDM features for <b>MacBookPro18,1 (ABCD) (manual)</b>."
         );
       })
     ).toBeInTheDocument();
@@ -1189,10 +1616,70 @@ describe("Activity Feed", () => {
     render(<GlobalActivityItem activity={activity} isPremiumTier />);
 
     expect(
-      screen.getByText((content, node) => {
-        return (
-          node?.innerHTML ===
-          "<b>Test User </b>Mobile device management (MDM) was turned on for <b>ABCD (manual)</b>."
+      screen.getByText((_, node) => {
+        return !!node?.innerHTML.endsWith(
+          "Mobile device management (MDM) was turned on for <b>ABCD (manual)</b>."
+        );
+      })
+    ).toBeInTheDocument();
+  });
+
+  it("renders a 'mdm_enrolled' type for windows with display name and serial", () => {
+    const activity = createMockActivity({
+      type: ActivityType.MdmEnrolled,
+      details: {
+        mdm_platform: "microsoft",
+        host_display_name: "DESKTOP-ABC",
+        host_serial: "SERIAL123",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText((_, node) => {
+        return !!node?.innerHTML.endsWith(
+          "Mobile device management (MDM) was turned on for <b>DESKTOP-ABC (SERIAL123) (manual)</b>."
+        );
+      })
+    ).toBeInTheDocument();
+  });
+
+  it("renders a 'mdm_enrolled' type for windows autopilot enrollment as automatic", () => {
+    const activity = createMockActivity({
+      type: ActivityType.MdmEnrolled,
+      details: {
+        mdm_platform: "microsoft",
+        host_display_name: "DESKTOP-ABC",
+        host_serial: "SERIAL123",
+        installed_from_dep: true,
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText((_, node) => {
+        return !!node?.innerHTML.endsWith(
+          "Mobile device management (MDM) was turned on for <b>DESKTOP-ABC (SERIAL123) (automatic)</b>."
+        );
+      })
+    ).toBeInTheDocument();
+  });
+
+  it("renders a 'mdm_enrolled' type for windows without duplicating serial when display name already contains it", () => {
+    const activity = createMockActivity({
+      type: ActivityType.MdmEnrolled,
+      details: {
+        mdm_platform: "microsoft",
+        host_display_name: "DESKTOP-ABC (SERIAL123)",
+        host_serial: "SERIAL123",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText((_, node) => {
+        return !!node?.innerHTML.endsWith(
+          "Mobile device management (MDM) was turned on for <b>DESKTOP-ABC (SERIAL123) (manual)</b>."
         );
       })
     ).toBeInTheDocument();
@@ -1528,19 +2015,24 @@ describe("Activity Feed", () => {
     expect(screen.getByText("Test Admin")).toBeInTheDocument();
   });
 
-  it("renders the correct actor for a installed_software activity that was self_service", () => {
+  it("renders self_service installed_software in passive voice without an actor", () => {
     const activity = createMockActivity({
       type: ActivityType.InstalledSoftware,
       actor_id: 1,
+      actor_full_name: "Test Admin",
       details: {
         software_title: "Foo Software",
         self_service: true,
         host_display_name: "Foo Host",
+        status: "installed",
       },
     });
 
     render(<GlobalActivityItem activity={activity} isPremiumTier />);
-    expect(screen.getByText("An end user")).toBeInTheDocument();
+    expect(screen.queryByText("An end user")).toBeNull();
+    expect(screen.queryByText("Test Admin")).toBeNull();
+    expect(screen.getByText(/was installed on/)).toBeInTheDocument();
+    expect(screen.getByText(/\(self service\)\./)).toBeInTheDocument();
   });
 
   it("renders the correct actor for a installed_app_store_app activity without self_service", () => {
@@ -1558,19 +2050,60 @@ describe("Activity Feed", () => {
     expect(screen.getByText("Test Admin")).toBeInTheDocument();
   });
 
-  it("renders the correct actor for a installed_app_store_app activity that was self_service", () => {
+  it("renders self_service installed_app_store_app in passive voice without an actor", () => {
     const activity = createMockActivity({
       type: ActivityType.InstalledAppStoreApp,
       actor_id: 1,
+      actor_full_name: "Test Admin",
       details: {
         software_title: "Foo Software",
         self_service: true,
         host_display_name: "Foo Host",
+        status: "installed",
       },
     });
 
     render(<GlobalActivityItem activity={activity} isPremiumTier />);
-    expect(screen.getByText("An end user")).toBeInTheDocument();
+    expect(screen.queryByText("An end user")).toBeNull();
+    expect(screen.queryByText("Test Admin")).toBeNull();
+    expect(screen.getByText(/was installed on/)).toBeInTheDocument();
+    expect(screen.getByText(/\(self service\)\./)).toBeInTheDocument();
+  });
+
+  it("attributes VPP auto-update installs to Fleet even when the payload carries a stale actor", () => {
+    const activity = createMockActivity({
+      type: ActivityType.InstalledAppStoreApp,
+      actor_id: 1,
+      actor_full_name: "Some Admin",
+      fleet_initiated: false,
+      details: {
+        software_title: "Google Meet",
+        host_display_name: "iPad",
+        status: "installed",
+        from_auto_update: true,
+      },
+    });
+
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+    expect(screen.getByText("Fleet")).toBeInTheDocument();
+    expect(screen.queryByText("Some Admin")).toBeNull();
+  });
+
+  it("renders Fleet as actor for a failed VPP install whose initiating admin has been deleted", () => {
+    const activity = createMockActivity({
+      type: ActivityType.InstalledAppStoreApp,
+      actor_full_name: undefined,
+      fleet_initiated: false,
+      details: {
+        software_title: "Google Meet",
+        host_display_name: "iPad",
+        status: "failed_install",
+      },
+    });
+
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+    expect(screen.getByText("Fleet")).toBeInTheDocument();
+    expect(screen.getByText(/failed to install/)).toBeInTheDocument();
   });
 
   it("renders script package ran status in InstalledSoftware activity", () => {
@@ -1625,6 +2158,101 @@ describe("Activity Feed", () => {
     render(<GlobalActivityItem activity={activity} isPremiumTier />);
     expect(screen.getByText(/failed to run/i)).toBeInTheDocument(); // For status: "failed_install"
     expect(screen.getByText("Script-only Software")).toBeInTheDocument();
+  });
+
+  it("renders skipped copy when the app was open", () => {
+    const activity = createMockActivity({
+      type: ActivityType.InstalledSoftware,
+      actor_full_name: "Fleet",
+      fleet_initiated: true,
+      details: {
+        software_title: "Firefox",
+        software_package: "Firefox.pkg",
+        host_display_name: "Work Mac",
+        source: "apps",
+        status: "failed_install",
+        skipped_install: true,
+      },
+    });
+
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+    expect(screen.getByText(/skipped install of/)).toBeInTheDocument();
+    expect(screen.getByText("Firefox")).toBeInTheDocument();
+    expect(screen.getByText("Work Mac")).toBeInTheDocument();
+    expect(screen.queryByText(/failed to install/)).not.toBeInTheDocument();
+  });
+
+  it("keeps generic failed-install copy when the app-open flag is absent", () => {
+    const activity = createMockActivity({
+      type: ActivityType.InstalledSoftware,
+      actor_full_name: "Fleet",
+      fleet_initiated: true,
+      details: {
+        software_title: "Firefox",
+        software_package: "Firefox.pkg",
+        host_display_name: "Work Mac",
+        source: "apps",
+        status: "failed_install",
+      },
+    });
+
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+    expect(screen.getByText(/failed to install/)).toBeInTheDocument();
+    expect(screen.queryByText(/skipped install/)).not.toBeInTheDocument();
+  });
+
+  it("renders py script package ran status in InstalledSoftware activity", () => {
+    const activity = createMockActivity({
+      type: ActivityType.InstalledSoftware,
+      actor_full_name: "Script Admin",
+      details: {
+        software_title: "Python Script Software",
+        source: "py_packages",
+        status: "installed",
+        software_package: "install.py",
+        host_display_name: "Example Host",
+      },
+    });
+
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+    expect(screen.getByText(/ran/i)).toBeInTheDocument();
+    expect(screen.getByText("Python Script Software")).toBeInTheDocument();
+  });
+
+  it("renders py script package pending run status in InstalledSoftware activity", () => {
+    const activity = createMockActivity({
+      type: ActivityType.InstalledSoftware,
+      actor_full_name: "Script Admin",
+      details: {
+        software_title: "Python Script Software",
+        source: "py_packages",
+        status: "pending_install",
+        software_package: "install.py",
+        host_display_name: "Example Host",
+      },
+    });
+
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+    expect(screen.getByText(/told Fleet to run/i)).toBeInTheDocument();
+    expect(screen.getByText("Python Script Software")).toBeInTheDocument();
+  });
+
+  it("renders py script package failed run status in InstalledSoftware activity", () => {
+    const activity = createMockActivity({
+      type: ActivityType.InstalledSoftware,
+      actor_full_name: "Script Admin",
+      details: {
+        software_title: "Python Script Software",
+        source: "py_packages",
+        status: "failed_install",
+        software_package: "install.py",
+        host_display_name: "Example Host",
+      },
+    });
+
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+    expect(screen.getByText(/failed to run/i)).toBeInTheDocument();
+    expect(screen.getByText("Python Script Software")).toBeInTheDocument();
   });
 
   it("renders addedNdesScepProxy activity correctly", () => {
@@ -1858,6 +2486,38 @@ describe("Activity Feed", () => {
     expect(screen.getByText(/Bears/i)).toBeInTheDocument();
     expect(screen.getByText(/fleet/i)).toBeInTheDocument();
   });
+  it("renders a createdSetupExperienceScript type activity for a fleet", () => {
+    const activity = createMockActivity({
+      type: ActivityType.CreatedSetupExperienceScript,
+      details: {
+        script_name: "set-timezones.sh",
+        fleet_name: "Bears",
+        fleet_id: 1,
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+    expect(
+      screen.getByText(/added setup experience script/i)
+    ).toBeInTheDocument();
+    expect(screen.getByText(/set-timezones.sh/i)).toBeInTheDocument();
+    expect(screen.getByText(/Bears/i)).toBeInTheDocument();
+  });
+  it("renders a deletedSetupExperienceScript type activity for unassigned hosts", () => {
+    const activity = createMockActivity({
+      type: ActivityType.DeletedSetupExperienceScript,
+      details: {
+        script_name: "set-timezones.sh",
+        fleet_name: null,
+        fleet_id: null,
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+    expect(
+      screen.getByText(/deleted setup experience script/i)
+    ).toBeInTheDocument();
+    expect(screen.getByText(/set-timezones.sh/i)).toBeInTheDocument();
+    expect(screen.getByText(/unassigned/i)).toBeInTheDocument();
+  });
   it("renders an enabledMacosUpdateNewHosts activity for a team", () => {
     const activity = createMockActivity({
       type: ActivityType.EnabledMacosUpdateNewHosts,
@@ -1889,5 +2549,187 @@ describe("Activity Feed", () => {
     expect(screen.getByText(/macOS/i)).toBeInTheDocument();
     expect(screen.getByText(/Lions/i)).toBeInTheDocument();
     expect(screen.getByText(/fleet/i)).toBeInTheDocument();
+  });
+
+  it("renders an enabled_gitops_exception activity", () => {
+    const activity = createMockActivity({
+      type: ActivityType.EnabledGitOpsException,
+      details: { exception: "labels" },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+    expect(
+      screen.getByText("enabled the labels exception for GitOps.")
+    ).toBeInTheDocument();
+  });
+
+  it("renders a disabled_gitops_exception activity", () => {
+    const activity = createMockActivity({
+      type: ActivityType.DisabledGitOpsException,
+      details: { exception: "software" },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+    expect(
+      screen.getByText("disabled the software exception for GitOps.")
+    ).toBeInTheDocument();
+  });
+
+  it("renders a created_label activity for a global label", () => {
+    const activity = createMockActivity({
+      type: ActivityType.CreatedLabel,
+      details: { label_id: 1, label_name: "Workstations" },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+    expect(screen.getByText("created a label .")).toBeInTheDocument();
+    expect(screen.getByText("Workstations")).toBeInTheDocument();
+  });
+
+  it("renders an edited_label activity scoped to a fleet", () => {
+    const activity = createMockActivity({
+      type: ActivityType.EditedLabel,
+      details: {
+        label_id: 1,
+        label_name: "Workstations",
+        fleet_id: 5,
+        fleet_name: "Engineering",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+    expect(
+      screen.getByText("edited the label on the fleet.")
+    ).toBeInTheDocument();
+    expect(screen.getByText("Workstations")).toBeInTheDocument();
+    expect(screen.getByText("Engineering")).toBeInTheDocument();
+  });
+
+  it("renders a deleted_label activity for a global label", () => {
+    const activity = createMockActivity({
+      type: ActivityType.DeletedLabel,
+      details: { label_id: 1, label_name: "Workstations" },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+    expect(screen.getByText("deleted the label .")).toBeInTheDocument();
+    expect(screen.getByText("Workstations")).toBeInTheDocument();
+  });
+
+  it("renders an un-scoped installed_all_self_service_software activity", () => {
+    const activity = createMockActivity({
+      type: ActivityType.InstalledAllSelfServiceSoftware,
+      actor_full_name: "Test User",
+      details: {},
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(screen.getByText("End user")).toBeInTheDocument();
+    expect(
+      screen.getByText(/installed all the software in self service/i)
+    ).toBeInTheDocument();
+    // The actor is dropped in favor of "End user".
+    expect(screen.queryByText("Test User")).not.toBeInTheDocument();
+  });
+
+  it("renders a category-scoped installed_all_self_service_software activity", () => {
+    const activity = createMockActivity({
+      type: ActivityType.InstalledAllSelfServiceSoftware,
+      details: { self_service_category_name: "Productivity" },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(screen.getByText("End user")).toBeInTheDocument();
+    expect(screen.getByText("Install all")).toBeInTheDocument();
+    expect(screen.getByText("Productivity")).toBeInTheDocument();
+    expect(screen.getByText(/in the self-service/i)).toBeInTheDocument();
+  });
+
+  it("treats a null category the same as un-scoped (installed_all_self_service_software)", () => {
+    const activity = createMockActivity({
+      type: ActivityType.InstalledAllSelfServiceSoftware,
+      details: { self_service_category_name: null },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText(/installed all the software in self service/i)
+    ).toBeInTheDocument();
+  });
+
+  it("renders a ran_custom_mdm_command activity with a command name", () => {
+    const activity = createMockActivity({
+      type: ActivityType.RanCustomMdmCommand,
+      details: {
+        request_type: "./Device/Vendor/MSFT/DMClient/Provider/DEMO/EntDMID",
+        host_display_name: "Huck's MacBook Pro",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(screen.getByText(".../EntDMID")).toBeInTheDocument();
+    expect(screen.getByText("Huck's MacBook Pro")).toBeInTheDocument();
+  });
+
+  it("renders a ran_custom_mdm_command activity without a command name", () => {
+    const activity = createMockActivity({
+      type: ActivityType.RanCustomMdmCommand,
+      details: { host_display_name: "Huck's MacBook Pro" },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(screen.getByText(/a custom MDM command/i)).toBeInTheDocument();
+    expect(screen.getByText("Huck's MacBook Pro")).toBeInTheDocument();
+  });
+
+  it("renders a created_custom_host_vital activity", () => {
+    const activity = createMockActivity({
+      type: ActivityType.CreatedCustomHostVital,
+      details: { custom_host_vital_id: 1, custom_host_vital_name: "Function" },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText("created a custom host vital", { exact: false })
+    ).toBeInTheDocument();
+    expect(screen.getByText("Function")).toBeInTheDocument();
+  });
+
+  it("renders an edited_custom_host_vital activity", () => {
+    const activity = createMockActivity({
+      type: ActivityType.EditedCustomHostVital,
+      details: { custom_host_vital_id: 1, custom_host_vital_name: "Asset tag" },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText("edited custom host vital", { exact: false })
+    ).toBeInTheDocument();
+    expect(screen.getByText("Asset tag")).toBeInTheDocument();
+  });
+
+  it("renders a deleted_custom_host_vital activity", () => {
+    const activity = createMockActivity({
+      type: ActivityType.DeletedCustomHostVital,
+      details: { custom_host_vital_id: 1, custom_host_vital_name: "Asset tag" },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText("deleted custom host vital", { exact: false })
+    ).toBeInTheDocument();
+    expect(screen.getByText("Asset tag")).toBeInTheDocument();
+  });
+
+  it("renders a canceled_mdm_command activity", () => {
+    const activity = createMockActivity({
+      type: ActivityType.CanceledMdmCommand,
+      details: {
+        command_type: "DeviceLock",
+        host_display_name: "Anna's MacBook Pro",
+      },
+    });
+    render(<GlobalActivityItem activity={activity} isPremiumTier />);
+
+    expect(
+      screen.getByText("canceled the pending", { exact: false })
+    ).toBeInTheDocument();
+    expect(screen.getByText("DeviceLock")).toBeInTheDocument();
+    expect(screen.getByText("Anna's MacBook Pro")).toBeInTheDocument();
   });
 });

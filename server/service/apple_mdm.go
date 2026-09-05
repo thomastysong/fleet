@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -22,16 +21,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	eeservice "github.com/fleetdm/fleet/v4/ee/server/service"
-	"github.com/fleetdm/fleet/v4/ee/server/service/digicert"
 	"github.com/fleetdm/fleet/v4/pkg/file"
 	shared_mdm "github.com/fleetdm/fleet/v4/pkg/mdm"
 	"github.com/fleetdm/fleet/v4/pkg/optjson"
 	"github.com/fleetdm/fleet/v4/server"
 	platform_http "github.com/fleetdm/fleet/v4/server/platform/http"
+	"github.com/gorilla/mux"
 
 	"github.com/fleetdm/fleet/v4/server/authz"
 	"github.com/fleetdm/fleet/v4/server/config"
@@ -52,9 +49,9 @@ import (
 	"github.com/fleetdm/fleet/v4/server/mdm/nanodep/storage"
 	"github.com/fleetdm/fleet/v4/server/mdm/nanomdm/cryptoutil"
 	"github.com/fleetdm/fleet/v4/server/mdm/nanomdm/mdm"
+	"github.com/fleetdm/fleet/v4/server/mdm/profiles"
 
 	nano_service "github.com/fleetdm/fleet/v4/server/mdm/nanomdm/service"
-	"github.com/fleetdm/fleet/v4/server/mdm/profiles"
 	"github.com/fleetdm/fleet/v4/server/platform/endpointer"
 	"github.com/fleetdm/fleet/v4/server/ptr"
 	"github.com/fleetdm/fleet/v4/server/variables"
@@ -67,28 +64,37 @@ const (
 	maxValueCharsInError          = 100
 	SameProfileNameUploadErrorMsg = "Couldn't add. A configuration profile with this name already exists (PayloadDisplayName for .mobileconfig and file name for .json and .xml)."
 	limit10KiB                    = 10 * 1024
+
+	// Shared with the batch/GitOps path so the same mistake reads the same way.
+	ActivationUnsupportedProfileErrorMsg    = "Activations are only supported for declaration (DDM) profiles."
+	ActivationUnsupportedManagementErrorMsg = "Activations are only supported for configuration declarations (com.apple.configuration.)."
+	ActivationEmptyFileErrorMsg             = "Activation must contain a declaration. To remove the activation, send an empty activation field."
+	ActivationConflictingPartsErrorMsg      = "Send either an activation file to replace it or an empty activation field to remove it, not both."
+	ActivationsDisabledErrorMsg             = "Custom activations aren't available. Set FLEET_MDM_ALLOW_CUSTOM_ACTIVATIONS=1 on the Fleet server to turn them on."
 )
 
-var (
-	fleetVarHostEndUserEmailIDPRegexp = regexp.MustCompile(fmt.Sprintf(`(\$FLEET_VAR_%s)|(\${FLEET_VAR_%[1]s})`, fleet.FleetVarHostEndUserEmailIDP))
-	fleetVarNDESSCEPChallengeRegexp   = regexp.MustCompile(fmt.Sprintf(`(\$FLEET_VAR_%s)|(\${FLEET_VAR_%[1]s})`, fleet.FleetVarNDESSCEPChallenge))
-	fleetVarNDESSCEPProxyURLRegexp    = regexp.MustCompile(fmt.Sprintf(`(\$FLEET_VAR_%s)|(\${FLEET_VAR_%[1]s})`, fleet.FleetVarNDESSCEPProxyURL))
-	fleetVarSCEPRenewalIDRegexp       = regexp.MustCompile(fmt.Sprintf(`(\$FLEET_VAR_%s)|(\${FLEET_VAR_%[1]s})`, fleet.FleetVarSCEPRenewalID))
-	fleetVarHostUUIDRegexp            = regexp.MustCompile(fmt.Sprintf(`(\$FLEET_VAR_%s)|(\${FLEET_VAR_%[1]s})`, fleet.FleetVarHostUUID))
+// TODO(HCA): Can we come up with a clearer name? This looks like any variables not in this slice is not supported,
+// but that is not the case, digicert, custom scep, hydrant and smallstep are totally supported just in a different way (multiple CA's)
+var fleetVarsSupportedInAppleConfigProfiles = []fleet.FleetVarName{
+	fleet.FleetVarNDESSCEPChallenge, fleet.FleetVarNDESSCEPProxyURL, fleet.FleetVarHostEndUserEmailIDP,
+	fleet.FleetVarHostHardwareSerial, fleet.FleetVarHostEndUserIDPUsername, fleet.FleetVarHostEndUserIDPUsernameLocalPart,
+	fleet.FleetVarHostEndUserIDPGroups, fleet.FleetVarHostEndUserIDPDepartment, fleet.FleetVarHostEndUserIDPFullname,
+	fleet.FleetVarSCEPRenewalID, fleet.FleetVarCertificateRenewalID,
+	fleet.FleetVarHostUUID, fleet.FleetVarHostPlatform,
+	fleet.FleetVarPSSODeviceRegistrationToken,
+}
 
-	// TODO(HCA): Can we come up with a clearer name? This looks like any variables not in this slice is not supported,
-	// but that is not the case, digicert, custom scep, hydrant and smallstep are totally supported just in a different way (multiple CA's)
-	fleetVarsSupportedInAppleConfigProfiles = []fleet.FleetVarName{
-		fleet.FleetVarNDESSCEPChallenge, fleet.FleetVarNDESSCEPProxyURL, fleet.FleetVarHostEndUserEmailIDP,
-		fleet.FleetVarHostHardwareSerial, fleet.FleetVarHostEndUserIDPUsername, fleet.FleetVarHostEndUserIDPUsernameLocalPart,
-		fleet.FleetVarHostEndUserIDPGroups, fleet.FleetVarHostEndUserIDPDepartment, fleet.FleetVarHostEndUserIDPFullname, fleet.FleetVarSCEPRenewalID,
-		fleet.FleetVarHostUUID, fleet.FleetVarHostPlatform,
-	}
-)
-
-type hostProfileUUID struct {
-	HostUUID    string
-	ProfileUUID string
+// fleetVarsSupportedInDDMDeclarations is the list of Fleet variables
+// supported in Apple DDM declarations.
+var fleetVarsSupportedInDDMDeclarations = []fleet.FleetVarName{
+	fleet.FleetVarHostHardwareSerial,
+	fleet.FleetVarHostEndUserIDPUsername,
+	fleet.FleetVarHostEndUserIDPUsernameLocalPart,
+	fleet.FleetVarHostEndUserIDPGroups,
+	fleet.FleetVarHostEndUserIDPDepartment,
+	fleet.FleetVarHostEndUserIDPFullname,
+	fleet.FleetVarHostUUID,
+	fleet.FleetVarHostPlatform,
 }
 
 type getMDMAppleCommandResultsRequest struct {
@@ -355,7 +361,7 @@ func newMDMAppleConfigProfileEndpoint(ctx context.Context, request interface{}, 
 		return &newMDMConfigProfileResponse{Err: err}, nil
 	}
 	// providing an empty set of labels since this endpoint is only maintained for backwards compat
-	cp, err := svc.NewMDMAppleConfigProfile(ctx, req.TeamID, data, nil, fleet.LabelsIncludeAll)
+	cp, err := svc.NewMDMAppleConfigProfile(ctx, req.TeamID, data, nil, fleet.LabelsIncludeAll, nil)
 	if err != nil {
 		return &newMDMAppleConfigProfileResponse{Err: err}, nil
 	}
@@ -364,101 +370,19 @@ func newMDMAppleConfigProfileEndpoint(ctx context.Context, request interface{}, 
 	}, nil
 }
 
-func (svc *Service) NewMDMAppleConfigProfile(ctx context.Context, teamID uint, data []byte, labels []string, labelsMembershipMode fleet.MDMLabelsMode) (*fleet.MDMAppleConfigProfile, error) {
+func (svc *Service) NewMDMAppleConfigProfile(ctx context.Context, teamID uint, data []byte, labelsInclude []string, labelsMembershipMode fleet.MDMLabelsMode, labelsExcludeAny []string) (*fleet.MDMAppleConfigProfile, error) {
 	if err := svc.authz.Authorize(ctx, &fleet.MDMConfigProfileAuthz{TeamID: &teamID}, fleet.ActionWrite); err != nil {
 		return nil, ctxerr.Wrap(ctx, err)
 	}
 
-	// check that Apple MDM is enabled - the middleware of that endpoint checks
-	// only that any MDM is enabled, maybe it's just Windows
-	if err := svc.VerifyMDMAppleConfigured(ctx); err != nil {
-		err := fleet.NewInvalidArgumentError("profile", fleet.AppleMDMNotConfiguredMessage).WithStatus(http.StatusBadRequest)
-		return nil, ctxerr.Wrap(ctx, err, "check macOS MDM enabled")
-	}
-
-	err := CheckProfileIsNotSigned(data)
+	cp, varNames, teamName, err := svc.parseAndValidateAppleConfigProfile(ctx, teamID, data, labelsInclude, labelsMembershipMode, labelsExcludeAny)
 	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err)
+		return nil, err
 	}
 
-	var teamName string
-	if teamID >= 1 {
-		tm, err := svc.EnterpriseOverrides.TeamByIDOrName(ctx, &teamID, nil)
-		if err != nil {
-			return nil, ctxerr.Wrap(ctx, err)
-		}
-		teamName = tm.Name
-	}
-
-	// Check for secrets in profile name before expansion
-	if err := fleet.ValidateNoSecretsInProfileName(data); err != nil {
-		return nil, ctxerr.Wrap(ctx, fleet.NewInvalidArgumentError("profile", err.Error()))
-	}
-
-	// Expand and validate secrets in profile
-	expanded, secretsUpdatedAt, err := svc.ds.ExpandEmbeddedSecretsAndUpdatedAt(ctx, string(data))
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, fleet.NewInvalidArgumentError("profile", err.Error()))
-	}
-
-	// Get license for validation
-	lic, err := svc.License(ctx)
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "checking license")
-	}
-
-	groupedCAs, err := svc.ds.GetGroupedCertificateAuthorities(ctx, true)
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "getting grouped certificate authorities")
-	}
-
-	profileVars, err := validateConfigProfileFleetVariables(expanded, lic, groupedCAs)
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "validating fleet variables")
-	}
-
-	cp, err := fleet.NewMDMAppleConfigProfile([]byte(expanded), &teamID)
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, &fleet.BadRequestError{
-			Message: fmt.Sprintf("failed to parse config profile: %s", err.Error()),
-		})
-	}
-
-	if err := cp.ValidateUserProvided(svc.config.MDM.EnableCustomOSUpdatesAndFileVault); err != nil {
-		if strings.Contains(err.Error(), mobileconfig.DiskEncryptionProfileRestrictionErrMsg) {
-			return nil, ctxerr.Wrap(ctx, &fleet.BadRequestError{Message: err.Error() + ` To control these settings use disk encryption endpoint.`})
-		}
-		return nil, ctxerr.Wrap(ctx, &fleet.BadRequestError{Message: err.Error()})
-	}
-
-	// Save the original unexpanded profile
-	cp.Mobileconfig = data
-	cp.SecretsUpdatedAt = secretsUpdatedAt
-
-	labelMap, err := svc.validateProfileLabels(ctx, &teamID, labels)
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "validating labels")
-	}
-	switch labelsMembershipMode {
-	case fleet.LabelsIncludeAll:
-		cp.LabelsIncludeAll = labelMap
-	case fleet.LabelsIncludeAny:
-		cp.LabelsIncludeAny = labelMap
-	case fleet.LabelsExcludeAny:
-		cp.LabelsExcludeAny = labelMap
-	default:
-		// TODO what happens if mode is not set?s
-	}
-
-	// Convert profile variable names to FleetVarName type
-	varNames := make([]fleet.FleetVarName, 0, len(profileVars))
-	for _, varName := range profileVars {
-		varNames = append(varNames, fleet.FleetVarName(varName))
-	}
 	newCP, err := svc.ds.NewMDMAppleConfigProfile(ctx, *cp, varNames)
 	if err != nil {
-		var existsErr endpointer.ExistsErrorInterface
-		if errors.As(err, &existsErr) {
+		if existsErr, ok := errors.AsType[endpointer.ExistsErrorInterface](err); ok {
 			msg := SameProfileNameUploadErrorMsg
 			if re, ok := existsErr.(interface{ Resource() string }); ok {
 				if re.Resource() == "MDMAppleConfigProfile.PayloadIdentifier" {
@@ -469,9 +393,6 @@ func (svc *Service) NewMDMAppleConfigProfile(ctx context.Context, teamID uint, d
 				WithStatus(http.StatusConflict)
 		}
 		return nil, ctxerr.Wrap(ctx, err)
-	}
-	if _, err := svc.ds.BulkSetPendingMDMHostProfiles(ctx, nil, nil, []string{newCP.ProfileUUID}, nil); err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "bulk set pending host profiles")
 	}
 
 	var (
@@ -493,6 +414,116 @@ func (svc *Service) NewMDMAppleConfigProfile(ctx context.Context, teamID uint, d
 	}
 
 	return newCP, nil
+}
+
+// parseAndValidateAppleConfigProfile runs the validation shared by the
+// create and update paths. It returns the constructed profile (with labels
+// and the original unexpanded Mobileconfig set), the Fleet variable names it
+// uses, and the team's name (empty string for no team).
+func (svc *Service) parseAndValidateAppleConfigProfile(ctx context.Context, teamID uint, data []byte, labelsInclude []string, labelsMembershipMode fleet.MDMLabelsMode, labelsExcludeAny []string) (*fleet.MDMAppleConfigProfile, []fleet.FleetVarName, string, error) {
+	// check that Apple MDM is enabled - the middleware of that endpoint checks
+	// only that any MDM is enabled, maybe it's just Windows
+	if err := svc.VerifyMDMAppleConfigured(ctx); err != nil {
+		err := fleet.NewInvalidArgumentError("profile", fleet.AppleMDMNotConfiguredMessage).WithStatus(http.StatusBadRequest)
+		return nil, nil, "", ctxerr.Wrap(ctx, err, "check macOS MDM enabled")
+	}
+
+	err := CheckProfileIsNotSigned(data)
+	if err != nil {
+		return nil, nil, "", ctxerr.Wrap(ctx, err)
+	}
+
+	lic, err := svc.License(ctx)
+	if err != nil {
+		return nil, nil, "", ctxerr.Wrap(ctx, err, "checking license")
+	}
+
+	var teamName string
+	if teamID > 0 {
+		if lic == nil || !lic.IsPremium() {
+			return nil, nil, "", ctxerr.Wrap(ctx, fleet.ErrMissingLicense)
+		}
+		tm, err := svc.EnterpriseOverrides.TeamByIDOrName(ctx, &teamID, nil)
+		if err != nil {
+			return nil, nil, "", ctxerr.Wrap(ctx, err)
+		}
+		teamName = tm.Name
+	}
+
+	if len(labelsInclude) > 0 || len(labelsExcludeAny) > 0 {
+		if lic == nil || !lic.IsPremium() {
+			return nil, nil, "", ctxerr.Wrap(ctx, fleet.NewLicenseErrorWithCause(fleet.ConfigProfileLabelScopingPremiumCauseMsg), "checking license for profile label scoping")
+		}
+	}
+
+	// Check for secrets in profile name before expansion
+	if err := fleet.ValidateNoSecretsInProfileName(data); err != nil {
+		return nil, nil, "", ctxerr.Wrap(ctx, fleet.NewInvalidArgumentError("profile", err.Error()))
+	}
+
+	// Expand and validate secrets in profile
+	expanded, secretsUpdatedAt, err := svc.ds.ExpandEmbeddedSecretsAndUpdatedAt(ctx, string(data))
+	if err != nil {
+		return nil, nil, "", ctxerr.Wrap(ctx, fleet.NewInvalidArgumentError("profile", err.Error()))
+	}
+
+	groupedCAs, err := svc.ds.GetGroupedCertificateAuthorities(ctx, true)
+	if err != nil {
+		return nil, nil, "", ctxerr.Wrap(ctx, err, "getting grouped certificate authorities")
+	}
+
+	profileVars, err := validateConfigProfileFleetVariables(expanded, lic, groupedCAs)
+	if err != nil {
+		return nil, nil, "", ctxerr.Wrap(ctx, err, "validating fleet variables")
+	}
+
+	if err := svc.ds.ValidateReferencedCustomHostVitals(ctx, []string{string(data)}); err != nil {
+		if !fleet.IsInvalidReferencedCustomHostVitalsError(err) {
+			return nil, nil, "", ctxerr.Wrap(ctx, err, "validating referenced custom host vitals")
+		}
+		return nil, nil, "", ctxerr.Wrap(ctx, fleet.NewInvalidArgumentError("profile", err.Error()))
+	}
+
+	cp, err := fleet.NewMDMAppleConfigProfile([]byte(expanded), &teamID)
+	if err != nil {
+		return nil, nil, "", ctxerr.Wrap(ctx, &fleet.BadRequestError{
+			Message: fmt.Sprintf("failed to parse config profile: %s", err.Error()),
+		})
+	}
+
+	if err := cp.ValidateUserProvided(svc.config.MDM.IsCustomDiskEncryptionEnabled()); err != nil {
+		if strings.Contains(err.Error(), mobileconfig.DiskEncryptionProfileRestrictionErrMsg) {
+			return nil, nil, "", ctxerr.Wrap(ctx, &fleet.BadRequestError{Message: err.Error() + ` To control these settings use disk encryption endpoint.`})
+		}
+		return nil, nil, "", ctxerr.Wrap(ctx, &fleet.BadRequestError{Message: err.Error()})
+	}
+
+	// Save the original unexpanded profile
+	cp.Mobileconfig = data
+	cp.SecretsUpdatedAt = secretsUpdatedAt
+
+	if overlap := fleet.LabelOverlap(labelsInclude, labelsExcludeAny); overlap != "" {
+		return nil, nil, "", ctxerr.Wrap(ctx, fleet.NewInvalidArgumentError("labels", fmt.Sprintf("label %q cannot appear in both include and exclude lists", overlap)))
+	}
+	includeLabels, excludeLabels, err := svc.validateProfileLabelSets(ctx, &teamID, labelsInclude, labelsExcludeAny)
+	if err != nil {
+		return nil, nil, "", ctxerr.Wrap(ctx, err, "validating labels")
+	}
+	switch labelsMembershipMode {
+	case fleet.LabelsIncludeAll:
+		cp.LabelsIncludeAll = includeLabels
+	case fleet.LabelsIncludeAny:
+		cp.LabelsIncludeAny = includeLabels
+	}
+	cp.LabelsExcludeAny = excludeLabels
+
+	// Convert profile variable names to FleetVarName type
+	varNames := make([]fleet.FleetVarName, 0, len(profileVars))
+	for _, varName := range profileVars {
+		varNames = append(varNames, fleet.FleetVarName(varName))
+	}
+
+	return cp, varNames, teamName, nil
 }
 
 // CheckProfileIsNotSigned checks if the provided profile data is a signed profile.
@@ -527,6 +558,15 @@ func validateConfigProfileFleetVariables(contents string, lic *fleet.LicenseInfo
 		}
 	}
 
+	if slices.Contains(fleetVars, string(fleet.FleetVarPSSODeviceRegistrationToken)) {
+		if lic == nil || !lic.IsPremium() {
+			return nil, &fleet.BadRequestError{Message: fmt.Sprintf("Variable %s requires a Fleet Premium license.", fleet.FleetVarPSSODeviceRegistrationToken.WithPrefix())}
+		}
+		if err := validatePSSORegistrationTokenVariable(contents); err != nil {
+			return nil, err
+		}
+	}
+
 	err := validateProfileCertificateAuthorityVariables(contents, lic, groupedCAs,
 		additionalDigiCertValidation, additionalCustomSCEPValidation, additionalNDESValidation, additionalSmallstepValidation)
 	// We avoid checking for all nil here (due to no variables, as we ran our own variable check above.)
@@ -535,6 +575,78 @@ func validateConfigProfileFleetVariables(contents string, lic *fleet.LicenseInfo
 	}
 
 	return fleetVars, nil
+}
+
+// extensibleSSOProfileContent is the subset of an Apple configuration profile
+// used to validate placement of the PSSO device registration token variable.
+type extensibleSSOProfileContent struct {
+	PayloadContent []extensibleSSOPayload `plist:"PayloadContent"`
+}
+
+type extensibleSSOPayload struct {
+	PayloadType         string `plist:"PayloadType"`
+	ExtensionIdentifier string `plist:"ExtensionIdentifier"`
+	RegistrationToken   string `plist:"RegistrationToken"`
+	PlatformSSO         struct {
+		UseSharedDeviceKeys bool `plist:"UseSharedDeviceKeys"`
+	} `plist:"PlatformSSO"`
+}
+
+// validatePSSORegistrationTokenVariable enforces that
+// $FLEET_VAR_PSSO_DEVICE_REGISTRATION_TOKEN appears only as the RegistrationToken
+// value of a Fleet Platform SSO v2 payload — a com.apple.extensiblesso payload
+// whose ExtensionIdentifier starts with "com.fleetdm" and whose PlatformSSO
+// dictionary sets UseSharedDeviceKeys to true — and nowhere else in the profile.
+// This stops an admin from leaking the device registration token into another
+// payload (e.g. a third-party IdP extension) or field.
+func validatePSSORegistrationTokenVariable(contents string) error {
+	re := fleet.FleetVarPSSODeviceRegistrationTokenRegexp
+	totalOccurrences := len(re.FindAllString(contents, -1))
+	if totalOccurrences == 0 {
+		return nil
+	}
+
+	// Guard against a Fleet variable inside a <data> field elsewhere in the
+	// profile breaking the plist unmarshal (mirrors the DigiCert/SCEP validators).
+	escaped := variables.ProfileDataVariableRegex.ReplaceAllStringFunc(contents, func(match string) string {
+		return base64.StdEncoding.EncodeToString([]byte(match))
+	})
+
+	var prof extensibleSSOProfileContent
+	if err := plist.Unmarshal([]byte(escaped), &prof); err != nil {
+		return &fleet.BadRequestError{Message: fmt.Sprintf("Failed to parse Platform SSO payload with Fleet variables: %s", err.Error())}
+	}
+
+	varWithPrefix := fleet.FleetVarPSSODeviceRegistrationToken.WithPrefix()
+	varWithBraces := fleet.FleetVarPSSODeviceRegistrationToken.WithBraces()
+
+	validPlacements := 0
+	for _, p := range prof.PayloadContent {
+		if p.PayloadType != "com.apple.extensiblesso" {
+			continue
+		}
+		if p.RegistrationToken != varWithPrefix && p.RegistrationToken != varWithBraces {
+			continue
+		}
+		if !strings.HasPrefix(p.ExtensionIdentifier, "com.fleetdm") {
+			return &fleet.BadRequestError{Message: fmt.Sprintf(
+				"Variable %s is only allowed in a Fleet Platform SSO payload (the ExtensionIdentifier must start with \"com.fleetdm\").",
+				varWithPrefix)}
+		}
+		if !p.PlatformSSO.UseSharedDeviceKeys {
+			return &fleet.BadRequestError{Message: fmt.Sprintf(
+				"Variable %s requires the Platform SSO payload to set UseSharedDeviceKeys to true.",
+				varWithPrefix)}
+		}
+		validPlacements++
+	}
+
+	if validPlacements != totalOccurrences {
+		return &fleet.BadRequestError{Message: fmt.Sprintf(
+			"Variable %s is only allowed in the RegistrationToken of a Fleet Platform SSO payload.",
+			varWithPrefix)}
+	}
+	return nil
 }
 
 // additionalDigiCertValidation checks that Password/ContentType fields match DigiCert Fleet variables exactly,
@@ -648,8 +760,8 @@ func additionalCustomSCEPValidation(contents string, customSCEPVars *CustomSCEPV
 		}
 		foundCAs = append(foundCAs, ca)
 	}
-	if !fleetVarSCEPRenewalIDRegexp.MatchString(scepPayloadContent.CommonName) && !fleetVarSCEPRenewalIDRegexp.MatchString(scepPayloadContent.OrganizationalUnit) {
-		return &fleet.BadRequestError{Message: "Variable $FLEET_VAR_" + string(fleet.FleetVarSCEPRenewalID) + " must be in the SCEP certificate's organizational unit (OU)."}
+	if !fleet.FleetVarRenewalIDRegexp.MatchString(scepPayloadContent.CommonName) && !fleet.FleetVarRenewalIDRegexp.MatchString(scepPayloadContent.OrganizationalUnit) {
+		return &fleet.BadRequestError{Message: "Variable $FLEET_VAR_" + string(fleet.FleetVarCertificateRenewalID) + " must be in the SCEP certificate's organizational unit (OU)."}
 	}
 	if len(foundCAs) < len(customSCEPVars.CAs()) {
 		for _, ca := range customSCEPVars.CAs() {
@@ -701,8 +813,8 @@ func additionalSmallstepValidation(contents string, smallstepVars *SmallstepVars
 		}
 		foundCAs = append(foundCAs, ca)
 	}
-	if !fleetVarSCEPRenewalIDRegexp.MatchString(scepPayloadContent.CommonName) && !fleetVarSCEPRenewalIDRegexp.MatchString(scepPayloadContent.OrganizationalUnit) {
-		return &fleet.BadRequestError{Message: "Variable $FLEET_VAR_" + string(fleet.FleetVarSCEPRenewalID) + " must be in the SCEP certificate's organizational unit (OU)."}
+	if !fleet.FleetVarRenewalIDRegexp.MatchString(scepPayloadContent.CommonName) && !fleet.FleetVarRenewalIDRegexp.MatchString(scepPayloadContent.OrganizationalUnit) {
+		return &fleet.BadRequestError{Message: "Variable $FLEET_VAR_" + string(fleet.FleetVarCertificateRenewalID) + " must be in the SCEP certificate's organizational unit (OU)."}
 	}
 	if len(foundCAs) < len(smallstepVars.CAs()) {
 		for _, ca := range smallstepVars.CAs() {
@@ -823,8 +935,8 @@ func additionalNDESValidation(contents string, ndesVars *NDESVarsFound) error {
 		return err
 	}
 
-	if !fleetVarSCEPRenewalIDRegexp.MatchString(scepPayloadContent.CommonName) && !fleetVarSCEPRenewalIDRegexp.MatchString(scepPayloadContent.OrganizationalUnit) {
-		return &fleet.BadRequestError{Message: "Variable $FLEET_VAR_" + string(fleet.FleetVarSCEPRenewalID) + " must be in the SCEP certificate's organizational unit (OU)."}
+	if !fleet.FleetVarRenewalIDRegexp.MatchString(scepPayloadContent.CommonName) && !fleet.FleetVarRenewalIDRegexp.MatchString(scepPayloadContent.OrganizationalUnit) {
+		return &fleet.BadRequestError{Message: "Variable $FLEET_VAR_" + string(fleet.FleetVarCertificateRenewalID) + " must be in the SCEP certificate's organizational unit (OU)."}
 	}
 
 	// Check for the exact match on challenge and URL
@@ -855,7 +967,85 @@ func additionalNDESValidation(contents string, ndesVars *NDESVarsFound) error {
 	return nil
 }
 
-func (svc *Service) NewMDMAppleDeclaration(ctx context.Context, teamID uint, data []byte, labels []string, name string, labelsMembershipMode fleet.MDMLabelsMode) (*fleet.MDMAppleDeclaration, error) {
+// Returns nil when no activation was supplied, leaving Fleet to generate one.
+func (svc *Service) validateActivation(ctx context.Context, activation []byte, configurationIdentifier, configurationType string) (*fleet.MDMAppleCustomActivation, error) {
+	if len(activation) == 0 {
+		return nil, nil
+	}
+
+	// Fleet can't validate a predicate -- the syntax is Apple's -- and an invalid
+	// one wedges the host's MDM subsystem past the point of remote recovery
+	// (Apple FB24193230). Until that's fixed, uploading an activation takes an
+	// explicit opt-in. Removing a stored activation deliberately doesn't reach
+	// here, so an operator can always undo one.
+	if !svc.config.MDM.AllowCustomActivations {
+		return nil, ctxerr.Wrap(ctx,
+			fleet.NewInvalidArgumentError("activation", ActivationsDisabledErrorMsg),
+			"custom activations are not enabled")
+	}
+
+	// Management declarations are never activated.
+	if strings.HasPrefix(configurationType, fleet.MDMAppleManagementTypePrefix) {
+		return nil, ctxerr.Wrap(ctx,
+			fleet.NewInvalidArgumentError("activation", ActivationUnsupportedManagementErrorMsg),
+			"activation supplied for a management declaration")
+	}
+
+	lic, _ := license.FromContext(ctx)
+	if lic == nil || !lic.IsPremium() {
+		return nil, ctxerr.Wrap(ctx,
+			fleet.NewLicenseErrorWithCause(fleet.DDMCustomActivationPremiumCauseMsg),
+			"checking license for DDM custom activation")
+	}
+
+	// Validate against the document the device will receive.
+	expanded, secretsUpdatedAt, err := svc.ds.ExpandEmbeddedSecretsAndUpdatedAt(ctx, string(activation))
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, fleet.NewInvalidArgumentError("activation", err.Error()), "expanding activation secrets")
+	}
+
+	// Same allowlist as the declarations they activate.
+	actVars, err := validateDeclarationFleetVariables(expanded, lic)
+	if err != nil {
+		if badReqErr, ok := errors.AsType[*fleet.BadRequestError](err); ok {
+			badReqErr.Message = "Couldn't upload activation. " + badReqErr.Message
+			err = badReqErr
+		}
+		return nil, ctxerr.Wrap(ctx, err, "validating activation Fleet variables")
+	}
+
+	if err := svc.ds.ValidateReferencedCustomHostVitals(ctx, []string{string(activation)}); err != nil {
+		if !fleet.IsInvalidReferencedCustomHostVitalsError(err) {
+			return nil, ctxerr.Wrap(ctx, err, "validating activation custom host vitals")
+		}
+		return nil, ctxerr.Wrap(ctx, fleet.NewInvalidArgumentError("activation", err.Error()))
+	}
+
+	rawAct, err := fleet.GetRawActivationValues([]byte(expanded))
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "parsing activation")
+	}
+
+	if err := rawAct.ValidateUserProvided(configurationIdentifier); err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "validating activation")
+	}
+
+	varNames := make([]fleet.FleetVarName, 0, len(actVars))
+	for _, v := range actVars {
+		varNames = append(varNames, fleet.FleetVarName(v))
+	}
+
+	// Store unexpanded; secrets are re-expanded at delivery.
+	return &fleet.MDMAppleCustomActivation{
+		Identifier:              rawAct.Identifier,
+		RawJSON:                 activation,
+		ConfigurationIdentifier: configurationIdentifier,
+		SecretsUpdatedAt:        secretsUpdatedAt,
+		FleetVariables:          varNames,
+	}, nil
+}
+
+func (svc *Service) NewMDMAppleDeclaration(ctx context.Context, teamID uint, data []byte, labelsInclude []string, name string, labelsMembershipMode fleet.MDMLabelsMode, labelsExcludeAny []string, activation []byte) (*fleet.MDMAppleDeclaration, error) {
 	if err := svc.authz.Authorize(ctx, &fleet.MDMConfigProfileAuthz{TeamID: &teamID}, fleet.ActionWrite); err != nil {
 		return nil, ctxerr.Wrap(ctx, err)
 	}
@@ -873,67 +1063,22 @@ func (svc *Service) NewMDMAppleDeclaration(ctx context.Context, teamID uint, dat
 		return nil, err
 	}
 
-	var teamName string
-	if teamID >= 1 {
-		tm, err := svc.EnterpriseOverrides.TeamByIDOrName(ctx, &teamID, nil)
-		if err != nil {
-			return nil, ctxerr.Wrap(ctx, err)
-		}
-		teamName = tm.Name
-	}
-
-	var tmID *uint
-	if teamID >= 1 {
-		tmID = &teamID
-	}
-
-	validatedLabels, err := svc.validateDeclarationLabels(ctx, labels, teamID)
+	d, varNames, teamName, err := svc.parseAndValidateAppleDeclaration(ctx, teamID, name, data, labelsInclude, labelsMembershipMode, labelsExcludeAny)
 	if err != nil {
 		return nil, err
 	}
 
-	dataWithSecrets, secretsUpdatedAt, err := svc.ds.ExpandEmbeddedSecretsAndUpdatedAt(ctx, string(data))
-	if err != nil {
-		return nil, fleet.NewInvalidArgumentError("profile", err.Error())
-	}
-
-	if err := validateDeclarationFleetVariables(dataWithSecrets); err != nil {
-		return nil, err
-	}
-
-	// TODO(roberto): Maybe GetRawDeclarationValues belongs inside NewMDMAppleDeclaration? We can refactor this in a follow up.
-	rawDecl, err := fleet.GetRawDeclarationValues([]byte(dataWithSecrets))
+	customActivation, err := svc.validateActivation(ctx, activation, d.Identifier, d.Type)
 	if err != nil {
 		return nil, err
 	}
-	// After validation, we should no longer need to keep the expanded secrets.
-
-	if !svc.config.MDM.AllowAllDeclarations {
-		if err := rawDecl.ValidateUserProvided(svc.config.MDM.EnableCustomOSUpdatesAndFileVault); err != nil {
-			return nil, err
-		}
+	if customActivation != nil {
+		d.Activation = customActivation
 	}
 
-	d := fleet.NewMDMAppleDeclaration(data, tmID, name, rawDecl.Type, rawDecl.Identifier)
-	d.SecretsUpdatedAt = secretsUpdatedAt
-
-	switch labelsMembershipMode {
-	case fleet.LabelsIncludeAny:
-		d.LabelsIncludeAny = validatedLabels
-	case fleet.LabelsExcludeAny:
-		d.LabelsExcludeAny = validatedLabels
-	default:
-		// default to include all
-		d.LabelsIncludeAll = validatedLabels
-	}
-
-	decl, err := svc.ds.NewMDMAppleDeclaration(ctx, d)
+	decl, err := svc.ds.NewMDMAppleDeclaration(ctx, d, varNames)
 	if err != nil {
 		return nil, err
-	}
-
-	if _, err := svc.ds.BulkSetPendingMDMHostProfiles(ctx, nil, nil, []string{decl.DeclarationUUID}, nil); err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "bulk set pending host declarations")
 	}
 
 	var (
@@ -957,11 +1102,655 @@ func (svc *Service) NewMDMAppleDeclaration(ctx context.Context, teamID uint, dat
 	return decl, nil
 }
 
-func validateDeclarationFleetVariables(contents string) error {
-	if variables.Contains(contents) {
-		return &fleet.BadRequestError{Message: "Fleet variables ($FLEET_VAR_*) are not currently supported in DDM profiles"}
+// parseAndValidateAppleDeclaration runs the validation shared by the create
+// and update paths. It returns the constructed declaration (DeclarationUUID
+// not yet set), the Fleet variable names it references, and the team's name
+// (empty string for no team).
+func (svc *Service) parseAndValidateAppleDeclaration(ctx context.Context, teamID uint, name string, data []byte, labelsInclude []string, labelsMembershipMode fleet.MDMLabelsMode, labelsExcludeAny []string) (*fleet.MDMAppleDeclaration, []fleet.FleetVarName, string, error) {
+	// Get license for team lookup and variable validation
+	lic, _ := license.FromContext(ctx)
+
+	var teamName string
+	if teamID > 0 {
+		if lic == nil || !lic.IsPremium() {
+			return nil, nil, "", ctxerr.Wrap(ctx, fleet.ErrMissingLicense)
+		}
+		tm, err := svc.EnterpriseOverrides.TeamByIDOrName(ctx, &teamID, nil)
+		if err != nil {
+			return nil, nil, "", ctxerr.Wrap(ctx, err)
+		}
+		teamName = tm.Name
 	}
+	if len(labelsInclude) > 0 || len(labelsExcludeAny) > 0 {
+		if lic == nil || !lic.IsPremium() {
+			return nil, nil, "", ctxerr.Wrap(ctx, fleet.NewLicenseErrorWithCause(fleet.ConfigProfileLabelScopingPremiumCauseMsg), "checking license for declaration profile label scoping")
+		}
+	}
+
+	if overlap := fleet.LabelOverlap(labelsInclude, labelsExcludeAny); overlap != "" {
+		return nil, nil, "", ctxerr.Wrap(ctx, fleet.NewInvalidArgumentError("labels", fmt.Sprintf("label %q cannot appear in both include and exclude lists", overlap)))
+	}
+	validatedIncludeLabels, excludeLabels, err := svc.validateDeclarationLabelSets(ctx, teamID, labelsInclude, labelsExcludeAny)
+	if err != nil {
+		return nil, nil, "", err
+	}
+
+	dataWithSecrets, secretsUpdatedAt, err := svc.ds.ExpandEmbeddedSecretsAndUpdatedAt(ctx, string(data))
+	if err != nil {
+		return nil, nil, "", fleet.NewInvalidArgumentError("profile", err.Error())
+	}
+
+	declVars, err := validateDeclarationFleetVariables(dataWithSecrets, lic)
+	if err != nil {
+		var badReqErr *fleet.BadRequestError
+		if errors.As(err, &badReqErr) {
+			badReqErr.Message = "Couldn't upload profile. " + badReqErr.Message
+			err = badReqErr
+		}
+		return nil, nil, "", ctxerr.Wrap(ctx, err, "validating declaration Fleet variables")
+	}
+
+	// Validate custom host vital references (top-level $FLEET_HOST_VITAL_<id>).
+	if err := svc.ds.ValidateReferencedCustomHostVitals(ctx, []string{string(data)}); err != nil {
+		if !fleet.IsInvalidReferencedCustomHostVitalsError(err) {
+			return nil, nil, "", ctxerr.Wrap(ctx, err, "validating referenced custom host vitals")
+		}
+		return nil, nil, "", fleet.NewInvalidArgumentError("profile", err.Error())
+	}
+
+	varNames := make([]fleet.FleetVarName, 0, len(declVars))
+	for _, v := range declVars {
+		varNames = append(varNames, fleet.FleetVarName(v))
+	}
+
+	// TODO(roberto): Maybe GetRawDeclarationValues belongs inside NewMDMAppleDeclaration? We can refactor this in a follow up.
+	rawDecl, err := fleet.GetRawDeclarationValues([]byte(dataWithSecrets))
+	if err != nil {
+		return nil, nil, "", err
+	}
+	// After validation, we should no longer need to keep the expanded secrets.
+
+	if !svc.config.MDM.AllowAllDeclarations {
+		if err := rawDecl.ValidateUserProvided(); err != nil {
+			return nil, nil, "", err
+		}
+	}
+
+	if err := rawDecl.ValidateScope(); err != nil {
+		return nil, nil, "", err
+	}
+
+	decl := fleet.NewMDMAppleDeclaration(data, &teamID, name, rawDecl.Type, rawDecl.Identifier)
+	decl.SecretsUpdatedAt = secretsUpdatedAt
+	// PayloadScope is a Fleet extension (not part of Apple's DDM schema). The
+	// parsed value drives the scope column; the key stays in the stored JSON and
+	// is stripped only at delivery time so it isn't sent to the device.
+	decl.Scope = rawDecl.ScopeOrDefault()
+
+	switch labelsMembershipMode {
+	case fleet.LabelsIncludeAny:
+		decl.LabelsIncludeAny = validatedIncludeLabels
+	default:
+		// default to include all
+		decl.LabelsIncludeAll = validatedIncludeLabels
+	}
+	decl.LabelsExcludeAny = excludeLabels
+
+	if err := svc.handleDeclarationSoftwareUpdate(ctx, rawDecl, teamID); err != nil {
+		return nil, nil, "", ctxerr.Wrap(ctx, err, "handling declaration software update")
+	}
+
+	assetRefs, err := svc.handleDeclarationAssetReferences(ctx, decl, nil)
+	if err != nil {
+		return nil, nil, "", ctxerr.Wrap(ctx, err, "handling declaration asset references")
+	}
+	decl.AssetReferenceUUIDs = assetRefs
+
+	return decl, varNames, teamName, nil
+}
+
+// updateMDMAppleDeclaration implements the Apple DDM declaration branch of
+// UpdateMDMConfigProfile.
+//
+// No explicit "mark pending" call is needed here:
+// mdm_apple_declarations.token is a MySQL generated column derived from
+// raw_json, so the ReconcileAppleDeclarations cron picks up a content change
+// on its own.
+func (svc *Service) updateMDMAppleDeclaration(ctx context.Context, profileUUID string, profile []byte, labelsInclude []string, labelsMembershipMode fleet.MDMLabelsMode, labelsExcludeAny []string, activation optjson.Slice[byte]) error {
+	// first we perform a basic authz check
+	if err := svc.authz.Authorize(ctx, &fleet.Team{}, fleet.ActionRead); err != nil {
+		return ctxerr.Wrap(ctx, err)
+	}
+
+	existing, err := svc.ds.GetMDMAppleDeclaration(ctx, profileUUID)
+	if err != nil {
+		return ctxerr.Wrap(ctx, err)
+	}
+
+	teamID, teamName, err := svc.resolveProfileTeam(ctx, existing.TeamID)
+	if err != nil {
+		return err
+	}
+
+	// now we can do a specific authz check based on team id of the declaration before we update it
+	if err := svc.authz.Authorize(ctx, &fleet.MDMConfigProfileAuthz{TeamID: existing.TeamID}, fleet.ActionWrite); err != nil {
+		return ctxerr.Wrap(ctx, err)
+	}
+
+	// prevent editing declarations that are managed by Fleet
+	fleetNames := mdm_types.FleetReservedProfileNames()
+	if _, ok := fleetNames[existing.Name]; ok {
+		return &fleet.BadRequestError{
+			Message:     "profiles managed by Fleet can't be edited using this endpoint.",
+			InternalErr: fmt.Errorf("editing declaration %s for team %s not allowed because it's managed by Fleet", existing.Name, teamName),
+		}
+	}
+
+	var (
+		decl     *fleet.MDMAppleDeclaration
+		varNames []fleet.FleetVarName
+	)
+	if len(profile) > 0 {
+		decl, varNames, _, err = svc.parseAndValidateAppleDeclaration(ctx, teamID, existing.Name, profile, labelsInclude, labelsMembershipMode, labelsExcludeAny)
+		if err != nil {
+			return err
+		}
+		if decl.Identifier != existing.Identifier {
+			return fleet.NewInvalidArgumentError("profile",
+				"The new profile's Identifier must match the existing profile's.").WithStatus(http.StatusBadRequest)
+		}
+	} else {
+		// no new content -- only labels are being changed.
+		if err := svc.checkLabelsOnlyProfileUpdate(ctx, labelsInclude, labelsExcludeAny); err != nil {
+			return err
+		}
+		includeLabels, excludeLabels, err := svc.validateDeclarationLabelSets(ctx, teamID, labelsInclude, labelsExcludeAny)
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "validating labels")
+		}
+		// SetOrUpdateMDMAppleDeclaration always rewrites the declaration's
+		// variable associations from varNames, so re-derive them from the
+		// unchanged content the same way the create path does -- otherwise a
+		// labels-only edit would wipe them while the content still uses them.
+		expanded, _, err := svc.ds.ExpandEmbeddedSecretsAndUpdatedAt(ctx, string(existing.RawJSON))
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "expanding secrets for existing declaration")
+		}
+		for _, v := range variables.Find(expanded) {
+			varNames = append(varNames, fleet.FleetVarName(v))
+		}
+		decl = &fleet.MDMAppleDeclaration{
+			Name:             existing.Name,
+			Identifier:       existing.Identifier,
+			TeamID:           existing.TeamID,
+			RawJSON:          existing.RawJSON,
+			SecretsUpdatedAt: existing.SecretsUpdatedAt,
+			// the upsert writes scope unconditionally, so the unchanged
+			// content's scope must be carried over or it would be cleared
+			Scope: existing.Scope,
+		}
+		switch labelsMembershipMode {
+		case fleet.LabelsIncludeAll:
+			decl.LabelsIncludeAll = includeLabels
+		case fleet.LabelsIncludeAny:
+			decl.LabelsIncludeAny = includeLabels
+		}
+		decl.LabelsExcludeAny = excludeLabels
+	}
+
+	// Three states: an edit that doesn't mention the activation keeps the stored
+	// one, a null one removes it, and content replaces it. The datastore write
+	// is a full replace, so keeping it has to be said explicitly.
+	activationAction := fleet.MDMAppleActivationKeep
+	if activation.Set {
+		activationAction = fleet.MDMAppleActivationApply
+		if activation.Valid {
+			if decl.Type == "" {
+				// content is unchanged, so recover Type for the management check
+				rawDecl, err := fleet.GetRawDeclarationValues(decl.RawJSON)
+				if err != nil {
+					return ctxerr.Wrap(ctx, err, "parsing existing declaration")
+				}
+				decl.Type = rawDecl.Type
+			}
+			customActivation, err := svc.validateActivation(ctx, activation.Value, decl.Identifier, decl.Type)
+			if err != nil {
+				return err
+			}
+			decl.Activation = customActivation
+		}
+	}
+
+	if _, err := svc.ds.SetOrUpdateMDMAppleDeclaration(ctx, decl, varNames, activationAction); err != nil {
+		if _, ok := errors.AsType[endpointer.ExistsErrorInterface](err); ok {
+			err = fleet.NewInvalidArgumentError("profile", "Couldn't edit. A configuration profile with this identifier already exists.").WithStatus(http.StatusConflict)
+		}
+		return ctxerr.Wrap(ctx, err)
+	}
+
+	var (
+		actTeamID   *uint
+		actTeamName *string
+	)
+	if teamID > 0 {
+		actTeamID = &teamID
+		actTeamName = &teamName
+	}
+	if err := svc.NewActivity(
+		ctx, authz.UserFromContext(ctx), &fleet.ActivityTypeEditedDeclarationProfile{
+			TeamID:            actTeamID,
+			TeamName:          actTeamName,
+			ProfileName:       decl.Name,
+			ProfileIdentifier: decl.Identifier,
+		}); err != nil {
+		return ctxerr.Wrap(ctx, err, "logging activity for edit mdm apple declaration")
+	}
+
 	return nil
+}
+
+func (svc *Service) handleDeclarationAssetReferences(ctx context.Context, decl *fleet.MDMAppleDeclaration, assets []*fleet.DDMAsset) ([]string, error) {
+	assetRefs, err := findAssetReferences(string(decl.RawJSON))
+	if err != nil {
+		return nil, err
+	}
+
+	if len(assetRefs) == 0 {
+		return nil, nil
+	}
+
+	if assets == nil {
+		// List all assets for the given team
+		assets, err = svc.ds.ListAppleDDMAssets(ctx, decl.TeamID)
+		if err != nil {
+			return nil, ctxerr.Wrap(ctx, err, "listing DDM assets")
+		}
+	}
+
+	assetsByIdentifier := make(map[string]string, len(assets))
+	for _, asset := range assets {
+		assetsByIdentifier[asset.Identifier] = asset.AssetUUID
+	}
+
+	assetReferenceUUIDs := make([]string, 0, len(assetRefs))
+	for _, ref := range assetRefs {
+		assetUUID, ok := assetsByIdentifier[ref]
+		if !ok {
+			return nil, &fleet.BadRequestError{
+				Message: fmt.Sprintf("Couldn't add. Asset (%q) doesn't exist. Make sure the asset is uploaded in OS Settings > Configuration profiles > Assets before referencing it in a profile.", ref),
+			}
+		}
+		assetReferenceUUIDs = append(assetReferenceUUIDs, assetUUID)
+	}
+
+	return assetReferenceUUIDs, nil
+}
+
+// findAssetReferences walks the raw declaration JSON recursively to find any DDM Asset references
+// it returns a list of asset identifiers, or an error.
+func findAssetReferences(contents string) ([]string, error) {
+	var root map[string]any
+	if err := json.Unmarshal([]byte(contents), &root); err != nil {
+		return nil, &fleet.BadRequestError{
+			Message: "invalid declaration JSON",
+		}
+	}
+
+	payload, ok := root["Payload"]
+	if !ok {
+		return nil, &fleet.BadRequestError{
+			Message: `declaration is missing required "Payload" key`,
+		}
+	}
+
+	refs := make([]string, 0)
+	seen := make(map[string]struct{})
+
+	var walk func(node any) error
+	walk = func(node any) error {
+		switch v := node.(type) {
+		case map[string]any:
+			for key, child := range v {
+				if strings.HasSuffix(key, "AssetReference") {
+					ref, ok := child.(string)
+					if !ok || ref == "" {
+						return &fleet.BadRequestError{
+							Message: fmt.Sprintf(`expected "%s" to be a non-empty string`, key),
+						}
+					}
+					if _, exists := seen[ref]; !exists {
+						seen[ref] = struct{}{}
+						refs = append(refs, ref)
+					}
+				}
+				if err := walk(child); err != nil {
+					return err
+				}
+			}
+		case []any:
+			for _, item := range v {
+				if err := walk(item); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
+	if err := walk(payload); err != nil {
+		return nil, err
+	}
+
+	return refs, nil
+}
+
+func validateDeclarationFleetVariables(contents string, lic license.LicenseChecker) ([]string, error) {
+	fleetVars := variables.Find(contents)
+	if len(fleetVars) == 0 {
+		return nil, nil
+	}
+
+	// Check premium license
+	if lic == nil || !lic.IsPremium() {
+		return nil, fleet.ErrMissingLicense
+	}
+
+	// Validate against allowed list
+	for _, fleetVar := range fleetVars {
+		if !slices.Contains(fleetVarsSupportedInDDMDeclarations, fleet.FleetVarName(fleetVar)) {
+			return nil, &fleet.BadRequestError{
+				Message: fmt.Sprintf("Fleet variable $FLEET_VAR_%s is not supported in DDM profiles.", fleetVar),
+			}
+		}
+	}
+
+	return fleetVars, nil
+}
+
+// handleDeclarationSoftwareUpdate validates the preconditions for an OS-update
+// (software update) declaration: premium license and OS updates not already
+// configured via settings. The "already exists" check and tracking-table insert
+// happen atomically in ds.NewMDMAppleDeclaration.
+func (svc *Service) handleDeclarationSoftwareUpdate(
+	ctx context.Context,
+	rawDecl *fleet.MDMAppleRawDeclaration,
+	teamID uint,
+) error {
+	if rawDecl.Type != apple_mdm.DeclarationTypeSoftwareUpdate {
+		return nil
+	}
+
+	lic, _ := license.FromContext(ctx)
+	if lic == nil || !lic.IsPremium() {
+		return fleet.ErrMissingLicense
+	}
+
+	osUpdatesConfigured, err := isAppleOSUpdatesConfigured(ctx, teamID, svc)
+	if err != nil {
+		return err
+	}
+	if osUpdatesConfigured {
+		return &fleet.BadRequestError{
+			Message: fleet.OSUpdatesAlreadyConfiguredErrorMessage,
+		}
+	}
+
+	return nil
+}
+
+func isAppleOSUpdatesConfigured(ctx context.Context, teamID uint, svc *Service) (bool, error) {
+	type AppleOSUpdates struct {
+		MacOSUpdates  fleet.AppleOSUpdateSettings
+		IOSUpdates    fleet.AppleOSUpdateSettings
+		IPadOSUpdates fleet.AppleOSUpdateSettings
+	}
+
+	// Get the relevant team-config, to check for OS updates being configured
+	var appleOSUpdates AppleOSUpdates
+	if teamID > 0 {
+		teamConfig, err := svc.ds.TeamMDMConfig(ctx, teamID)
+		if err != nil {
+			return false, ctxerr.Wrap(ctx, err, "getting team config")
+		}
+		appleOSUpdates = AppleOSUpdates{
+			MacOSUpdates:  teamConfig.MacOSUpdates,
+			IOSUpdates:    teamConfig.IOSUpdates,
+			IPadOSUpdates: teamConfig.IPadOSUpdates,
+		}
+	} else {
+		appConfig, err := svc.ds.AppConfig(ctx)
+		if err != nil {
+			return false, ctxerr.Wrap(ctx, err, "getting app config")
+		}
+		appleOSUpdates = AppleOSUpdates{
+			MacOSUpdates:  appConfig.MDM.MacOSUpdates,
+			IOSUpdates:    appConfig.MDM.IOSUpdates,
+			IPadOSUpdates: appConfig.MDM.IPadOSUpdates,
+		}
+	}
+
+	if appleOSUpdates.MacOSUpdates.Configured() || appleOSUpdates.IOSUpdates.Configured() || appleOSUpdates.IPadOSUpdates.Configured() {
+		return true, nil
+	}
+	return false, nil
+}
+
+// jsonEscapeString returns the JSON-escaped interior of a string value
+// (without surrounding quotes), suitable for embedding inside a JSON string.
+func jsonEscapeString(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		// json.Marshal on a string should never fail, but return the
+		// original string as a fallback.
+		return s
+	}
+	// strip surrounding quotes
+	return string(b[1 : len(b)-1])
+}
+
+type notReadyYetError struct {
+	Message string
+}
+
+func (e notReadyYetError) Error() string {
+	return e.Message
+}
+
+// replaceDeclarationFleetVariables replaces $FLEET_VAR_* placeholders in a
+// DDM declaration with host-specific values. Values are JSON-string-escaped
+// so they are safe inside JSON string fields.
+func (svc *MDMAppleDDMService) replaceDeclarationFleetVariables(
+	ctx context.Context, contents string, hostUUID string,
+) (string, error) {
+	// variables.Find only detects $FLEET_VAR_; custom host vitals are a separate
+	// top-level prefix, so gate on both so a declaration referencing only custom
+	// host vitals is still expanded.
+	fleetVars := variables.Find(contents)
+	hasHostVitals := len(fleet.FindCustomHostVitalIDs(contents)) > 0
+	if len(fleetVars) == 0 && !hasHostVitals {
+		return contents, nil
+	}
+
+	var hostLite fleet.Host
+	hostLite.UUID = hostUUID
+	hostHydrated := false
+
+	hydrateHost := func() error {
+		if hostHydrated {
+			return nil
+		}
+		h, ok, err := profiles.HydrateHost(ctx, svc.ds, hostLite, func(n int) error {
+			return fmt.Errorf("unexpected number of hosts (%d) for UUID %s", n, hostUUID)
+		})
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("host not found for UUID %s", hostUUID)
+		}
+		hostLite = h
+		hostHydrated = true
+		return nil
+	}
+
+	var idpUser *fleet.HostEndUser
+	resolveIDPUser := func(varName string) (*fleet.HostEndUser, error) {
+		if idpUser != nil {
+			return idpUser, nil
+		}
+		if err := hydrateHost(); err != nil {
+			return nil, err
+		}
+		users, err := fleet.GetEndUsers(ctx, svc.ds, hostLite.ID)
+		if err != nil {
+			return nil, fmt.Errorf("get end users for host: %w", err)
+		}
+		if len(users) == 0 || users[0].IdpUserName == "" {
+			return nil, fmt.Errorf("There is no IdP username for this host. Fleet couldn't populate $FLEET_VAR_%s.", varName)
+		}
+		idpUser = &users[0]
+		return idpUser, nil
+	}
+
+	var osUpdateHost *fleet.AppleSoftwareUpdateHost
+	resolveOSUpdateHost := func() (*fleet.AppleSoftwareUpdateHost, error) {
+		if osUpdateHost != nil {
+			return osUpdateHost, nil
+		}
+
+		osHost, err := svc.ds.GetAppleOSUpdateHostByUUID(ctx, hostUUID)
+		if err != nil {
+			return nil, fmt.Errorf("get Apple OS update host by UUID: %w", err)
+		}
+		if osHost == nil {
+			return nil, fmt.Errorf("Apple OS update host not found for UUID %s", hostUUID)
+		}
+
+		osUpdateHost = osHost
+		return osUpdateHost, nil
+	}
+
+	for _, fleetVar := range fleetVars {
+		var value string
+		switch fleet.FleetVarName(fleetVar) {
+		case fleet.FleetVarHostUUID:
+			value = hostUUID
+
+		case fleet.FleetVarHostHardwareSerial:
+			if err := hydrateHost(); err != nil {
+				return "", err
+			}
+			if strings.TrimSpace(hostLite.HardwareSerial) == "" {
+				return "", fmt.Errorf("There is no serial number for this host. Fleet couldn't populate $FLEET_VAR_%s.", fleetVar)
+			}
+			value = hostLite.HardwareSerial
+
+		case fleet.FleetVarHostPlatform:
+			if err := hydrateHost(); err != nil {
+				return "", err
+			}
+			value = hostLite.Platform
+			if value == "darwin" {
+				value = "macos"
+			}
+
+		case fleet.FleetVarHostEndUserIDPUsername:
+			user, err := resolveIDPUser(fleetVar)
+			if err != nil {
+				return "", err
+			}
+			value = user.IdpUserName
+
+		case fleet.FleetVarHostEndUserIDPUsernameLocalPart:
+			user, err := resolveIDPUser(fleetVar)
+			if err != nil {
+				return "", err
+			}
+			local, _, _ := strings.Cut(user.IdpUserName, "@")
+			value = local
+
+		case fleet.FleetVarHostEndUserIDPGroups:
+			user, err := resolveIDPUser(fleetVar)
+			if err != nil {
+				return "", err
+			}
+			if len(user.IdpGroups) == 0 {
+				return "", fmt.Errorf("There are no IdP groups for this host. Fleet couldn't populate $FLEET_VAR_%s.", fleetVar)
+			}
+			value = strings.Join(user.IdpGroups, ",")
+
+		case fleet.FleetVarHostEndUserIDPDepartment:
+			user, err := resolveIDPUser(fleetVar)
+			if err != nil {
+				return "", err
+			}
+			if user.Department == "" {
+				return "", fmt.Errorf("There is no IdP department for this host. Fleet couldn't populate $FLEET_VAR_%s.", fleetVar)
+			}
+			value = user.Department
+
+		case fleet.FleetVarHostEndUserIDPFullname:
+			user, err := resolveIDPUser(fleetVar)
+			if err != nil {
+				return "", err
+			}
+			if strings.TrimSpace(user.IdpFullName) == "" {
+				return "", fmt.Errorf("There is no IdP full name for this host. Fleet couldn't populate $FLEET_VAR_%s.", fleetVar)
+			}
+			value = strings.TrimSpace(user.IdpFullName)
+		case fleet.FleetVarHostTargetOSDeadline, fleet.FleetVarHostTargetOSVersion:
+			osHost, err := resolveOSUpdateHost()
+			if err != nil {
+				return "", err
+			}
+			if osHost.TargetOSVersion == "" || osHost.TargetDeadline == nil {
+				return "", notReadyYetError{
+					Message: "The host's target OS version and deadline are not yet available, but will be within 1 hour. Fleet will automatically resend this profile once available.",
+				}
+			}
+
+			if fleet.FleetVarName(fleetVar) == fleet.FleetVarHostTargetOSVersion {
+				value = osHost.TargetOSVersion
+			} else {
+				value = osHost.TargetDeadline.Format(time.DateOnly)
+			}
+		default:
+			return "", fmt.Errorf("Fleet variable $FLEET_VAR_%s is not supported in DDM declarations.", fleetVar)
+		}
+
+		contents = variables.Replace(contents, fleetVar, jsonEscapeString(value))
+	}
+
+	// Expand custom host vitals last, after the Fleet-var pass. variables.Replace
+	// is a blind global string replace, so expanding vitals earlier would let a
+	// vital value that happens to contain a literal $FLEET_VAR_<name> be rewritten
+	// by that pass. Doing it last makes the vital value the terminal substitution.
+	// On a missing/empty value the caller marks the declaration failed with this
+	// error's Detail.
+	if hasHostVitals {
+		if err := hydrateHost(); err != nil {
+			return "", err
+		}
+		expanded, err := svc.ds.ExpandCustomHostVitals(ctx, hostLite.ID, contents)
+		if err != nil {
+			return "", err
+		}
+		contents = expanded
+	}
+
+	return contents, nil
+}
+
+// markDeclarationFailed marks a DDM declaration as failed for a specific host.
+func (svc *MDMAppleDDMService) markDeclarationFailed(ctx context.Context, hostUUID string, declarationUUID string, detail string) error {
+	status := fleet.MDMDeliveryFailed
+	return svc.ds.SetHostMDMAppleDeclarationStatus(ctx, hostUUID, declarationUUID, &status, detail, nil)
+}
+
+// markDeclarationPending marks a DDM declaration as pending for a specific host, and relies on other factors (such as variable bump) to trigger a resend.
+func (svc *MDMAppleDDMService) markDeclarationPending(ctx context.Context, hostUUID string, declarationUUID string, detail string) error {
+	status := fleet.MDMDeliveryPending
+	return svc.ds.SetHostMDMAppleDeclarationStatus(ctx, hostUUID, declarationUUID, &status, detail, nil)
 }
 
 func (svc *Service) batchValidateDeclarationLabels(ctx context.Context, labelNames []string, teamID uint) (map[string]fleet.ConfigurationProfileLabel, error) {
@@ -992,19 +1781,6 @@ func (svc *Service) batchValidateDeclarationLabels(ctx context.Context, labelNam
 		}
 	}
 	return profLabels, nil
-}
-
-func (svc *Service) validateDeclarationLabels(ctx context.Context, labelNames []string, teamID uint) ([]fleet.ConfigurationProfileLabel, error) {
-	labelMap, err := svc.batchValidateDeclarationLabels(ctx, labelNames, teamID)
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "validating declaration labels")
-	}
-
-	var declLabels []fleet.ConfigurationProfileLabel
-	for _, label := range labelMap {
-		declLabels = append(declLabels, label)
-	}
-	return declLabels, nil
 }
 
 type listMDMAppleConfigProfilesRequest struct {
@@ -1099,7 +1875,7 @@ func getMDMAppleConfigProfileEndpoint(ctx context.Context, request interface{}, 
 }
 
 func (svc *Service) GetMDMAppleConfigProfileByDeprecatedID(ctx context.Context, profileID uint) (*fleet.MDMAppleConfigProfile, error) {
-	// first we perform a perform basic authz check
+	// first we perform a basic authz check
 	if err := svc.authz.Authorize(ctx, &fleet.Team{}, fleet.ActionRead); err != nil {
 		return nil, err
 	}
@@ -1117,7 +1893,7 @@ func (svc *Service) GetMDMAppleConfigProfileByDeprecatedID(ctx context.Context, 
 }
 
 func (svc *Service) GetMDMAppleConfigProfile(ctx context.Context, profileUUID string) (*fleet.MDMAppleConfigProfile, error) {
-	// first we perform a perform basic authz check
+	// first we perform a basic authz check
 	if err := svc.authz.Authorize(ctx, &fleet.Team{}, fleet.ActionRead); err != nil {
 		return nil, err
 	}
@@ -1136,7 +1912,7 @@ func (svc *Service) GetMDMAppleConfigProfile(ctx context.Context, profileUUID st
 }
 
 func (svc *Service) GetMDMAppleDeclaration(ctx context.Context, profileUUID string) (*fleet.MDMAppleDeclaration, error) {
-	// first we perform a perform basic authz check
+	// first we perform a basic authz check
 	if err := svc.authz.Authorize(ctx, &fleet.Team{}, fleet.ActionRead); err != nil {
 		return nil, err
 	}
@@ -1174,8 +1950,102 @@ func deleteMDMAppleConfigProfileEndpoint(ctx context.Context, request interface{
 	return &deleteMDMAppleConfigProfileResponse{}, nil
 }
 
+// updateMDMAppleConfigProfile implements the Apple .mobileconfig branch of
+// UpdateMDMConfigProfile.
+func (svc *Service) updateMDMAppleConfigProfile(ctx context.Context, profileUUID string, profile []byte, labelsInclude []string, labelsMembershipMode fleet.MDMLabelsMode, labelsExcludeAny []string) error {
+	// first we perform a basic authz check
+	if err := svc.authz.Authorize(ctx, &fleet.Team{}, fleet.ActionRead); err != nil {
+		return ctxerr.Wrap(ctx, err)
+	}
+
+	existing, err := svc.ds.GetMDMAppleConfigProfile(ctx, profileUUID)
+	if err != nil {
+		return ctxerr.Wrap(ctx, err)
+	}
+
+	teamID, teamName, err := svc.resolveProfileTeam(ctx, existing.TeamID)
+	if err != nil {
+		return err
+	}
+
+	// now we can do a specific authz check based on team id of profile before we update it
+	if err := svc.authz.Authorize(ctx, &fleet.MDMConfigProfileAuthz{TeamID: existing.TeamID}, fleet.ActionWrite); err != nil {
+		return ctxerr.Wrap(ctx, err)
+	}
+
+	// prevent editing profiles that are managed by Fleet
+	if _, ok := mobileconfig.FleetPayloadIdentifiers()[existing.Identifier]; ok {
+		return &fleet.BadRequestError{
+			Message:     "profiles managed by Fleet can't be edited using this endpoint.",
+			InternalErr: fmt.Errorf("editing profile %s for team %s not allowed because it's managed by Fleet", existing.Identifier, teamName),
+		}
+	}
+
+	var cp *fleet.MDMAppleConfigProfile
+	var varNames []fleet.FleetVarName
+	if len(profile) > 0 {
+		cp, varNames, _, err = svc.parseAndValidateAppleConfigProfile(ctx, teamID, profile, labelsInclude, labelsMembershipMode, labelsExcludeAny)
+		if err != nil {
+			return err
+		}
+		if cp.Identifier != existing.Identifier {
+			return fleet.NewInvalidArgumentError("profile",
+				"The new profile's PayloadIdentifier must match the existing profile's.").WithStatus(http.StatusBadRequest)
+		}
+	} else {
+		// no new content -- only labels are being changed.
+		if err := svc.checkLabelsOnlyProfileUpdate(ctx, labelsInclude, labelsExcludeAny); err != nil {
+			return err
+		}
+		includeLabels, excludeLabels, err := svc.validateProfileLabelSets(ctx, &teamID, labelsInclude, labelsExcludeAny)
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "validating labels")
+		}
+		cp = &fleet.MDMAppleConfigProfile{
+			Identifier: existing.Identifier,
+			Name:       existing.Name,
+			TeamID:     existing.TeamID,
+		}
+		switch labelsMembershipMode {
+		case fleet.LabelsIncludeAll:
+			cp.LabelsIncludeAll = includeLabels
+		case fleet.LabelsIncludeAny:
+			cp.LabelsIncludeAny = includeLabels
+		}
+		cp.LabelsExcludeAny = excludeLabels
+	}
+	cp.ProfileUUID = profileUUID
+
+	if _, err := svc.ds.UpdateMDMAppleConfigProfile(ctx, *cp, varNames); err != nil {
+		if _, ok := errors.AsType[endpointer.ExistsErrorInterface](err); ok {
+			err = fleet.NewInvalidArgumentError("profile", SameProfileNameUploadErrorMsg).WithStatus(http.StatusConflict)
+		}
+		return ctxerr.Wrap(ctx, err)
+	}
+
+	var (
+		actTeamID   *uint
+		actTeamName *string
+	)
+	if teamID > 0 {
+		actTeamID = &teamID
+		actTeamName = &teamName
+	}
+	if err := svc.NewActivity(
+		ctx, authz.UserFromContext(ctx), &fleet.ActivityTypeEditedMacosProfile{
+			TeamID:            actTeamID,
+			TeamName:          actTeamName,
+			ProfileName:       cp.Name,
+			ProfileIdentifier: cp.Identifier,
+		}); err != nil {
+		return ctxerr.Wrap(ctx, err, "logging activity for edit mdm apple config profile")
+	}
+
+	return nil
+}
+
 func (svc *Service) DeleteMDMAppleConfigProfileByDeprecatedID(ctx context.Context, profileID uint) error {
-	// first we perform a perform basic authz check
+	// first we perform a basic authz check
 	if err := svc.authz.Authorize(ctx, &fleet.Team{}, fleet.ActionRead); err != nil {
 		return ctxerr.Wrap(ctx, err)
 	}
@@ -1194,7 +2064,7 @@ func (svc *Service) DeleteMDMAppleConfigProfileByDeprecatedID(ctx context.Contex
 }
 
 func (svc *Service) DeleteMDMAppleConfigProfile(ctx context.Context, profileUUID string) error {
-	// first we perform a perform basic authz check
+	// first we perform a basic authz check
 	if err := svc.authz.Authorize(ctx, &fleet.Team{}, fleet.ActionRead); err != nil {
 		return ctxerr.Wrap(ctx, err)
 	}
@@ -1204,14 +2074,9 @@ func (svc *Service) DeleteMDMAppleConfigProfile(ctx context.Context, profileUUID
 		return ctxerr.Wrap(ctx, err)
 	}
 
-	var teamName string
-	teamID := *cp.TeamID
-	if teamID >= 1 {
-		tm, err := svc.EnterpriseOverrides.TeamByIDOrName(ctx, &teamID, nil)
-		if err != nil {
-			return ctxerr.Wrap(ctx, err)
-		}
-		teamName = tm.Name
+	teamID, teamName, err := svc.resolveProfileTeam(ctx, cp.TeamID)
+	if err != nil {
+		return err
 	}
 
 	// now we can do a specific authz check based on team id of profile before we delete the profile
@@ -1255,7 +2120,7 @@ func (svc *Service) DeleteMDMAppleConfigProfile(ctx context.Context, profileUUID
 }
 
 func (svc *Service) DeleteMDMAppleDeclaration(ctx context.Context, declUUID string) error {
-	// first we perform a perform basic authz check
+	// first we perform a basic authz check
 	if err := svc.authz.Authorize(ctx, &fleet.Team{}, fleet.ActionRead); err != nil {
 		return ctxerr.Wrap(ctx, err)
 	}
@@ -1267,6 +2132,14 @@ func (svc *Service) DeleteMDMAppleDeclaration(ctx context.Context, declUUID stri
 
 	// Check if the declaration contains a secret variable. If it does, this means that the declaration
 	// has been provided by the user and can be deleted. We don't need to validate that it is a Fleet declaration.
+	//
+	// Whether a declaration is Fleet-managed (and therefore protected from
+	// deletion through this endpoint) is determined solely by its reserved name.
+	// We deliberately do NOT run the upload-time validator (ValidateUserProvided)
+	// here: any declaration already stored was accepted at upload time, so
+	// re-validating it on delete would trap user-uploaded declarations whenever
+	// the accepted set later shrinks (a config flag is toggled, or a type is
+	// added to ForbiddenDeclTypes). See https://github.com/fleetdm/fleet/issues/47535.
 	hasSecretVariable := len(fleet.ContainsPrefixVars(string(decl.RawJSON), fleet.ServerSecretPrefix)) > 0
 	if !hasSecretVariable {
 		if _, ok := mdm_types.FleetReservedProfileNames()[decl.Name]; ok {
@@ -1275,31 +2148,11 @@ func (svc *Service) DeleteMDMAppleDeclaration(ctx context.Context, declUUID stri
 				InternalErr: fmt.Errorf("deleting profile %s is not allowed because it's managed by Fleet", decl.Name),
 			}
 		}
-
-		// TODO: refine our approach to deleting restricted/forbidden types of declarations so that we
-		// can check that Fleet-managed aren't being deleted; this can be addressed once we add support
-		// for more types of declarations
-		var d fleet.MDMAppleRawDeclaration
-		if err := json.Unmarshal(decl.RawJSON, &d); err != nil {
-			return ctxerr.Wrap(ctx, err, "unmarshalling declaration")
-		}
-
-		// skip declaration validation if the allow all declarations flag is set.
-		if !svc.config.MDM.AllowAllDeclarations {
-			if err := d.ValidateUserProvided(svc.config.MDM.EnableCustomOSUpdatesAndFileVault); err != nil {
-				return ctxerr.Wrap(ctx, &fleet.BadRequestError{Message: err.Error()})
-			}
-		}
 	}
 
-	var teamName string
-	teamID := *decl.TeamID
-	if teamID >= 1 {
-		tm, err := svc.EnterpriseOverrides.TeamByIDOrName(ctx, &teamID, nil)
-		if err != nil {
-			return ctxerr.Wrap(ctx, err)
-		}
-		teamName = tm.Name
+	teamID, teamName, err := svc.resolveProfileTeam(ctx, decl.TeamID)
+	if err != nil {
+		return err
 	}
 
 	// now we can do a specific authz check based on team id of profile before we delete the profile
@@ -1681,6 +2534,14 @@ func (svc *Service) EnqueueMDMAppleCommand(
 		return nil, newNotFoundError()
 	}
 
+	// Use UUIDs from the resolved hosts so the enqueue and activity creation
+	// operate on the same validated set, not the raw (potentially duplicate or
+	// unknown) request input.
+	resolvedUUIDs := make([]string, len(hosts))
+	for i, h := range hosts {
+		resolvedUUIDs[i] = h.UUID
+	}
+
 	// using a padding agnostic decoder because we released this using
 	// base64.RawStdEncoding, but it was causing problems as many standard
 	// libraries default to padded strings. We're now supporting both for
@@ -1697,7 +2558,35 @@ func (svc *Service) EnqueueMDMAppleCommand(
 		return nil, err
 	}
 
-	return svc.enqueueAppleMDMCommand(ctx, rawXMLCmd, deviceIDs)
+	result, err = svc.enqueueAppleMDMCommand(ctx, rawXMLCmd, resolvedUUIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	failedUUIDs := make(map[string]struct{}, len(result.FailedUUIDs))
+	for _, uuid := range result.FailedUUIDs {
+		failedUUIDs[uuid] = struct{}{}
+	}
+	for _, h := range hosts {
+		if _, failed := failedUUIDs[h.UUID]; failed {
+			continue
+		}
+		if err := svc.NewActivity(ctx, authz.UserFromContext(ctx), &fleet.ActivityTypeRanCustomMDMCommand{
+			HostID:          h.ID,
+			HostDisplayName: h.DisplayName(),
+			HostUUID:        h.UUID,
+			CommandUUID:     result.CommandUUID,
+			RequestType:     result.RequestType,
+			Platform:        h.FleetPlatform(),
+		}); err != nil {
+			// Activity logging is best-effort: the command was already enqueued
+			// successfully, so returning an error here could cause clients to retry
+			// and send duplicate MDM commands to devices.
+			svc.logger.ErrorContext(ctx, "failed to log activity for ran custom mdm command", "err", err, "host_uuid", h.UUID)
+		}
+	}
+
+	return result, nil
 }
 
 type mdmAppleEnrollRequest struct {
@@ -1747,12 +2636,15 @@ func (mdmAppleEnrollRequest) DecodeRequest(ctx context.Context, r *http.Request)
 
 	if di != "" {
 		// parse the base64 encoded deviceinfo
-		parsed, err := apple_mdm.ParseDeviceinfo(di, false) // FIXME: use verify=true when we have better parsing for various Apple certs (https://github.com/fleetdm/fleet/issues/20879)
+		parsed, p7, err := apple_mdm.ParseDeviceinfo(di)
 		if err != nil {
 			return nil, &fleet.BadRequestError{
 				Message:     "unable to parse deviceinfo header",
 				InternalErr: err,
 			}
+		}
+		if err := verifyMachineInfoSignature(ctx, p7, parsed, "apple_enroll_deviceinfo"); err != nil {
+			return nil, err
 		}
 		decoded.MachineInfo = parsed
 	}
@@ -1768,17 +2660,60 @@ func (mdmAppleEnrollRequest) DecodeRequest(ctx context.Context, r *http.Request)
 			}
 		}
 
-		// FIXME: use verify=true when we have better parsing for various Apple certs (https://github.com/fleetdm/fleet/issues/20879)
-		decoded.MachineInfo, err = apple_mdm.ParseMachineInfoFromPKCS7(body, false)
+		parsed, p7, err := apple_mdm.ParseMachineInfoFromPKCS7(body)
 		if err != nil {
 			return nil, &fleet.BadRequestError{
 				Message:     "unable to parse machine info",
 				InternalErr: err,
 			}
 		}
+		if err := verifyMachineInfoSignature(ctx, p7, parsed, "apple_enroll_body"); err != nil {
+			return nil, err
+		}
+		decoded.MachineInfo = parsed
 	}
 
 	return &decoded, nil
+}
+
+// verifyMachineInfoSignature verifies that an Apple MachineInfo (deviceinfo)
+// payload received on an Apple-signed enrollment lane carries a valid Apple
+// device signature, and applies the enforcement policy: failures block the
+// request unless verification is disabled via mdm.apple_machineinfo_verify, in
+// which case they are logged only (audit mode). Failures are logged with the
+// lane and the self-asserted device identifiers in both modes.
+func verifyMachineInfoSignature(ctx context.Context, p7 *pkcs7.PKCS7, info *fleet.MDMAppleMachineInfo, lane string) error {
+	err := apple_mdm.VerifyMachineInfoSignature(p7)
+	if err == nil {
+		return nil
+	}
+
+	var serial, udid, product string
+	if info != nil {
+		serial, udid, product = info.Serial, info.UDID, info.Product
+	}
+
+	if !apple_mdm.MachineInfoVerificationEnabled() {
+		// surface the failure in the request log at warn level
+		logging.WithLevel(ctx, slog.LevelWarn)
+		logging.WithExtras(ctx,
+			"machine_info_verify", "failed",
+			"machine_info_verify_reason", err.Error(),
+			"lane", lane,
+			"serial", serial,
+			"udid", udid,
+			"product", product,
+		)
+		return nil
+	}
+
+	// the internal error is logged by the endpoint error handler along with the
+	// request path
+	return &fleet.BadRequestError{
+		Message: "unable to verify deviceinfo signature",
+		InternalErr: fmt.Errorf("machine info signature verification failed on lane %s (serial %q, udid %q, product %q): %w",
+			lane, serial, udid, product, err),
+	}
 }
 
 func (r mdmAppleEnrollResponse) Error() error { return r.Err }
@@ -1838,7 +2773,7 @@ func mdmAppleEnrollEndpoint(ctx context.Context, request interface{}, svc fleet.
 		return mdmAppleEnrollResponse{Err: err}, nil
 	}
 
-	profile, err := svc.GetMDMAppleEnrollmentProfileByToken(ctx, req.Token, legacyRef)
+	profile, err := svc.GetMDMAppleEnrollmentProfileByToken(ctx, req.Token, legacyRef, req.MachineInfo)
 	if err != nil {
 		return mdmAppleEnrollResponse{Err: err}, nil
 	}
@@ -1847,51 +2782,26 @@ func mdmAppleEnrollEndpoint(ctx context.Context, request interface{}, svc fleet.
 	}, nil
 }
 
-// This endpoint gets called twice by the Apple account driven enrollment flow. The first time it
-// is called without a bearer token which results in a 401 Unauthorized response where we tell it
-// to go through MDM SSO End User Authentication. The second time it is called with a bearer token,
-// in this case an enrollment reference which is used to fetch the enrollment profile. The device
-// then has the user sign in with the Apple ID specified in the enrollment profile
-func mdmAppleAccountEnrollEndpoint(ctx context.Context, request interface{}, svc fleet.Service) (fleet.Errorer, error) {
-	req := request.(*mdmAppleAccountEnrollRequest)
-	svc.SkipAuth(ctx)
-	deviceProduct := strings.ToLower(req.DeviceInfo.Product)
-	if !(strings.HasPrefix(deviceProduct, "ipad") || strings.HasPrefix(deviceProduct, "iphone") || strings.HasPrefix(deviceProduct, "ipod")) {
-		// There is unfortunately no good way to get the client to show this error, they will see a
-		// generic error about a failure to get an enrollment profile.
-		return mdmAppleEnrollResponse{
-			Err: &fleet.BadRequestError{
-				Message: "only iOS and iPadOS devices are supported for account driven user enrollment",
-			},
-		}, nil
-	}
-	if req.EnrollReference == nil {
-		mdmSSOUrl, err := svc.GetMDMAccountDrivenEnrollmentSSOURL(ctx)
-		if err != nil {
-			return nil, ctxerr.Wrap(ctx, err)
-		}
-		return mdmAppleAccountEnrollAuthenticateResponse{mdmSSOUrl: mdmSSOUrl}, nil
-	}
-
-	// Fetch the enrollment reference
-	profile, err := svc.GetMDMAppleAccountEnrollmentProfile(ctx, *req.EnrollReference)
-	if err != nil {
-		return mdmAppleEnrollResponse{Err: err}, nil
-	}
-	return mdmAppleEnrollResponse{Profile: profile}, nil
-}
-
 type mdmAppleAccountEnrollRequest struct {
 	EnrollReference *string
 	DeviceInfo      fleet.MDMAppleAccountDrivenUserEnrollDeviceInfo
+	// EnrollmentToken is the token extracted from the URL variable. It contains the ABM unique token to link this enrollment attempt to an ABM token.
+	EnrollmentToken string
 }
 
 func (mdmAppleAccountEnrollRequest) DecodeRequest(ctx context.Context, r *http.Request) (interface{}, error) {
 	decoded := mdmAppleAccountEnrollRequest{}
 
-	rawData, err := io.ReadAll(r.Body)
+	rawData, err := io.ReadAll(io.LimitReader(r.Body, limit10KiB))
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "reading body from request")
+	}
+
+	if err := cryptoutil.ValidateBERDepth(rawData, cryptoutil.MaxBERDepth); err != nil {
+		return nil, &fleet.BadRequestError{
+			Message:     "invalid request body",
+			InternalErr: err,
+		}
 	}
 
 	p7, err := pkcs7.Parse(rawData)
@@ -1913,22 +2823,38 @@ func (mdmAppleAccountEnrollRequest) DecodeRequest(ctx context.Context, r *http.R
 	}
 	decoded.DeviceInfo = deviceInfo
 
+	// Account-Driven User Enrollment blobs are signed by the device's Apple
+	// identity (same chain as ADE/OTA), so verify the signature. The payload
+	// omits SERIAL/UDID by design, so only product/version are available to log.
+	if err := verifyMachineInfoSignature(ctx, p7, &fleet.MDMAppleMachineInfo{
+		Product:   deviceInfo.Product,
+		OSVersion: deviceInfo.OSVersion,
+		Version:   deviceInfo.Version,
+	}, "account_driven_enroll"); err != nil {
+		return nil, err
+	}
+
 	auth := r.Header.Get("Authorization")
 	if strings.HasPrefix(auth, "Bearer ") {
 		decoded.EnrollReference = ptr.String(strings.Split(auth, "Bearer ")[1])
 	}
 
+	token := mux.Vars(r)["token"]
+	if token != "" {
+		decoded.EnrollmentToken = token
+	}
+
 	return &decoded, nil
 }
 
-type mdmAppleAccountEnrollAuthenticateResponse struct {
+type mdmAppleAccountEnrollResponse struct {
 	Err       error `json:"error,omitempty"`
 	mdmSSOUrl string
 }
 
-func (r mdmAppleAccountEnrollAuthenticateResponse) Error() error { return r.Err }
+func (r mdmAppleAccountEnrollResponse) Error() error { return r.Err }
 
-func (r mdmAppleAccountEnrollAuthenticateResponse) HijackRender(ctx context.Context, w http.ResponseWriter) {
+func (r mdmAppleAccountEnrollResponse) HijackRender(ctx context.Context, w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate",
 		`Bearer method="apple-as-web" `+
 			`url="`+r.mdmSSOUrl+`"`,
@@ -1936,66 +2862,59 @@ func (r mdmAppleAccountEnrollAuthenticateResponse) HijackRender(ctx context.Cont
 	w.WriteHeader(http.StatusUnauthorized)
 }
 
+// This endpoint gets called twice by the Apple account driven enrollment flow. The first time it
+// is called without a bearer token which results in a 401 Unauthorized response where we tell it
+// to go through MDM SSO End User Authentication. The second time it is called with a bearer token,
+// in this case an enrollment reference which is used to fetch the enrollment profile. The device
+// then has the user sign in with the Apple ID specified in the enrollment profile
+func mdmAppleAccountEnrollEndpoint(ctx context.Context, request any, svc fleet.Service) (fleet.Errorer, error) {
+	req := request.(*mdmAppleAccountEnrollRequest)
+	svc.SkipAuth(ctx)
+	deviceProduct := strings.ToLower(req.DeviceInfo.Product)
+	if !(strings.HasPrefix(deviceProduct, "ipad") || strings.HasPrefix(deviceProduct, "iphone") || strings.HasPrefix(deviceProduct, "ipod")) {
+		// There is unfortunately no good way to get the client to show this error, they will see a
+		// generic error about a failure to get an enrollment profile.
+		return mdmAppleEnrollResponse{
+			Err: &fleet.BadRequestError{
+				Message: "only iOS and iPadOS devices are supported for account driven user enrollment",
+			},
+		}, nil
+	}
+
+	if req.EnrollReference == nil {
+		mdmSSOUrl, err := svc.GetMDMAccountDrivenEnrollmentSSOURL(ctx, req.EnrollmentToken)
+		if err != nil {
+			return mdmAppleAccountEnrollResponse{Err: err}, nil
+		}
+		return mdmAppleAccountEnrollResponse{mdmSSOUrl: mdmSSOUrl}, nil
+	}
+
+	// Fetch the enrollment reference
+	profile, err := svc.GetMDMAppleAccountEnrollmentProfile(ctx, *req.EnrollReference)
+	if err != nil {
+		return mdmAppleEnrollResponse{Err: err}, nil
+	}
+	return mdmAppleEnrollResponse{Profile: profile}, nil
+}
+
 func (svc *Service) SkipAuth(ctx context.Context) {
 	svc.authz.SkipAuthorization(ctx)
 }
 
-func (svc *Service) GetMDMAccountDrivenEnrollmentSSOURL(ctx context.Context) (string, error) {
-	// skipauth: The enroll profile endpoint is unauthenticated.
+func (svc *Service) GetMDMAccountDrivenEnrollmentSSOURL(ctx context.Context, enrollmentToken string) (string, error) {
+	// skipauth: No authorization check needed due to implementation returning
+	// only license error.
 	svc.authz.SkipAuthorization(ctx)
 
-	appConfig, err := svc.ds.AppConfig(ctx)
-	if err != nil {
-		return "", ctxerr.Wrap(ctx, err)
-	}
-
-	return appConfig.MDMUrl() + "/mdm/apple/account_driven_enroll/sso", nil
+	return "", fleet.ErrMissingLicense
 }
 
 func (svc *Service) GetMDMAppleAccountEnrollmentProfile(ctx context.Context, enrollRef string) (profile []byte, err error) {
-	// skipauth: This enrollment endpoint is authenticated only by the enrollment reference.
+	// skipauth: No authorization check needed due to implementation returning
+	// only license error.
 	svc.authz.SkipAuthorization(ctx)
 
-	idpAccount, err := svc.ds.GetMDMIdPAccountByUUID(ctx, enrollRef)
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "getting MDM IdP account by UUID")
-	}
-
-	appConfig, err := svc.ds.AppConfig(ctx)
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err)
-	}
-
-	topic, err := svc.mdmPushCertTopic(ctx)
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "extracting topic from APNs cert")
-	}
-
-	assets, err := svc.ds.GetAllMDMConfigAssetsByName(ctx, []fleet.MDMAssetName{
-		fleet.MDMAssetSCEPChallenge,
-	}, nil)
-	if err != nil {
-		return nil, fmt.Errorf("loading SCEP challenge from the database: %w", err)
-	}
-	enrollURL := appConfig.MDMUrl()
-
-	enrollmentProf, err := apple_mdm.GenerateAccountDrivenEnrollmentProfileMobileconfig(
-		appConfig.OrgInfo.OrgName,
-		enrollURL,
-		string(assets[fleet.MDMAssetSCEPChallenge].Value),
-		topic,
-		idpAccount.Email,
-	)
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "generating enrollment profile")
-	}
-
-	signed, err := mdmcrypto.Sign(ctx, enrollmentProf, svc.ds)
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "signing profile")
-	}
-
-	return signed, nil
+	return nil, fleet.ErrMissingLicense
 }
 
 func (svc *Service) ReconcileMDMAppleEnrollRef(ctx context.Context, enrollRef string, machineInfo *fleet.MDMAppleMachineInfo) (string, error) {
@@ -2016,9 +2935,17 @@ func (svc *Service) ReconcileMDMAppleEnrollRef(ctx context.Context, enrollRef st
 	return legacyRef, nil
 }
 
-func (svc *Service) GetMDMAppleEnrollmentProfileByToken(ctx context.Context, token string, ref string) (profile []byte, err error) {
+func (svc *Service) GetMDMAppleEnrollmentProfileByToken(ctx context.Context, token string, ref string, machineInfo *fleet.MDMAppleMachineInfo) (profile []byte, err error) {
 	// skipauth: The enroll profile endpoint is unauthenticated.
 	svc.authz.SkipAuthorization(ctx)
+
+	if machineInfo == nil {
+		// Requiring machine info here is intentional: it backstops the MachineInfo
+		// signature verification done at request decode time. No enrollment profile
+		// is issued for a request that carried no deviceinfo to verify, so this must
+		// not be relaxed without a replacement gate at the verification point.
+		return nil, ctxerr.New(ctx, "get enrollment profile: missing machine info")
+	}
 
 	_, err = svc.ds.GetMDMAppleEnrollmentProfileByToken(ctx, token)
 	if err != nil {
@@ -2028,43 +2955,231 @@ func (svc *Service) GetMDMAppleEnrollmentProfileByToken(ctx context.Context, tok
 		return nil, ctxerr.Wrap(ctx, err, "get enrollment profile")
 	}
 
+	if machineInfo.MandatorySoftwareUpdateRequired {
+		// Log an info message if the device is requiring a mandatory software update.
+		svc.logger.InfoContext(ctx, "device requires mandatory software update", "host_uuid", machineInfo.UDID, "serial", machineInfo.Serial, "product", machineInfo.Product, "os_version", machineInfo.OSVersion)
+	}
+
 	appConfig, err := svc.ds.AppConfig(ctx)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err)
 	}
 
-	enrollURL, err := apple_mdm.AddEnrollmentRefToFleetURL(appConfig.MDMUrl(), ref)
+	mdmURL, err := apple_mdm.AddEnrollmentRefToFleetURL(appConfig.MDMUrl(), ref)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "adding reference to fleet URL")
 	}
 
-	topic, err := svc.mdmPushCertTopic(ctx)
+	topic, err := apple_mdm.MDMPushCertTopic(ctx, svc.ds)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "extracting topic from APNs cert")
 	}
 
-	assets, err := svc.ds.GetAllMDMConfigAssetsByName(ctx, []fleet.MDMAssetName{
-		fleet.MDMAssetSCEPChallenge,
-	}, nil)
+	depAssignments, err := svc.ds.GetHostDEPAssignmentsBySerial(ctx, machineInfo.Serial)
 	if err != nil {
-		return nil, fmt.Errorf("loading SCEP challenge from the database: %w", err)
+		return nil, ctxerr.Wrap(ctx, err, "getting DEP assignments by serial")
 	}
-	enrollmentProf, err := apple_mdm.GenerateEnrollmentProfileMobileconfig(
-		appConfig.OrgInfo.OrgName,
-		enrollURL,
-		string(assets[fleet.MDMAssetSCEPChallenge].Value),
-		topic,
-	)
+
+	if appConfig.MDM.OnlyAllowAppleBusinessEnrollment {
+		if machineInfo.Serial == "" {
+			// adue enrollment does not have a serial, so fail fast
+			return nil, &fleet.ABOnlyEnrollmentForbiddenError{}
+		}
+
+		// No DEP assignment for this serial, so we fail.
+		if len(depAssignments) == 0 {
+			return nil, &fleet.ABOnlyEnrollmentForbiddenError{}
+		}
+	}
+
+	var requireACME bool
+	if appConfig.MDM.AppleRequireHardwareAttestation {
+		requireACME, err = svc.isMDMAppleACMERequired(ctx, machineInfo, depAssignments)
+		if err != nil {
+			return nil, ctxerr.Wrap(ctx, err, "checking if ACME enrollment is required")
+		}
+
+		svc.logger.InfoContext(ctx, "hardware attestastion required", "require_acme", requireACME, "product", machineInfo.Product, "serial", machineInfo.Serial)
+	}
+
+	var enrollProf []byte
+	if requireACME {
+		enrollProf, err = svc.generateMDMAppleACMEEnrollProfile(ctx, machineInfo.Serial, appConfig.OrgInfo.OrgName, mdmURL, topic)
+	} else {
+		if appConfig.MDM.IsAppleMDMSCEPBlocked() {
+			// do not allow falling through to SCEP when it's blocked via both require acme and only AB enrollments.
+			return nil, &fleet.ABOnlyEnrollmentForbiddenError{}
+		}
+		enrollProf, err = svc.generateMDMAppleSCEPEnrollProfile(ctx, appConfig.OrgInfo.OrgName, mdmURL, topic)
+	}
+
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "generating enrollment profile")
 	}
 
-	signed, err := mdmcrypto.Sign(ctx, enrollmentProf, svc.ds)
+	signed, err := mdmcrypto.Sign(ctx, enrollProf, svc.ds)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "signing profile")
 	}
 
+	softwareUpdateDeviceID := machineInfo.Product
+	if isMac, _, _, err := fleet.IsMacIdentifier(machineInfo.Product); isMac && err == nil && machineInfo.SoftwareUpdateDeviceID != "" {
+		softwareUpdateDeviceID = machineInfo.SoftwareUpdateDeviceID
+	}
+
+	// Best-effort: don't block enrollment profile delivery if this write fails.
+	if err := svc.ds.InsertAppleSoftwareUpdateDeviceID(ctx, machineInfo.UDID, softwareUpdateDeviceID); err != nil {
+		svc.logger.ErrorContext(ctx, "inserting Apple software update device id", "host_uuid", machineInfo.UDID, "err", err)
+	}
+
 	return signed, nil
+}
+
+func (svc *Service) NewACMEEnrollment(ctx context.Context, hardwareSerial string) (string, error) {
+	// skipauth: The enroll profile endpoint is unauthenticated, and this method is only called from
+	// there or the renewal cron
+	svc.authz.SkipAuthorization(ctx)
+
+	return svc.acmeSvc.NewACMEEnrollment(ctx, hardwareSerial)
+}
+
+func (svc *Service) isMDMAppleACMERequired(ctx context.Context, machineInfo *fleet.MDMAppleMachineInfo, depAssignments []*fleet.HostDEPAssignment) (bool, error) {
+	if machineInfo == nil {
+		return false, ctxerr.New(ctx, "machine info is nil")
+	}
+
+	// account-driven user enrollment does not include a serial number in the device info, so we can't require ACME without a serial number
+	if machineInfo.Serial == "" {
+		svc.logger.InfoContext(ctx, "missing serial number in machine info, skipping ACME requirement check")
+		return false, nil
+	}
+
+	isSupported, err := isACMESupported(ctx, svc.logger, machineInfo.Product, machineInfo.OSVersion)
+	if err != nil {
+		return false, ctxerr.Wrap(ctx, err, "checking if device is capable of ACME")
+	} else if !isSupported {
+		svc.logger.InfoContext(ctx, "ACME not supported, skipping ACME requirement", "serial", machineInfo.Serial, "model_identifier", machineInfo.Product, "os_version", machineInfo.OSVersion)
+		return false, nil
+	}
+
+	// we only require ACME if the serial is DEP-assigned to Fleet
+	svc.logger.InfoContext(ctx, "checking DEP assignment status for ACME requirement", "serial", machineInfo.Serial, "dep_assignments_count", len(depAssignments))
+
+	return len(depAssignments) > 0, nil
+}
+
+// isACMESupported checks if the device is supported for ACME enrollment. Fleet supports:
+// Apple Silicon Macs running macOS 14 or later.
+// iPhones with A11 chip or higher, running iOS 16 or later.
+// iPads with A11 chip or higher, running iPadOS 16.1 or later.
+// Other Apple devices
+// may support ACME enrollment (e.g., tvOS on Apple TV), but they are not currently supported by Fleet.
+func isACMESupported(ctx context.Context, logger *slog.Logger, modelIdentifier string, osVersion string) (bool, error) {
+	if isMac, _, _, _ := fleet.IsMacIdentifier(modelIdentifier); isMac {
+		// we only require ACME for Apple Silicon Macs, if the device is a mac.
+		isMacAppleSilicon, err := fleet.IsMacAppleSilicon(modelIdentifier)
+		if err != nil {
+			return false, fmt.Errorf("checking if device is Apple Silicon: %w", err)
+		} else if !isMacAppleSilicon {
+			return false, nil
+		}
+
+		// we only require ACME for Apple Silicon Macs running macOS 14 or later
+		if isLessThanMacOS14, err := apple_mdm.IsLessThanVersion(osVersion, "14.0"); err != nil {
+			return false, fmt.Errorf("checking if device is less than macOS 14: %w", err)
+		} else if isLessThanMacOS14 {
+			return false, nil
+		}
+		return true, nil
+	}
+
+	isIPhone, _, _, err := fleet.IsPrefixedIdentifier(modelIdentifier, "iPhone")
+	if err != nil {
+		return false, fmt.Errorf("checking if device is an iPhone: %w", err)
+	}
+	if isIPhone {
+		if isA11, err := fleet.IsA11ChipDevice(modelIdentifier); err != nil {
+			return false, fmt.Errorf("checking if device has A11 chip: %w", err)
+		} else if !isA11 {
+			return false, nil
+		}
+
+		// Check for iOS 16.0 or above for iPhones
+		if isLessThaniOS16, err := apple_mdm.IsLessThanVersion(osVersion, "16.0"); err != nil {
+			return false, fmt.Errorf("checking if device is less than iOS 16: %w", err)
+		} else if isLessThaniOS16 {
+			return false, nil
+		}
+
+		return true, nil
+	}
+
+	if isIPad, _, _, err := fleet.IsPrefixedIdentifier(modelIdentifier, "iPad"); err != nil {
+		return false, fmt.Errorf("checking if device is an iPad: %w", err)
+	} else if isIPad {
+		if isA11, err := fleet.IsA11ChipDevice(modelIdentifier); err != nil {
+			return false, fmt.Errorf("checking if device has A11 chip: %w", err)
+		} else if !isA11 {
+			return false, nil
+		}
+
+		// Check for iPadOS 16.1 or above for iPads
+		if isLessThaniPadOS16_1, err := apple_mdm.IsLessThanVersion(osVersion, "16.1"); err != nil {
+			return false, fmt.Errorf("checking if device is less than iPadOS 16.1: %w", err)
+		} else if isLessThaniPadOS16_1 {
+			return false, nil
+		}
+
+		return true, nil
+	}
+
+	logger.InfoContext(ctx, "got unknown product family for ACME support check", "model_identifier", modelIdentifier, "os_version", osVersion)
+	return false, nil
+}
+
+func (svc *Service) generateMDMAppleACMEEnrollProfile(ctx context.Context, hardwareSerial string, orgName string, mdmURL string, topic string) ([]byte, error) {
+	acmeIdent, err := svc.acmeSvc.NewACMEEnrollment(ctx, hardwareSerial)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "creating ACME enrollment")
+	}
+
+	b, err := apple_mdm.GenerateACMEEnrollmentProfileMobileconfig(
+		orgName,
+		mdmURL,
+		acmeIdent,
+		hardwareSerial,
+		topic,
+		apple_mdm.MDMAccessRightAll,
+		true, // fresh enrollment
+	)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "generateMDMAppleACMEEnrollProfile: generating ACME enrollment profile")
+	}
+
+	return b, nil
+}
+
+func (svc *Service) generateMDMAppleSCEPEnrollProfile(ctx context.Context, orgName string, mdmURL string, topic string) ([]byte, error) {
+	assets, err := svc.ds.GetAllMDMConfigAssetsByName(ctx, []fleet.MDMAssetName{
+		fleet.MDMAssetSCEPChallenge,
+	}, nil)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "generateMDMAppleSCEPEnrollProfile: loading SCEP challenge from the database")
+	}
+
+	enrollProf, err := apple_mdm.GenerateEnrollmentProfileMobileconfig(
+		orgName,
+		mdmURL,
+		string(assets[fleet.MDMAssetSCEPChallenge].Value),
+		topic,
+		apple_mdm.MDMAccessRightAll,
+		true, // fresh enrollment
+	)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "generateMDMAppleSCEPEnrollProfile: generating enrollment profile")
+	}
+
+	return enrollProf, nil
 }
 
 func (svc *Service) CheckMDMAppleEnrollmentWithMinimumOSVersion(ctx context.Context, m *fleet.MDMAppleMachineInfo) (*fleet.MDMAppleSoftwareUpdateRequired, error) {
@@ -2083,17 +3198,18 @@ func (svc *Service) CheckMDMAppleEnrollmentWithMinimumOSVersion(ctx context.Cont
 		return nil, nil
 	}
 
-	needsUpdate, err := svc.needsOSUpdateForDEPEnrollment(ctx, *m)
+	// shouldUpdate depends on the app_config settings for minimum_version and update_new_hosts
+	shouldUpdate, err := svc.shouldOSUpdateForDEPEnrollment(ctx, *m)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "checking os updates settings", "serial", m.Serial)
-	}
-
-	if !needsUpdate {
+	} else if !shouldUpdate {
 		svc.logger.DebugContext(ctx, "device is above minimum or update new host not checked, skipping os version check", "serial", m.Serial)
 		return nil, nil
 	}
 
-	sur, err := svc.getAppleSoftwareUpdateRequiredForDEPEnrollment(*m)
+	// if the device should update based on appconfig settings, we also need to check what versions
+	// are actually available for the device from Apple
+	sur, err := svc.getAppleSoftwareUpdateRequiredForDEPEnrollment(ctx, *m)
 	if err != nil {
 		// log for debugging but allow enrollment to proceed
 		svc.logger.InfoContext(ctx, "getting apple software update required", "serial", m.Serial, "err", err)
@@ -2103,7 +3219,7 @@ func (svc *Service) CheckMDMAppleEnrollmentWithMinimumOSVersion(ctx context.Cont
 	return sur, nil
 }
 
-func (svc *Service) needsOSUpdateForDEPEnrollment(ctx context.Context, m fleet.MDMAppleMachineInfo) (bool, error) {
+func (svc *Service) shouldOSUpdateForDEPEnrollment(ctx context.Context, m fleet.MDMAppleMachineInfo) (bool, error) {
 	// NOTE: Under the hood, the datastore is joining host_dep_assignments to the hosts table to
 	// look up DEP hosts by serial number. It grabs the team id and platform from the
 	// hosts table. Then it uses the team id to get either the global config or team config.
@@ -2126,43 +3242,58 @@ func (svc *Service) needsOSUpdateForDEPEnrollment(ctx context.Context, m fleet.M
 	}
 
 	minVersion := settings.MinimumVersion.Value
-	hasMinVersion := settings.MinimumVersion.Set && settings.MinimumVersion.Valid && minVersion != ""
-
-	// For macOS hosts, whether to update new hosts during DEP enrollment is determined solely by UpdateNewHosts
-	if platform == "darwin" {
-		updateNewHosts := settings.UpdateNewHosts.Set && settings.UpdateNewHosts.Valid && settings.UpdateNewHosts.Value
-
-		svc.logger.InfoContext(ctx, "checking os updates settings for macos, update will be forced if UpdateNewHosts is set",
-			"update_new_hosts", updateNewHosts,
-			"serial", m.Serial,
-		)
-		return updateNewHosts, nil
+	isSetMinVersion := settings.MinimumVersion.Set && settings.MinimumVersion.Valid && minVersion != ""
+	logs := []any{
+		"platform", platform,
+		"minimum_version", minVersion,
+		"current_version", m.OSVersion,
+		"serial", m.Serial,
 	}
 
-	// TODO: confirm what this check should do
-	if !hasMinVersion {
-		svc.logger.InfoContext(ctx, "checking os updates settings, minimum version not set",
-			"serial", m.Serial,
-			"current_version", m.OSVersion,
-			"minimum_version", minVersion,
-		)
+	if platform != "darwin" && !isSetMinVersion {
+		svc.logger.InfoContext(ctx, "checking os updates settings for non-macos platform, minimum version not set, skipping version check", logs...)
+		return false, nil
+	}
+
+	// Always check update if latest is configured for each platform.
+	if minVersion == fleet.AppleOSUpdateLatestVersion {
+		svc.logger.InfoContext(ctx, "checking os updates settings, minimum version set to latest, checking available apple updates", logs...)
+		return true, nil
+	}
+
+	if platform == "darwin" {
+		updateNewHosts := settings.UpdateNewHosts.Set && settings.UpdateNewHosts.Valid && settings.UpdateNewHosts.Value
+		logs = append(logs, "update_new_hosts", updateNewHosts)
+		switch {
+		case !updateNewHosts:
+			// never update macos if updateNewHosts is false
+			svc.logger.InfoContext(ctx, "checking os updates settings for macos, new hosts should not update", logs...)
+			return false, nil
+		case !isSetMinVersion:
+			// always update macos if updateNewHosts is true and minimum version is not set
+			svc.logger.InfoContext(ctx, "checking os updates settings for macos, new hosts should always update to latest", logs...)
+			return true, nil
+		default:
+			// default to normal version check (require update if less than minimum version)
+			svc.logger.InfoContext(ctx, "checking os updates settings for macos, new hosts should update to latest if below minimum version", logs...)
+		}
 	}
 
 	needsUpdate, err := apple_mdm.IsLessThanVersion(m.OSVersion, minVersion)
 	if err != nil {
-		svc.logger.InfoContext(ctx, "checking os updates settings, cannot compare versions",
-			"serial", m.Serial,
-			"current_version", m.OSVersion,
-			"minimum_version", minVersion,
-		)
+		svc.logger.InfoContext(ctx, "checking os updates settings, cannot compare versions", logs...)
 		return false, nil
 	}
 
 	return needsUpdate, nil
 }
 
-func (svc *Service) getAppleSoftwareUpdateRequiredForDEPEnrollment(m fleet.MDMAppleMachineInfo) (*fleet.MDMAppleSoftwareUpdateRequired, error) {
-	latest, err := gdmf.GetLatestOSVersion(m)
+func (svc *Service) getAppleSoftwareUpdateRequiredForDEPEnrollment(ctx context.Context, m fleet.MDMAppleMachineInfo) (*fleet.MDMAppleSoftwareUpdateRequired, error) {
+	updateAssets, err := svc.ds.ListAppleOSUpdateAssets(ctx)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "listing apple os update assets")
+	}
+	latest, err := gdmf.GetLatestOSVersion(m, updateAssets)
 	if err != nil {
 		return nil, err
 	}
@@ -2174,36 +3305,7 @@ func (svc *Service) getAppleSoftwareUpdateRequiredForDEPEnrollment(m fleet.MDMAp
 		return nil, nil
 	}
 
-	return fleet.NewMDMAppleSoftwareUpdateRequired(fleet.MDMAppleSoftwareUpdateAsset{
-		ProductVersion: latest.ProductVersion,
-		Build:          latest.Build,
-	}), nil
-}
-
-func (svc *Service) mdmPushCertTopic(ctx context.Context) (string, error) {
-	assets, err := svc.ds.GetAllMDMConfigAssetsByName(ctx, []fleet.MDMAssetName{
-		fleet.MDMAssetAPNSCert,
-	}, nil)
-	if err != nil {
-		return "", ctxerr.Wrap(ctx, err, "loading SCEP keypair from the database")
-	}
-
-	block, _ := pem.Decode(assets[fleet.MDMAssetAPNSCert].Value)
-	if block == nil || block.Type != "CERTIFICATE" {
-		return "", ctxerr.Wrap(ctx, err, "decoding PEM data")
-	}
-
-	apnsCert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return "", ctxerr.Wrap(ctx, err, "parsing APNs certificate")
-	}
-
-	mdmPushCertTopic, err := cryptoutil.TopicFromCert(apnsCert)
-	if err != nil {
-		return "", ctxerr.Wrap(ctx, err, "extracting topic from APNs certificate")
-	}
-
-	return mdmPushCertTopic, nil
+	return fleet.NewMDMAppleSoftwareUpdateRequired(latest.ProductVersion), nil
 }
 
 // enqueueMDMAppleCommandRemoveEnrollmentProfile enqueues a RemoveProfile MDM command for the given host.
@@ -2223,7 +3325,7 @@ func (svc *Service) enqueueMDMAppleCommandRemoveEnrollmentProfile(ctx context.Co
 	}
 
 	cmdUUID := uuid.New().String()
-	err = svc.mdmAppleCommander.RemoveProfile(ctx, []string{nanoEnroll.ID}, apple_mdm.FleetPayloadIdentifier, cmdUUID)
+	err = svc.mdmAppleCommander.RemoveProfile(ctx, []string{nanoEnroll.ID}, apple_mdm.FleetPayloadIdentifier, cmdUUID, "")
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "enqueuing mdm apple remove profile command")
 	}
@@ -2524,7 +3626,7 @@ func (svc *Service) BatchSetMDMAppleProfiles(ctx context.Context, tmID *uint, tm
 	for i, prof := range profiles {
 		if len(prof) > 1024*1024 {
 			return ctxerr.Wrap(ctx,
-				fleet.NewInvalidArgumentError(fmt.Sprintf("profiles[%d]", i), "maximum configuration profile file size is 1 MB"),
+				fleet.NewInvalidArgumentError(fmt.Sprintf("profiles[%d]", i), fleet.MaxProfileSizeErrMsg),
 			)
 		}
 
@@ -2545,6 +3647,12 @@ func (svc *Service) BatchSetMDMAppleProfiles(ctx context.Context, tmID *uint, tm
 				fleet.NewInvalidArgumentError(fmt.Sprintf("profiles[%d]", i), err.Error()),
 				"missing fleet secrets")
 		}
+		if err := svc.ds.ValidateReferencedCustomHostVitals(ctx, []string{string(prof)}); err != nil {
+			if !fleet.IsInvalidReferencedCustomHostVitalsError(err) {
+				return ctxerr.Wrap(ctx, err, "validating referenced custom host vitals")
+			}
+			return ctxerr.Wrap(ctx, fleet.NewInvalidArgumentError(fmt.Sprintf("profiles[%d]", i), err.Error()))
+		}
 		mdmProf, err := fleet.NewMDMAppleConfigProfile([]byte(expanded), tmID)
 		if err != nil {
 			return ctxerr.Wrap(ctx,
@@ -2552,7 +3660,7 @@ func (svc *Service) BatchSetMDMAppleProfiles(ctx context.Context, tmID *uint, tm
 				"invalid mobileconfig profile")
 		}
 
-		if err := mdmProf.ValidateUserProvided(svc.config.MDM.EnableCustomOSUpdatesAndFileVault); err != nil {
+		if err := mdmProf.ValidateUserProvided(svc.config.MDM.IsCustomDiskEncryptionEnabled()); err != nil {
 			return ctxerr.Wrap(ctx,
 				fleet.NewInvalidArgumentError(fmt.Sprintf("profiles[%d]", i), err.Error()))
 		}
@@ -2570,14 +3678,14 @@ func (svc *Service) BatchSetMDMAppleProfiles(ctx context.Context, tmID *uint, tm
 
 		if byName[mdmProf.Name] {
 			return ctxerr.Wrap(ctx,
-				fleet.NewInvalidArgumentError(fmt.Sprintf("profiles[%d]", i), fmt.Sprintf("Couldn't edit custom_settings. More than one configuration profile have the same name (PayloadDisplayName): %q", mdmProf.Name)),
+				fleet.NewInvalidArgumentError(fmt.Sprintf("profiles[%d]", i), fmt.Sprintf("Couldn't edit configuration_profiles. More than one configuration profile have the same name (PayloadDisplayName): %q", mdmProf.Name)),
 				"duplicate mobileconfig profile by name")
 		}
 		byName[mdmProf.Name] = true
 
 		if byIdent[mdmProf.Identifier] {
 			return ctxerr.Wrap(ctx,
-				fleet.NewInvalidArgumentError(fmt.Sprintf("profiles[%d]", i), fmt.Sprintf("Couldn't edit custom_settings. More than one configuration profile have the same identifier (PayloadIdentifier): %q", mdmProf.Identifier)),
+				fleet.NewInvalidArgumentError(fmt.Sprintf("profiles[%d]", i), fmt.Sprintf("Couldn't edit configuration_profiles. More than one configuration profile have the same identifier (PayloadIdentifier): %q", mdmProf.Identifier)),
 				"duplicate mobileconfig profile by identifier")
 		}
 		byIdent[mdmProf.Identifier] = true
@@ -2601,11 +3709,11 @@ func (svc *Service) BatchSetMDMAppleProfiles(ctx context.Context, tmID *uint, tm
 					continue
 				case strings.HasPrefix(p.ProfileUUID, "w"):
 					err := fleet.NewInvalidArgumentError("PayloadDisplayName", fmt.Sprintf(
-						"Couldn't edit custom_settings. A Windows configuration profile shares the same name as a macOS configuration profile (PayloadDisplayName): %q", p.Name))
+						"Couldn't edit configuration_profiles. A Windows configuration profile shares the same name as a macOS configuration profile (PayloadDisplayName): %q", p.Name))
 					return ctxerr.Wrap(ctx, err, "duplicate xml and mobileconfig by name")
 				default:
 					err := fleet.NewInvalidArgumentError("PayloadDisplayName", fmt.Sprintf(
-						"Couldn't edit custom_settings. More than one configuration profile have the same name (PayloadDisplayName): %q", p.Name))
+						"Couldn't edit configuration_profiles. More than one configuration profile have the same name (PayloadDisplayName): %q", p.Name))
 					return ctxerr.Wrap(ctx, err, "duplicate json and mobileconfig by name")
 				}
 			}
@@ -2613,21 +3721,18 @@ func (svc *Service) BatchSetMDMAppleProfiles(ctx context.Context, tmID *uint, tm
 		}
 	}
 
+	// Verify profile scopes conflict before stopping dry-run, but also before entering the transaction in BatchSetMDMAppleProfiles
+	err = svc.ds.VerifyAppleConfigProfileScopesDoNotConflict(ctx, profs)
+	if err != nil {
+		return err
+	}
+
 	if dryRun {
 		return nil
 	}
+
 	if err := svc.ds.BatchSetMDMAppleProfiles(ctx, tmID, profs); err != nil {
 		return err
-	}
-	var bulkTeamID uint
-	if tmID != nil {
-		bulkTeamID = *tmID
-	}
-
-	if !skipBulkPending {
-		if _, err := svc.ds.BulkSetPendingMDMHostProfiles(ctx, nil, []uint{bulkTeamID}, nil, nil); err != nil {
-			return ctxerr.Wrap(ctx, err, "bulk set pending host profiles")
-		}
 	}
 
 	if err := svc.NewActivity(
@@ -2725,13 +3830,15 @@ func (r updateMDMAppleSettingsResponse) Status() int { return http.StatusNoConte
 // team endpoints only allow write access to admins.
 func updateMDMAppleSettingsEndpoint(ctx context.Context, request interface{}, svc fleet.Service) (fleet.Errorer, error) {
 	req := request.(*updateMDMAppleSettingsRequest)
-	if err := svc.UpdateMDMDiskEncryption(ctx, req.MDMAppleSettingsPayload.TeamID, req.MDMAppleSettingsPayload.EnableDiskEncryption, nil); err != nil {
+	if err := svc.UpdateMDMDiskEncryption(ctx, req.MDMAppleSettingsPayload.TeamID, fleet.MDMDiskEncryptionSettingsPayload{
+		EnableDiskEncryption: req.MDMAppleSettingsPayload.EnableDiskEncryption,
+	}); err != nil {
 		return updateMDMAppleSettingsResponse{Err: err}, nil
 	}
 	return updateMDMAppleSettingsResponse{}, nil
 }
 
-func (svc *Service) updateAppConfigMDMDiskEncryption(ctx context.Context, enabled *bool) error {
+func (svc *Service) updateAppConfigMDMDiskEncryption(ctx context.Context, changes fleet.DiskEncryptionSettingsChanges, requireBitLockerPIN *bool) error {
 	// appconfig is only used internally, it's fine to read it unobfuscated
 	// (svc.AppConfigObfuscated must not be used because the write-only users
 	// such as gitops will fail to access it).
@@ -2740,40 +3847,99 @@ func (svc *Service) updateAppConfigMDMDiskEncryption(ctx context.Context, enable
 		return err
 	}
 
-	var didUpdate bool
-	if enabled != nil {
-		if ac.MDM.EnableDiskEncryption.Value != *enabled {
-			if *enabled && svc.config.Server.PrivateKey == "" {
-				return ctxerr.New(ctx, "Missing required private key. Learn how to configure the private key here: https://fleetdm.com/learn-more-about/fleet-server-private-key")
-			}
+	oldWindowsDiskEncryption := ac.MDM.WindowsSettings.EnableDiskEncryption.Value
 
-			ac.MDM.EnableDiskEncryption = optjson.SetBool(*enabled)
-			didUpdate = true
+	enabling := false
+	apply := func(dst *optjson.Bool, v *bool) bool {
+		if v == nil || dst.Value == *v {
+			return false
+		}
+		enabling = enabling || *v
+		*dst = optjson.SetBool(*v)
+		return true
+	}
+	macOSChanged := apply(&ac.MDM.MacOSSettings.EnableDiskEncryption, changes.MacOSEnable)
+	macOSChanged = apply(&ac.MDM.MacOSSettings.EnableEscrowDiskEncryptionKey, changes.MacOSEscrow) || macOSChanged
+	windowsChanged := apply(&ac.MDM.WindowsSettings.EnableDiskEncryption, changes.WindowsEnable)
+	linuxChanged := apply(&ac.MDM.LinuxSettings.EnableEscrowDiskEncryptionKey, changes.LinuxEscrow)
+	// the PIN is updated outside of apply: it doesn't enable key escrow, so it
+	// must not trigger the private-key requirement (mirrors the team path)
+	if requireBitLockerPIN != nil {
+		if ac.MDM.BitLockerPINRequired() != *requireBitLockerPIN {
+			windowsChanged = true
+		}
+		// the deprecated top-level key mirrors the canonical
+		// windows_settings.require_bitlocker_pin home
+		ac.MDM.RequireBitLockerPIN = optjson.SetBool(*requireBitLockerPIN)
+		ac.MDM.WindowsSettings.RequireBitLockerPIN = optjson.SetBool(*requireBitLockerPIN)
+	}
+
+	if !macOSChanged && !windowsChanged && !linuxChanged {
+		return nil
+	}
+
+	if enabling && svc.config.Server.PrivateKey == "" {
+		return ctxerr.New(ctx, "Missing required private key. Learn how to configure the private key here: https://fleetdm.com/learn-more-about/fleet-server-private-key")
+	}
+
+	// the BitLocker PIN requires the Windows disk encryption setting
+	if field, msg := fleet.BitLockerPINRequirementError(oldWindowsDiskEncryption, ac.MDM.DiskEncryptionConfig()); msg != "" {
+		return ctxerr.Wrap(ctx, fleet.NewInvalidArgumentError(field, msg))
+	}
+
+	// the flat toggle is virtual: keep the stored value consistent
+	ac.MDM.EnableDiskEncryption = optjson.SetBool(ac.MDM.DiskEncryptionSettingsAllEnabled())
+
+	if err := svc.ds.SaveAppConfig(ctx, ac); err != nil {
+		return err
+	}
+
+	if macOSChanged && ac.MDM.EnabledAndConfigured {
+		// the profile's payloads follow both macOS settings, so a change to
+		// either one is reconciled
+		if err := svc.EnterpriseOverrides.MDMAppleReconcileFileVaultProfile(ctx, nil); err != nil {
+			return ctxerr.Wrap(ctx, err, "reconcile no-team filevault profile")
 		}
 	}
-	if didUpdate {
-		if err := svc.ds.SaveAppConfig(ctx, ac); err != nil {
-			return err
+
+	for _, pc := range []struct {
+		platform string
+		changed  bool
+	}{
+		{"macos", macOSChanged},
+		{"windows", windowsChanged},
+		{"linux", linuxChanged},
+	} {
+		if !pc.changed {
+			continue
 		}
-		if ac.MDM.EnabledAndConfigured { // if macOS MDM is configured, set up FileVault escrow
-			var act fleet.ActivityDetails
-			if ac.MDM.EnableDiskEncryption.Value {
-				act = fleet.ActivityTypeEnabledMacosDiskEncryption{}
-				if err := svc.EnterpriseOverrides.MDMAppleEnableFileVaultAndEscrow(ctx, nil); err != nil {
-					return ctxerr.Wrap(ctx, err, "enable no-team filevault and escrow")
-				}
-			} else {
-				act = fleet.ActivityTypeDisabledMacosDiskEncryption{}
-				if err := svc.EnterpriseOverrides.MDMAppleDisableFileVaultAndEscrow(ctx, nil); err != nil {
-					return ctxerr.Wrap(ctx, err, "disable no-team filevault and escrow")
-				}
-			}
-			if err := svc.NewActivity(ctx, authz.UserFromContext(ctx), act); err != nil {
-				return ctxerr.Wrap(ctx, err, "create activity for app config macos disk encryption")
-			}
+		if err := svc.NewActivity(ctx, authz.UserFromContext(ctx), fleet.ActivityTypeEditedDiskEncryptionSettings{
+			Platform: pc.platform,
+		}); err != nil {
+			return ctxerr.Wrap(ctx, err, "create activity for app config disk encryption settings")
 		}
 	}
 	return nil
+}
+
+// updateAppConfigMDMHostNameTemplate saves the "No team" host name template on
+// the global AppConfig.MDM struct and reconciles enforcement.
+func (svc *Service) updateAppConfigMDMHostNameTemplate(ctx context.Context, nameTemplate string) error {
+	ac, err := svc.ds.AppConfig(ctx)
+	if err != nil {
+		return err
+	}
+
+	if ac.MDM.HostNameTemplate.Value == nameTemplate {
+		return nil
+	}
+
+	ac.MDM.HostNameTemplate = optjson.SetString(nameTemplate)
+	if err := svc.ds.SaveAppConfig(ctx, ac); err != nil {
+		return ctxerr.Wrap(ctx, err, "save app config for host name template")
+	}
+
+	return svc.EnterpriseOverrides.ApplyHostNameTemplateChange(ctx, nil, nameTemplate)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -3085,6 +4251,30 @@ func (svc *Service) GetMDMAppleSetupAssistant(ctx context.Context, teamID *uint)
 	return nil, fleet.ErrMissingLicense
 }
 
+type getDefaultMDMAppleSetupAssistantProfileResponse struct {
+	Profile   godep.Profile `json:"enrollment_profile" db:"profile"`
+	UpdatedAt *time.Time    `json:"updated_at"`
+	Err       error         `json:"error,omitempty"`
+}
+
+func (r getDefaultMDMAppleSetupAssistantProfileResponse) Error() error { return r.Err }
+
+func getDefaultMDMAppleSetupAssistantProfileEndpoint(ctx context.Context, request any, svc fleet.Service) (fleet.Errorer, error) {
+	profile, updatedAt, err := svc.GetDefaultMDMAppleSetupAssistantProfile(ctx)
+	if err != nil {
+		return getDefaultMDMAppleSetupAssistantProfileResponse{Err: err}, nil
+	}
+	return getDefaultMDMAppleSetupAssistantProfileResponse{Profile: profile, UpdatedAt: updatedAt}, nil
+}
+
+func (svc *Service) GetDefaultMDMAppleSetupAssistantProfile(ctx context.Context) (godep.Profile, *time.Time, error) {
+	// skipauth: No authorization check needed due to implementation returning
+	// only license error.
+	svc.authz.SkipAuthorization(ctx)
+
+	return godep.Profile{}, nil, fleet.ErrMissingLicense
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Delete an MDM Apple Setup Assistant
 ////////////////////////////////////////////////////////////////////////////////
@@ -3175,7 +4365,7 @@ func (r initiateMDMSSOResponse) SetCookies(_ context.Context, w http.ResponseWri
 	setSSOCookie(w, r.sessionID, r.sessionDurationSeconds)
 }
 
-func initiateMDMSSOEndpoint(ctx context.Context, request interface{}, svc fleet.Service) (fleet.Errorer, error) {
+func initiateMDMSSOEndpoint(ctx context.Context, request any, svc fleet.Service) (fleet.Errorer, error) {
 	req := request.(*initiateMDMSSORequest)
 	sessionID, sessionDurationSeconds, idpProviderURL, err := svc.InitiateMDMSSO(ctx, req.Initiator, "", req.HostUUID)
 	if err != nil {
@@ -3183,8 +4373,7 @@ func initiateMDMSSOEndpoint(ctx context.Context, request interface{}, svc fleet.
 	}
 
 	return initiateMDMSSOResponse{
-		URL: idpProviderURL,
-
+		URL:                    idpProviderURL,
 		sessionID:              sessionID,
 		sessionDurationSeconds: sessionDurationSeconds,
 	}, nil
@@ -3204,6 +4393,7 @@ func (svc *Service) InitiateMDMSSO(ctx context.Context, initiator, customOrigina
 
 type callbackMDMSSORequest struct {
 	sessionID    string
+	relayState   fleet.SSORelayState
 	samlResponse []byte
 }
 
@@ -3212,19 +4402,22 @@ type callbackMDMSSORequest struct {
 // rare enough (malformed data coming from the SSO provider) so they shouldn't
 // affect many users.
 func (callbackMDMSSORequest) DecodeRequest(ctx context.Context, r *http.Request) (interface{}, error) {
-	sessionID, samlResponse, err := decodeCallbackRequest(ctx, r)
+	sessionID, samlResponse, relayState, err := decodeCallbackRequest(ctx, r)
 	if err != nil {
 		return nil, err
 	}
 	return &callbackMDMSSORequest{
 		sessionID:    sessionID,
+		relayState:   relayState,
 		samlResponse: samlResponse,
 	}, nil
 }
 
 type callbackMDMSSOResponse struct {
-	redirectURL           string
-	byodEnrollCookieValue string
+	redirectURL              string
+	byodEnrollCookieValue    string
+	deviceSSOSessionID       string
+	deviceSSOSessionDuration int
 }
 
 func (r callbackMDMSSOResponse) HijackRender(ctx context.Context, w http.ResponseWriter) {
@@ -3237,6 +4430,9 @@ func (r callbackMDMSSOResponse) SetCookies(_ context.Context, w http.ResponseWri
 	if r.byodEnrollCookieValue != "" {
 		setBYODCookie(w, r.byodEnrollCookieValue, 30*60) // valid for 30 minutes
 	}
+	if r.deviceSSOSessionID != "" {
+		setDeviceSSOSessionCookie(w, r.deviceSSOSessionID, r.deviceSSOSessionDuration)
+	}
 }
 
 // Error will always be nil because errors are handled by sending a query
@@ -3246,26 +4442,38 @@ func (r callbackMDMSSOResponse) Error() error { return nil }
 
 func callbackMDMSSOEndpoint(ctx context.Context, request interface{}, svc fleet.Service) (fleet.Errorer, error) {
 	callbackRequest := request.(*callbackMDMSSORequest)
-	redirectURL, byodCookieValue := svc.MDMSSOCallback(ctx, callbackRequest.sessionID, callbackRequest.samlResponse)
+	redirectURL, byodCookieValue, deviceSSOSessionID, deviceSSOSessionDuration := svc.MDMSSOCallback(ctx, callbackRequest.sessionID, callbackRequest.samlResponse)
+
+	// Relay state is carried by the browser through the IdP and back, is used
+	// for distinguishing users comming from "My device".
+	if callbackRequest.relayState == fleet.SSOInitiatorFleetDesktop {
+		switch redirectURL {
+		case apple_mdm.FleetUISSOCallbackSessionExpired:
+			redirectURL = apple_mdm.FleetUIDeviceSSOErrorSessionExpired
+		case apple_mdm.FleetUISSOCallbackError:
+			redirectURL = apple_mdm.FleetUIDeviceSSOError
+		}
+	}
+
 	return callbackMDMSSOResponse{
-		redirectURL:           redirectURL,
-		byodEnrollCookieValue: byodCookieValue,
+		redirectURL:              redirectURL,
+		byodEnrollCookieValue:    byodCookieValue,
+		deviceSSOSessionID:       deviceSSOSessionID,
+		deviceSSOSessionDuration: deviceSSOSessionDuration,
 	}, nil
 }
 
-func (svc *Service) MDMSSOCallback(ctx context.Context, sessionID string, samlResponse []byte) (redirectURL, byodCookieValue string) {
+func (svc *Service) MDMSSOCallback(ctx context.Context, sessionID string, samlResponse []byte) (redirectURL, byodCookieValue, deviceSSOSessionID string, deviceSSOSessionDurationSeconds int) {
 	// skipauth: No authorization check needed due to implementation
 	// returning only license error.
 	svc.authz.SkipAuthorization(ctx)
 
-	return apple_mdm.FleetUISSOCallbackPath + "?error=true", ""
+	return apple_mdm.FleetUISSOCallbackPath + "?error=true", "", "", 0
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 // GET /mdm/manual_enrollment_profile
 ////////////////////////////////////////////////////////////////////////////////
-
-type getManualEnrollmentProfileRequest struct{}
 
 type getManualEnrollmentProfileResponse struct {
 	// Profile field is used in HijackRender for the response.
@@ -3292,8 +4500,15 @@ func (r getManualEnrollmentProfileResponse) HijackRender(ctx context.Context, w 
 
 func (r getManualEnrollmentProfileResponse) Error() error { return r.Err }
 
+type getManualEnrollmentProfileRequest struct {
+	// Personal indicates the end user chose "Personal (BYOD)" on the /enroll page.
+	// Defaults to false (company-owned) when omitted to preserve backwards-compatibility.
+	Personal bool `query:"byod,optional"`
+}
+
 func getManualEnrollmentProfileEndpoint(ctx context.Context, request interface{}, svc fleet.Service) (fleet.Errorer, error) {
-	profile, err := svc.GetMDMManualEnrollmentProfile(ctx)
+	req := request.(*getManualEnrollmentProfileRequest)
+	profile, err := svc.GetMDMManualEnrollmentProfile(ctx, req.Personal)
 	if err != nil {
 		return getManualEnrollmentProfileResponse{Err: err}, nil
 	}
@@ -3301,7 +4516,7 @@ func getManualEnrollmentProfileEndpoint(ctx context.Context, request interface{}
 	return getManualEnrollmentProfileResponse{Profile: profile}, nil
 }
 
-func (svc *Service) GetMDMManualEnrollmentProfile(ctx context.Context) ([]byte, error) {
+func (svc *Service) GetMDMManualEnrollmentProfile(ctx context.Context, personal bool) ([]byte, error) {
 	// skipauth: No authorization check needed due to implementation returning
 	// only license error.
 	svc.authz.SkipAuthorization(ctx)
@@ -3313,12 +4528,350 @@ func (svc *Service) GetMDMManualEnrollmentProfile(ctx context.Context) ([]byte, 
 // FileVault-related free version implementation
 ////////////////////////////////////////////////////////////////////////////////
 
-func (svc *Service) MDMAppleEnableFileVaultAndEscrow(ctx context.Context, teamID *uint) error {
+func (svc *Service) MDMAppleReconcileFileVaultProfile(ctx context.Context, teamID *uint) error {
 	return fleet.ErrMissingLicense
 }
 
-func (svc *Service) MDMAppleDisableFileVaultAndEscrow(ctx context.Context, teamID *uint) error {
+type listAppleDDMAssetsRequest struct {
+	TeamID *uint `query:"fleet_id,optional"`
+}
+
+type listAppleDDMAssetsResponse struct {
+	Assets []*fleet.DDMAsset `json:"assets"`
+	Err    error             `json:"error,omitempty"`
+}
+
+func (r listAppleDDMAssetsResponse) Error() error { return r.Err }
+
+func listAppleDDMAssetsEndpoint(ctx context.Context, request any, svc fleet.Service) (fleet.Errorer, error) {
+	req := request.(*listAppleDDMAssetsRequest)
+	assets, err := svc.ListAppleDDMAssets(ctx, req.TeamID)
+	if err != nil {
+		return listAppleDDMAssetsResponse{Err: err}, nil
+	}
+	return listAppleDDMAssetsResponse{Assets: assets}, nil
+}
+
+func (svc *Service) ListAppleDDMAssets(ctx context.Context, teamID *uint) ([]*fleet.DDMAsset, error) {
+	// skipauth: No authorization check needed due to implementation returning
+	// only license error.
+	svc.authz.SkipAuthorization(ctx)
+
+	return nil, fleet.ErrMissingLicense
+}
+
+type getAppleDDMAssetRequest struct {
+	AssetUUID string `url:"asset_uuid"`
+	Alt       string `query:"alt,optional"`
+}
+
+func (r getAppleDDMAssetRequest) ValidateRequest() error {
+	if r.Alt != "" && strings.ToLower(r.Alt) != "media" {
+		return &fleet.BadRequestError{Message: "Alt query param value is invalid. Supported values are empty and \"media\""}
+	}
+	return nil
+}
+
+type getAppleDDMAssetResponse struct {
+	Asset *fleet.DDMAsset `json:",omitempty"`
+	Err   error           `json:"error,omitempty"`
+}
+
+func (r getAppleDDMAssetResponse) Error() error { return r.Err }
+
+type downloadAppleDDMAssetResponse struct {
+	Name string
+	Data []byte
+	Err  error `json:"error,omitempty"`
+}
+
+func (r downloadAppleDDMAssetResponse) Error() error { return r.Err }
+
+func (r downloadAppleDDMAssetResponse) HijackRender(ctx context.Context, w http.ResponseWriter) {
+	w.Header().Set("Content-Length", strconv.Itoa(len(r.Data)))
+	w.Header().Set("Content-Type", "application/json")                                   // We know we return JSON, if we ever serve other files we need a generic octet-stream
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment;filename=%q`, r.Name)) // make the caller download the file
+	if n, err := w.Write(r.Data); err != nil {
+		logging.WithExtras(ctx, "err", err, "written", n)
+	}
+}
+
+func getAppleDDMAssetEndpoint(ctx context.Context, request any, svc fleet.Service) (fleet.Errorer, error) {
+	req := request.(*getAppleDDMAssetRequest)
+
+	if strings.ToLower(req.Alt) == "media" {
+		name, data, err := svc.DownloadAppleDDMAsset(ctx, req.AssetUUID)
+		if err != nil {
+			return downloadAppleDDMAssetResponse{Err: err}, nil
+		}
+		return downloadAppleDDMAssetResponse{Name: name, Data: data}, nil
+	}
+
+	asset, err := svc.GetAppleDDMAsset(ctx, req.AssetUUID)
+	if err != nil {
+		return getAppleDDMAssetResponse{Err: err}, nil
+	}
+	return getAppleDDMAssetResponse{Asset: asset}, nil
+}
+
+func (svc *Service) GetAppleDDMAsset(ctx context.Context, assetUUID string) (*fleet.DDMAsset, error) {
+	// skipauth: No authorization check needed due to implementation returning
+	// only license error.
+	svc.authz.SkipAuthorization(ctx)
+
+	return nil, fleet.ErrMissingLicense
+}
+
+func (svc *Service) DownloadAppleDDMAsset(ctx context.Context, assetUUID string) (name string, data []byte, err error) {
+	// skipauth: No authorization check needed due to implementation returning
+	// only license error.
+	svc.authz.SkipAuthorization(ctx)
+
+	return "", nil, fleet.ErrMissingLicense
+}
+
+type createAppleDDMAssetRequest struct {
+	TeamID *uint
+	Asset  *multipart.FileHeader
+}
+
+func (createAppleDDMAssetRequest) DecodeRequest(ctx context.Context, r *http.Request) (any, error) {
+	decoded := new(createAppleDDMAssetRequest)
+
+	err := parseMultipartForm(ctx, r, platform_http.MaxMultipartFormSize)
+	if err != nil {
+		return nil, &fleet.BadRequestError{
+			Message:     "failed to parse multipart form",
+			InternalErr: err,
+		}
+	}
+
+	val, ok := r.MultipartForm.Value["fleet_id"]
+	if !ok || len(val) < 1 {
+		// default is no team
+		decoded.TeamID = new(uint(0))
+	} else {
+		fleetID, err := strconv.ParseUint(val[0], 10, 32) // nolint:staticcheck // it's used...
+		if err != nil {
+			return nil, &fleet.BadRequestError{Message: fmt.Sprintf("Invalid fleet_id: %s", val[0])}
+		}
+		decoded.TeamID = new(uint(fleetID))
+	}
+
+	fhs, ok := r.MultipartForm.File["asset"]
+	if !ok || len(fhs) < 1 {
+		return nil, &fleet.BadRequestError{Message: "no file headers for asset"}
+	}
+	decoded.Asset = fhs[0]
+
+	if !strings.HasSuffix(decoded.Asset.Filename, ".json") {
+		return nil, &fleet.BadRequestError{Message: "Invalid file type for asset. Only \".json\" files are allowed"}
+	}
+
+	return decoded, nil
+}
+
+type createAppleDDMAssetResponse struct {
+	AssetUUID string `json:"asset_uuid,omitempty"`
+	Err       error  `json:"error,omitempty"`
+}
+
+func (r createAppleDDMAssetResponse) Error() error { return r.Err }
+
+func createAppleDDMAssetEndpoint(ctx context.Context, request any, svc fleet.Service) (fleet.Errorer, error) {
+	req := request.(*createAppleDDMAssetRequest)
+	f, err := req.Asset.Open()
+	if err != nil {
+		return createAppleDDMAssetResponse{Err: err}, nil
+	}
+	defer f.Close()
+	assetData, err := io.ReadAll(f)
+	if err != nil {
+		return createAppleDDMAssetResponse{Err: err}, nil
+	}
+	assetName := strings.TrimSuffix(req.Asset.Filename, ".json")
+	assetUUID, err := svc.CreateAppleDDMAsset(ctx, req.TeamID, assetName, assetData)
+	if err != nil {
+		return createAppleDDMAssetResponse{Err: err}, nil
+	}
+	return createAppleDDMAssetResponse{AssetUUID: assetUUID}, nil
+}
+
+func (svc *Service) CreateAppleDDMAsset(ctx context.Context, teamID *uint, name string, data []byte) (string, error) {
+	// skipauth: No authorization check needed due to implementation returning
+	// only license error.
+	svc.authz.SkipAuthorization(ctx)
+
+	return "", fleet.ErrMissingLicense
+}
+
+type deleteAppleDDMAssetRequest struct {
+	AssetUUID string `url:"asset_uuid"`
+}
+
+type deleteAppleDDMAssetResponse struct {
+	Err error `json:"error,omitempty"`
+}
+
+func (r deleteAppleDDMAssetResponse) Error() error { return r.Err }
+
+func (r deleteAppleDDMAssetResponse) Status() int { return http.StatusNoContent }
+
+func deleteAppleDDMAssetEndpoint(ctx context.Context, request any, svc fleet.Service) (fleet.Errorer, error) {
+	req := request.(*deleteAppleDDMAssetRequest)
+	if err := svc.DeleteAppleDDMAsset(ctx, req.AssetUUID); err != nil {
+		return deleteAppleDDMAssetResponse{Err: err}, nil
+	}
+	return deleteAppleDDMAssetResponse{}, nil
+}
+
+func (svc *Service) DeleteAppleDDMAsset(ctx context.Context, assetUUID string) error {
+	// skipauth: No authorization check needed due to implementation returning
+	// only license error.
+	svc.authz.SkipAuthorization(ctx)
+
 	return fleet.ErrMissingLicense
+}
+
+type batchSetAppleDDMAssetsRequest struct {
+	TeamID   *uint                                `json:"-" query:"fleet_id,optional"`
+	TeamName string                               `json:"-" query:"team_name,optional" renameto:"fleet_name"`
+	DryRun   bool                                 `json:"-" query:"dry_run,optional"`
+	Assets   []fleet.MDMAppleDDMAssetBatchPayload `json:"assets"`
+}
+
+type batchSetAppleDDMAssetsResponse struct {
+	Err error `json:"error,omitempty"`
+}
+
+func (r batchSetAppleDDMAssetsResponse) Error() error { return r.Err }
+
+func (r batchSetAppleDDMAssetsResponse) Status() int { return http.StatusNoContent }
+
+func batchSetAppleDDMAssetsEndpoint(ctx context.Context, request any, svc fleet.Service) (fleet.Errorer, error) {
+	req := request.(*batchSetAppleDDMAssetsRequest)
+	if err := svc.BatchSetAppleDDMAssets(ctx, req.TeamID, req.TeamName, req.Assets, req.DryRun); err != nil {
+		return batchSetAppleDDMAssetsResponse{Err: err}, nil
+	}
+	return batchSetAppleDDMAssetsResponse{}, nil
+}
+
+func (svc *Service) BatchSetAppleDDMAssets(ctx context.Context, teamID *uint, teamName string, assets []fleet.MDMAppleDDMAssetBatchPayload, dryRun bool) error {
+	// skipauth: No authorization check needed due to implementation returning
+	// only license error.
+	svc.authz.SkipAuthorization(ctx)
+
+	return fleet.ErrMissingLicense
+}
+
+type releaseABDevicesRequest struct {
+	HostIDs []uint `json:"ids"`
+}
+
+type releaseABDevicesResponse struct {
+	Results []*fleet.ABReleaseDeviceResponse `json:"results"`
+	Err     error                            `json:"error,omitempty"`
+}
+
+func (r releaseABDevicesResponse) Error() error { return r.Err }
+
+func releaseABDevicesEndpoint(ctx context.Context, request any, svc fleet.Service) (fleet.Errorer, error) {
+	req := request.(*releaseABDevicesRequest)
+	results, err := svc.ReleaseABDevices(ctx, req.HostIDs)
+	if err != nil {
+		return releaseABDevicesResponse{Results: nil, Err: err}, nil
+	}
+	return releaseABDevicesResponse{Results: results}, nil
+}
+
+func (svc *Service) ReleaseABDevices(ctx context.Context, hostIDs []uint) ([]*fleet.ABReleaseDeviceResponse, error) {
+	// skipauth: No authorization check needed due to implementation returning
+	// only license error.
+	svc.authz.SkipAuthorization(ctx)
+
+	return nil, fleet.ErrMissingLicense
+}
+
+type sendAPNSPingRequest struct {
+	HostID uint `url:"id"`
+}
+
+type sendAPNSPingResponse struct {
+	Err error `json:"error,omitempty"`
+}
+
+func (r sendAPNSPingResponse) Error() error { return r.Err }
+
+func (r sendAPNSPingResponse) Status() int { return http.StatusNoContent }
+
+func apnsPingRequestEndpoint(ctx context.Context, request any, svc fleet.Service) (fleet.Errorer, error) {
+	req := request.(*sendAPNSPingRequest)
+	err := svc.SendAPNSPing(ctx, req.HostID)
+	if err != nil {
+		return sendAPNSPingResponse{Err: err}, nil
+	}
+	return sendAPNSPingResponse{Err: nil}, nil
+}
+
+func (svc *Service) SendAPNSPing(ctx context.Context, hostID uint) error {
+	if err := svc.authz.Authorize(ctx, &fleet.Host{}, fleet.ActionList); err != nil {
+		return err
+	}
+
+	// Fetch the host then authorize based on the host's team.
+	host, err := svc.ds.Host(ctx, hostID)
+	if err != nil {
+		return err
+	}
+	if err := svc.authz.Authorize(ctx, &fleet.Host{TeamID: host.TeamID}, fleet.ActionRead); err != nil {
+		return err
+	}
+
+	return svc.handleSendAPNSPing(ctx, host)
+}
+
+func (svc *Service) DeviceSendAPNSPing(ctx context.Context, host *fleet.Host) error {
+	return svc.handleSendAPNSPing(ctx, host)
+}
+
+func (svc *Service) handleSendAPNSPing(ctx context.Context, host *fleet.Host) error {
+	if !fleet.IsApplePlatform(host.Platform) {
+		return &fleet.BadRequestError{Message: "Host is not an Apple device."}
+	}
+
+	enrollment, err := svc.ds.GetNanoMDMEnrollment(ctx, host.UUID)
+	if err != nil {
+		return ctxerr.Wrap(ctx, err, "getting NanoMDM enrollment")
+	}
+
+	if enrollment == nil || !enrollment.Enabled {
+		return &fleet.BadRequestError{Message: "Host does not have MDM turned on."}
+	}
+
+	if err := svc.mdmAppleCommander.SendNotifications(ctx, []string{host.UUID}); err != nil {
+		return ctxerr.Wrap(ctx, err, "sending APNS ping")
+	}
+	svc.logger.DebugContext(ctx, "successfully sent APNS ping", "host.uuid", host.UUID)
+
+	if fleet.IsMacOSPlatform(host.Platform) {
+		// try for a user channel
+		userEnrollment, err := svc.ds.GetNanoMDMUserEnrollment(ctx, host.UUID)
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "getting NanoMDM user enrollment")
+		}
+		if userEnrollment == nil || !userEnrollment.Enabled {
+			// nil just means no user channel or enrollment
+			return nil
+		}
+
+		if err := svc.mdmAppleCommander.SendNotifications(ctx, []string{userEnrollment.ID}); err != nil {
+			return ctxerr.Wrap(ctx, err, "sending APNS ping for user enrollment")
+		}
+
+		svc.logger.DebugContext(ctx, "successfully sent APNS ping for user enrollment", "user_enrollment.id", userEnrollment.ID, "host.uuid", host.UUID)
+	}
+
+	return nil
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -3332,9 +4885,14 @@ type MDMAppleCheckinAndCommandService struct {
 	vppInstaller    fleet.AppleMDMVPPInstaller
 	mdmLifecycle    *mdmlifecycle.HostLifecycle
 	commandHandlers map[string][]fleet.MDMCommandResultsHandler
-	keyValueStore   fleet.KeyValueStore
+	keyValueStore   fleet.AdvancedKeyValueStore
 	newActivityFn   mdmlifecycle.NewActivityFunc
 	isPremium       bool
+	// deferFleetInitiatedActivation mirrors
+	// activity.fleet_initiated_release_per_minute > 0: fleet-initiated
+	// activities (scheduled app updates) are enqueued without inline
+	// activation and released by the fleet-initiated release cron.
+	deferFleetInitiatedActivation bool
 }
 
 func NewMDMAppleCheckinAndCommandService(
@@ -3343,8 +4901,9 @@ func NewMDMAppleCheckinAndCommandService(
 	vppInstaller fleet.AppleMDMVPPInstaller,
 	isPremium bool,
 	logger *slog.Logger,
-	keyValueStore fleet.KeyValueStore,
+	keyValueStore fleet.AdvancedKeyValueStore,
 	newActivityFn mdmlifecycle.NewActivityFunc,
+	deferFleetInitiatedActivation bool,
 ) *MDMAppleCheckinAndCommandService {
 	mdmLifecycle := mdmlifecycle.New(ds, logger, newActivityFn)
 	return &MDMAppleCheckinAndCommandService{
@@ -3357,11 +4916,24 @@ func NewMDMAppleCheckinAndCommandService(
 		commandHandlers: map[string][]fleet.MDMCommandResultsHandler{},
 		keyValueStore:   keyValueStore,
 		newActivityFn:   newActivityFn,
+
+		deferFleetInitiatedActivation: deferFleetInitiatedActivation,
 	}
 }
 
 func (svc *MDMAppleCheckinAndCommandService) RegisterResultsHandler(commandType string, handler fleet.MDMCommandResultsHandler) {
 	svc.commandHandlers[commandType] = append(svc.commandHandlers[commandType], handler)
+}
+
+// certIsFromNewEnrollment reports whether the device's MDM identity certificate was issued from a
+// new-enrollment profile, identified by apple_mdm.FleetEnrollmentSubjectOU in the Subject OU. Renewal
+// profiles omit this marker, so its presence means the current checkin belongs to a fresh enrollment
+// rather than a SCEP renewal.
+func certIsFromNewEnrollment(cert *x509.Certificate) bool {
+	if cert == nil {
+		return false
+	}
+	return slices.Contains(cert.Subject.OrganizationalUnit, apple_mdm.FleetEnrollmentSubjectOU)
 }
 
 // Authenticate handles MDM [Authenticate][1] requests.
@@ -3375,6 +4947,12 @@ func (svc *MDMAppleCheckinAndCommandService) RegisterResultsHandler(commandType 
 //
 // [1]: https://developer.apple.com/documentation/devicemanagement/authenticate
 func (svc *MDMAppleCheckinAndCommandService) Authenticate(r *mdm.Request, m *mdm.Authenticate) error {
+	// AB-only enrollment enforcement lives in abOnlyEnrollmentCheckinService, which wraps
+	// this service (see handler.go). This service is dispatched as a "sub service" of
+	// multi.New alongside nanomdm's core service — its returned errors are only logged, not
+	// surfaced to the device (see MultiService.runOthers) — so a check here cannot actually
+	// block enrollment.
+
 	var scepRenewalInProgress bool
 	existingDeviceInfo, err := svc.ds.GetHostMDMCheckinInfo(r.Context, r.ID)
 	if err != nil {
@@ -3385,6 +4963,21 @@ func (svc *MDMAppleCheckinAndCommandService) Authenticate(r *mdm.Request, m *mdm
 	}
 	if existingDeviceInfo != nil {
 		scepRenewalInProgress = existingDeviceInfo.SCEPRenewalInProgress
+	}
+
+	// A pending SCEP renewal command only means "this checkin is a renewal" if the device didn't just
+	// re-enroll. New-enrollment profiles carry apple_mdm.FleetEnrollmentSubjectOU in their SCEP Subject
+	// (renewal profiles omit it), and that OU survives into the identity cert the device presents here.
+	// If it's present, treat this as a fresh enrollment: clear the stale renew_command_uuid so
+	// GetHostMDMCheckinInfo reports SCEPRenewalInProgress=false for every downstream consumer
+	// (TokenUpdate, the profile verifier, the nano_devices bootstrap logic) and the normal enrollment
+	// side effects (activity, host reset, post-enroll worker) run.
+	if scepRenewalInProgress && certIsFromNewEnrollment(r.Certificate) {
+		svc.logger.InfoContext(r.Context, "identity cert is from a new enrollment, treating as fresh enrollment despite pending SCEP renewal", "host_uuid", r.ID)
+		if err := svc.ds.CleanSCEPRenewRefs(r.Context, r.ID); err != nil {
+			return ctxerr.Wrap(r.Context, err, "cleaning SCEP refs for fresh enrollment")
+		}
+		scepRenewalInProgress = false
 	}
 
 	// iPhones, iPads, and iPods send ProductName but not Model/ModelName,
@@ -3405,6 +4998,33 @@ func (svc *MDMAppleCheckinAndCommandService) Authenticate(r *mdm.Request, m *mdm
 		m.Model = m.ProductName
 	}
 
+	// For account driven user enrollments, we get the challenge in the Bearer token
+	// which is used to look up the default team for BYOD enrollments.
+	var byodTeamID *uint
+	if r.Type == mdm.UserEnrollmentDevice && strings.HasPrefix(r.Authorization, "Bearer ") {
+		// Split enrollment challenge off the Bearer prefix
+		challenge := strings.TrimPrefix(r.Authorization, "Bearer ")
+
+		enrollChallenge, err := svc.ds.GetADUEEnrollmentChallenge(r.Context, challenge)
+		if err != nil {
+			return ctxerr.Wrap(r.Context, err, "getting adue enrollment challenge")
+		}
+
+		if enrollChallenge.ABMTokenID != nil {
+			abmToken, err := svc.ds.GetABMTokenByID(r.Context, *enrollChallenge.ABMTokenID)
+			if err != nil {
+				return ctxerr.Wrap(r.Context, err, "getting abm token by id")
+			}
+			byodTeamID = abmToken.BYODDefaultTeamID
+		}
+
+	}
+
+	// Read the personal enrollment flag from the MDM ServerURL query params.
+	// AddPersonalEnrollmentToFleetURL bakes "byod=1" into the ServerURL when
+	// the end user chose "Personal (BYOD)" on the /enroll page; nanomdm surfaces it here.
+	isPersonal := r.Params != nil && r.Params[apple_mdm.FleetPersonalEnrollmentKey] == "1"
+
 	if err := svc.mdmLifecycle.Do(r.Context, mdmlifecycle.HostOptions{
 		Action:                mdmlifecycle.HostActionReset,
 		Platform:              platform,
@@ -3413,19 +5033,31 @@ func (svc *MDMAppleCheckinAndCommandService) Authenticate(r *mdm.Request, m *mdm
 		HardwareModel:         m.Model,
 		SCEPRenewalInProgress: scepRenewalInProgress,
 		UserEnrollmentID:      m.EnrollmentID,
+		TeamID:                byodTeamID,
+		IsPersonalEnrollment:  isPersonal,
 	}); err != nil {
 		svc.logger.WarnContext(r.Context, "could not reset Apple mdm information", "UDID", m.UDID, "EnrollmentID", m.EnrollmentID, "err", err)
 		return err
 	}
 
+	// Persist the access rights for this host so SCEP/ACME renewal can honour
+	// the monotonic-narrowing invariant (Apple disallows widening on replace).
+	// Skip during SCEP renewal: the renewed profile's ServerURL doesn't carry
+	// byod=1, so isPersonal would be false here and we'd widen the stored
+	// bitmask back to MDMAccessRightAll, breaking the next renewal.
 	if !scepRenewalInProgress {
-		if svc.keyValueStore != nil {
-			// Set sticky key for MDM enrollments to avoid updating team id on orbit enrollments
-			err = svc.keyValueStore.Set(r.Context, fleet.StickyMDMEnrollmentKeyPrefix+r.ID, "1", fleet.StickyMDMEnrollmentTTL)
-			if err != nil {
-				// We do not want to fail here, just log the error to notify
-				svc.logger.ErrorContext(r.Context, "failed to set sticky mdm enrollment key", "err", err, "host_uuid", r.ID)
-			}
+		accessRights := apple_mdm.AppleEnrollmentAccessRights(isPersonal)
+		if err := svc.ds.SetHostMDMAppleEnrollmentPermissions(r.Context, r.ID, accessRights); err != nil {
+			svc.logger.ErrorContext(r.Context, "failed to persist enrollment permissions", "host_uuid", r.ID, "err", err)
+			// Non-fatal: worst-case the next SCEP renewal uses MDMAccessRightAll (the pre-feature default).
+		}
+	}
+
+	if svc.keyValueStore != nil {
+		// Set profile processing flag, is being handled by the apple_mdm worker, it will be cleared later if it's a SCEP renewal.
+		if err := svc.keyValueStore.Set(r.Context, fleet.MDMProfileProcessingKeyPrefix+":"+r.ID, "1", fleet.MDMProfileProcessingTTL); err != nil {
+			svc.logger.ErrorContext(r.Context, "failed to set mdm profile processing key", "err", err, "host_uuid", r.ID)
+			// We do not want to fail here, just log the error to notify of issues
 		}
 	}
 
@@ -3448,27 +5080,76 @@ func (svc *MDMAppleCheckinAndCommandService) TokenUpdate(r *mdm.Request, m *mdm.
 	// much more difficult to reason about the state of the host. We should try instead
 	// to centralize the flow control in the lifecycle methods.
 	if info.SCEPRenewalInProgress {
-		svc.logger.InfoContext(r.Context, "token update received for a SCEP renewal in process, cleaning SCEP refs", "host_uuid", r.ID)
+		svc.logger.InfoContext(r.Context, "token update received with known SCEP renewal in process, cleaning SCEP refs", "host_uuid", r.ID)
 		if err := svc.ds.CleanSCEPRenewRefs(r.Context, r.ID); err != nil {
 			return ctxerr.Wrap(r.Context, err, "cleaning SCEP refs")
 		}
-		svc.logger.InfoContext(r.Context, "cleaned SCEP refs, skipping setup experience and mdm lifecycle turn on action", "host_uuid", r.ID)
-		return nil
+
+		if !m.AwaitingConfiguration {
+			// Normal SCEP renewal - device is NOT at Setup Assistant. Clean refs and short-circuit.
+			svc.logger.InfoContext(r.Context, "cleaned SCEP refs, skipping setup experience and mdm lifecycle turn on action", "host_uuid", r.ID)
+
+			// Clean up redis key for profile processing if set.
+			if svc.keyValueStore != nil {
+				if err := svc.keyValueStore.Delete(r.Context, fleet.MDMProfileProcessingKeyPrefix+":"+r.ID); err != nil {
+					svc.logger.ErrorContext(r.Context, "failed to delete mdm profile processing key", "err", err, "host_uuid", r.ID)
+				}
+			}
+			return nil
+		}
+
+		svc.logger.InfoContext(r.Context, "resetting mdm enrollment for old SCEP renewal", "host_uuid", r.ID)
+		if err := svc.ds.MDMResetEnrollment(r.Context, r.ID, false); err != nil {
+			return ctxerr.Wrap(r.Context, err, "failed resetting enrollment for device with old SCEP renewal", "host_uuid", r.ID)
+		}
+
+		// Device is awaiting configuration (wiped DEP device re-enrolling). The pending SCEP
+		// renewal was from the previous enrollment. Continue the normal enrollment flow so
+		// the device gets released from the setup assistant.
+		svc.logger.InfoContext(r.Context, "continuing with token update, due to awaiting configuration from new enrollment", "host_uuid", r.ID)
 	}
 
 	var hasSetupExpItems bool
 	enqueueSetupExperienceItems := false
 
 	if m.AwaitingConfiguration {
+		// We are sure that the device is going through a new enrollment here, so we want to
+		// remove the enrolled from migration flag as it is no longer true.
+		if err := svc.ds.ClearHostEnrolledFromMigration(r.Context, r.ID); err != nil {
+			return ctxerr.Wrap(r.Context, err, "resetting enrolled from migration flag", "host_uuid", r.ID)
+		}
+
+		nanoEnroll, err := svc.ds.GetNanoMDMEnrollment(r.Context, r.ID)
+		if err != nil {
+			return ctxerr.Wrap(r.Context, err, "getting nanomdm enrollment")
+		}
+
+		skipDarwinMigration := info.MigrationInProgress && info.Platform == "darwin"
+
+		// Reset host details on re-enrollment, since we are in DEP (AwaitingConfiguration) and new TokenUpdate (TokenUpdateTally == 1).
+		if nanoEnroll != nil && nanoEnroll.TokenUpdateTally == 1 && !skipDarwinMigration {
+			appCfg, err := svc.ds.AppConfig(r.Context)
+			if err != nil {
+				return ctxerr.Wrap(r.Context, err, "getting app config")
+			}
+
+			if err := svc.ds.MDMAppleResetOnReenrollment(r.Context, r.ID, appCfg.ActivityExpirySettings.PreserveHostActivitiesOnReenrollment); err != nil {
+				return ctxerr.Wrap(r.Context, err, "resetting enrollment on re-enrollment", "host_uuid", r.ID)
+			}
+		}
+
 		// Note that Setup Experience is only skipped for macOS during DEP migration. iOS and iPadOS will still get VPP apps
-		if info.MigrationInProgress && info.Platform == "darwin" {
+		if skipDarwinMigration {
 			svc.logger.InfoContext(r.Context, "skipping setup experience enqueueing because DEP migration is in progress", "host_uuid", r.ID)
 		} else {
 			enqueueSetupExperienceItems = true
 		}
-	} else if info.Platform != "darwin" && r.Type == mdm.Device && !info.InstalledFromDEP {
-		// For manual iOS/iPadOS device enrollments, check the `TokenUpdateTally` so that
-		// we only run the setup experience enqueueing once per device.
+	} else if info.Platform != "darwin" && (r.Type == mdm.Device || r.Type == mdm.UserEnrollmentDevice) && !info.InstalledFromDEP {
+		// For manual and Account-Driven User Enrolled (BYOD) iOS/iPadOS device
+		// enrollments, check the `TokenUpdateTally` so that we only run the
+		// setup experience enqueueing once per device. The downstream install
+		// flow (via InstallVPPAppPostValidation) handles user-scoped licensing
+		// for User Enrollments.
 		nanoEnroll, err := svc.ds.GetNanoMDMEnrollment(r.Context, r.ID)
 		if err != nil {
 			return ctxerr.Wrap(r.Context, err, "getting nanomdm enrollment")
@@ -3482,7 +5163,9 @@ func (svc *MDMAppleCheckinAndCommandService) TokenUpdate(r *mdm.Request, m *mdm.
 	//         We do check the license before actually _running_ setup experience items.
 	if enqueueSetupExperienceItems {
 		// Enqueue setup experience items and mark the host as being in setup experience
-		hasSetupExpItems, err = svc.ds.EnqueueSetupExperienceItems(r.Context, info.Platform, r.ID, info.TeamID)
+		// NOTE: we don't have PlatformLike field for `info`, but that's fine as this is Apple-specific
+		// flow and the platform is always the same as platform-like.
+		hasSetupExpItems, err = svc.ds.EnqueueSetupExperienceItems(r.Context, info.Platform, info.Platform, r.ID, info.TeamID)
 		if err != nil {
 			return ctxerr.Wrap(r.Context, err, "queueing setup experience tasks")
 		}
@@ -3498,33 +5181,68 @@ func (svc *MDMAppleCheckinAndCommandService) TokenUpdate(r *mdm.Request, m *mdm.
 		}
 	}
 
-	var acctUUID string
+	var acctUUID, managedAppleID string
 	idp, err := svc.ds.GetMDMIdPAccountByHostUUID(r.Context, r.ID)
 	if err != nil {
 		return ctxerr.Wrap(r.Context, err, "getting idp account")
 	}
 	if idp != nil {
 		acctUUID = idp.UUID
+		managedAppleID = idp.Email
 	}
 
 	// User (Device) enrollments, also known as Account Driven enrollments or BYOD enrollments,
-	// are a special case where the bearer token is used to link the enrollment to the IDP account.
+	// are a special case where the bearer token is used to link the enrollment to the IDP account and it's default team.
 	if r.Type == mdm.UserEnrollmentDevice && idp == nil && strings.HasPrefix(r.Authorization, "Bearer ") {
-		// Split off the Bearer prefix
-		accountUUID := strings.TrimPrefix(r.Authorization, "Bearer ")
-		idpAccount, err := svc.ds.GetMDMIdPAccountByUUID(r.Context, accountUUID)
+		// Split enrollment challenge off the Bearer prefix
+		challenge := strings.TrimPrefix(r.Authorization, "Bearer ")
+
+		enrollChallenge, err := svc.ds.GetADUEEnrollmentChallenge(r.Context, challenge)
 		if err != nil && !fleet.IsNotFound(err) {
-			return ctxerr.Wrap(r.Context, err, "getting idp account by UUID")
+			return ctxerr.Wrap(r.Context, err, "getting adue enrollment challenge")
 		}
-		if fleet.IsNotFound(err) || idpAccount == nil {
-			// This should never happen but we still want to process the token update
-			svc.logger.ErrorContext(r.Context, "no IDP account found for User (Device) enrollment even though a bearer token was passed",
-				"host_uuid", r.ID, "account_uuid", accountUUID)
+		if fleet.IsNotFound(err) || enrollChallenge == nil {
+			// This should never happen, but we skip IDP assocation.
+			svc.logger.ErrorContext(r.Context, "no enrollment challenge found for User (Device) enrollment",
+				"host_uuid", r.ID, "challenge", challenge)
 		} else {
-			acctUUID = idpAccount.UUID
-			err = svc.ds.AssociateHostMDMIdPAccount(r.Context, r.ID, acctUUID)
-			if err != nil {
-				return ctxerr.Wrap(r.Context, err, "associating host with idp account")
+			idpAccount, err := svc.ds.GetMDMIdPAccountByUUID(r.Context, enrollChallenge.IdPAccountUUID)
+			if err != nil && !fleet.IsNotFound(err) {
+				return ctxerr.Wrap(r.Context, err, "getting idp account by UUID")
+			}
+			if fleet.IsNotFound(err) || idpAccount == nil {
+				// This should never happen but we still want to process the token update
+				svc.logger.ErrorContext(r.Context, "no IDP account found for User (Device) enrollment",
+					"host_uuid", r.ID, "account_uuid", enrollChallenge.IdPAccountUUID)
+			} else {
+				acctUUID = idpAccount.UUID
+				managedAppleID = idpAccount.Email
+				err = svc.ds.AssociateHostMDMIdPAccount(r.Context, r.ID, acctUUID)
+				if err != nil {
+					return ctxerr.Wrap(r.Context, err, "associating host with idp account")
+				}
+			}
+		}
+
+	}
+
+	// For Account-Driven User Enrollment (BYOD iOS/iPadOS), keep host_mdm's
+	// managed_apple_id in sync with the current IdP-resolved email — including
+	// clearing it when resolution failed, so a stale value from a prior
+	// enrollment can't be reused for user-scoped VPP actions. The canonical
+	// source is the IDP account email resolved from the OAuth Bearer token at
+	// enrollment; Apple does not reliably populate UserLongName for User
+	// Enrollment so we don't fall back to it. NotFound is logged rather than
+	// returned because the lifecycle reset above should have inserted the
+	// host_mdm row already, and we don't want a transient race to break
+	// enrollment.
+	if r.Type == mdm.UserEnrollmentDevice {
+		if err := svc.ds.SetHostManagedAppleID(r.Context, info.HostID, managedAppleID); err != nil {
+			if fleet.IsNotFound(err) {
+				svc.logger.WarnContext(r.Context, "setting managed apple id: host_mdm row not found",
+					"host_id", info.HostID, "host_uuid", r.ID)
+			} else {
+				return ctxerr.Wrap(r.Context, err, "setting managed apple id")
 			}
 		}
 	}
@@ -3564,6 +5282,7 @@ func (svc *MDMAppleCheckinAndCommandService) CheckOut(r *mdm.Request, m *mdm.Che
 
 	return svc.newActivityFn(
 		r.Context, nil, &fleet.ActivityTypeMDMUnenrolled{
+			HostID:           info.HostID,
 			HostSerial:       info.HardwareSerial,
 			HostDisplayName:  info.DisplayName,
 			InstalledFromDEP: info.InstalledFromDEP,
@@ -3706,6 +5425,14 @@ func (svc *MDMAppleCheckinAndCommandService) CommandAndReportResults(r *mdm.Requ
 		return svc.handleRefetch(r, cmdResult)
 	}
 
+	// Results of the Settings/DeviceName command that enforces a team's host
+	// name template are routed by their UUID prefix rather than a "Settings"
+	// request-type case: other features may send Settings commands carrying
+	// different items, so the prefix scopes handling to renames.
+	if strings.HasPrefix(cmdResult.CommandUUID, fleet.DeviceNameCommandUUIDPrefix) {
+		return nil, svc.handleDeviceNameCommandResult(r.Context, cmdResult)
+	}
+
 	// We explicitly get the request type because it comes empty. There's a
 	// RequestType field in the struct, but it's used when a mdm.Command is
 	// issued.
@@ -3716,20 +5443,62 @@ func (svc *MDMAppleCheckinAndCommandService) CommandAndReportResults(r *mdm.Requ
 
 	switch requestType {
 	case "InstallProfile":
-		return nil, apple_mdm.HandleHostMDMProfileInstallResult(
+		status := mdmAppleDeliveryStatusFromCommandStatus(cmdResult.Status)
+		if err := apple_mdm.HandleHostMDMProfileInstallResult(
 			r.Context,
 			svc.ds,
 			cmdResult.Identifier(),
 			cmdResult.CommandUUID,
-			mdmAppleDeliveryStatusFromCommandStatus(cmdResult.Status),
+			status,
 			apple_mdm.FmtErrorChain(cmdResult.ErrorChain),
-		)
+			svc.newActivityFn,
+		); err != nil {
+			return nil, err
+		}
+		// Best-effort: when an ACME profile is acknowledged on macOS, queue
+		// CertificateList so hardware-bound certs (invisible to osquery) get
+		// ingested into host_certificates. Failures here are logged but don't
+		// affect the ack.
+		if status != nil && *status == fleet.MDMDeliveryVerifying {
+			if err := svc.maybeQueueCertificateListForACMEProfile(r.Context, cmdResult.Identifier(), cmdResult.CommandUUID); err != nil {
+				svc.logger.WarnContext(r.Context, "queue CertificateList after ACME profile install",
+					"err", err, "host_uuid", cmdResult.Identifier(), "command_uuid", cmdResult.CommandUUID)
+			}
+			// Okta conditional access bundles a SCEP payload with an Identity
+			// Preference payload, which leaves the previous cert pinned in
+			// the per-user keychain across renewals. After a successful ack,
+			// queue an internal cleanup script that removes the orphaned
+			// duplicate. No-op when the profile isn't the Okta CA one.
+			if err := svc.maybeRunOktaCACleanupScript(r.Context, cmdResult.Identifier(), cmdResult.CommandUUID); err != nil {
+				svc.logger.WarnContext(r.Context, "run Okta CA keychain cleanup after profile install",
+					"err", err, "host_uuid", cmdResult.Identifier(), "command_uuid", cmdResult.CommandUUID)
+			}
+		}
+		return nil, nil
 	case "RemoveProfile":
+		status := mdmAppleDeliveryStatusFromCommandStatus(cmdResult.Status)
+		detail := apple_mdm.FmtErrorChain(cmdResult.ErrorChain)
+		// MDMClientError 89 means "Profile not found" — for a removal, this
+		// is the desired outcome, so treat it as successful.
+		if status != nil && *status == fleet.MDMDeliveryFailed &&
+			apple_mdm.IsProfileNotFoundError(cmdResult.ErrorChain) {
+			status = &fleet.MDMDeliveryVerifying
+			detail = ""
+		}
+		// Refetch certs when an ACME profile is removed so the stale row clears.
+		// Must run before UpdateOrDeleteHostMDMAppleProfile deletes the row the
+		// probe reads. Best-effort.
+		if status != nil && *status == fleet.MDMDeliveryVerifying {
+			if err := svc.maybeQueueCertificateListForACMEProfile(r.Context, cmdResult.Identifier(), cmdResult.CommandUUID); err != nil {
+				svc.logger.WarnContext(r.Context, "queue CertificateList after ACME profile removal",
+					"err", err, "host_uuid", cmdResult.Identifier(), "command_uuid", cmdResult.CommandUUID)
+			}
+		}
 		return nil, svc.ds.UpdateOrDeleteHostMDMAppleProfile(r.Context, &fleet.HostMDMAppleProfile{
 			CommandUUID:   cmdResult.CommandUUID,
 			HostUUID:      cmdResult.Identifier(),
-			Status:        mdmAppleDeliveryStatusFromCommandStatus(cmdResult.Status),
-			Detail:        apple_mdm.FmtErrorChain(cmdResult.ErrorChain),
+			Status:        status,
+			Detail:        detail,
 			OperationType: fleet.MDMOperationTypeRemove,
 		})
 	case "DeviceLock", "EraseDevice":
@@ -3737,8 +5506,22 @@ func (svc *MDMAppleCheckinAndCommandService) CommandAndReportResults(r *mdm.Requ
 		if cmdResult.Status == fleet.MDMAppleStatusAcknowledged ||
 			cmdResult.Status == fleet.MDMAppleStatusError ||
 			cmdResult.Status == fleet.MDMAppleStatusCommandFormatError {
-			return nil, svc.ds.UpdateHostLockWipeStatusFromAppleMDMResult(r.Context, cmdResult.Identifier(), cmdResult.CommandUUID, requestType,
-				cmdResult.Status == fleet.MDMAppleStatusAcknowledged)
+			succeeded := cmdResult.Status == fleet.MDMAppleStatusAcknowledged
+			failed := cmdResult.Status == fleet.MDMAppleStatusError
+			if err := svc.ds.UpdateHostLockWipeStatusFromAppleMDMResult(r.Context, cmdResult.Identifier(), cmdResult.CommandUUID, requestType, succeeded); err != nil {
+				return nil, err
+			}
+			// If succesful or only if failed on non user-enrollment, as those always fail but never wipe.
+			if requestType == "EraseDevice" && (succeeded || (failed && r.Type == mdm.Device)) {
+				host, err := svc.ds.HostByIdentifier(r.Context, cmdResult.Identifier())
+				if err != nil {
+					return nil, ctxerr.Wrap(r.Context, err, "EraseDevice: get host by identifier")
+				}
+				if _, err := svc.ds.BatchCancelAllHostUpcomingActivities(r.Context, host.ID); err != nil {
+					return nil, ctxerr.Wrap(r.Context, err, "cancel upcoming activities after wipe")
+				}
+			}
+			return nil, nil
 		}
 
 	case fleet.DisableLostModeCmdName:
@@ -3776,12 +5559,51 @@ func (svc *MDMAppleCheckinAndCommandService) CommandAndReportResults(r *mdm.Requ
 		}
 	case "DeclarativeManagement":
 		// set "pending-install" profiles to "verifying" or "failed"
-		// depending on the status of the DeviceManagement command
+		// depending on the status of the DeviceManagement command. The ack
+		// arrives on a single channel (device or user), so scope the transition
+		// to that channel — cmdResult.Identifier() is the device UDID on both
+		// channels, while r.EnrollID distinguishes them.
 		status := mdmAppleDeliveryStatusFromCommandStatus(cmdResult.Status)
-		detail := fmt.Sprintf("%s. Make sure the host is on macOS 13+, iOS 17+, iPadOS 17+.", apple_mdm.FmtErrorChain(cmdResult.ErrorChain))
-		err := svc.ds.MDMAppleSetPendingDeclarationsAs(r.Context, cmdResult.Identifier(), status, detail)
+		var detail string
+		if status != nil && *status == fleet.MDMDeliveryFailed {
+			detail = fmt.Sprintf("%s. Make sure the host is on macOS 13+, iOS 17+, iPadOS 17+.", apple_mdm.FmtErrorChain(cmdResult.ErrorChain))
+		}
+		err := svc.ds.MDMAppleSetPendingDeclarationsAs(r.Context, cmdResult.Identifier(), ddmScopeForRequest(r), status, detail)
 		return nil, ctxerr.Wrap(r.Context, err, "update declaration status on DeclarativeManagement ack")
 	case "InstallApplication":
+		// "Already installed" handling depends on enrollment type:
+		//   - Fully managed hosts: treat as a successful install — MDM can take
+		//     over the App Store copy, and verification will confirm presence.
+		//   - BYOD / Account-Driven User Enrollment: Apple won't let MDM claim
+		//     a personally-installed app, and InstalledApplicationList with
+		//     managedAppsOnly=true never reports it. Verification would loop
+		//     forever, so we fail the install with the user-facing message
+		//     from #31138 Figma and skip retries (replays produce the same
+		//     answer from Apple).
+		alreadyInstalledBYOD := false
+		if (cmdResult.Status == fleet.MDMAppleStatusError || cmdResult.Status == fleet.MDMAppleStatusCommandFormatError) &&
+			apple_mdm.IsAppAlreadyInstalledError(cmdResult.ErrorChain) {
+			isPersonal := r.Type == mdm.UserEnrollmentDevice
+			if !isPersonal {
+				svc.logger.InfoContext(r.Context, "InstallApplication reported app already installed; treating as success",
+					"host_uuid", cmdResult.Identifier(), "command_uuid", cmdResult.CommandUUID)
+				cmdResult.Status = fleet.MDMAppleStatusAcknowledged
+			} else {
+				alreadyInstalledBYOD = true
+				// Replace Apple's raw "The app with iTunes Store ID <id> is
+				// already installed." with the user-facing copy. Downstream
+				// failure-display callers (FmtErrorChain etc.) will surface
+				// the substituted message.
+				cmdResult.ErrorChain = []mdm.ErrorChain{{
+					ErrorDomain:          "FleetInstallError",
+					ErrorCode:            12042,
+					USEnglishDescription: apple_mdm.AppAlreadyInstalledBYODUserMessage,
+				}}
+				svc.logger.InfoContext(r.Context, "InstallApplication failed on BYOD host: app already installed personally",
+					"host_uuid", cmdResult.Identifier(), "command_uuid", cmdResult.CommandUUID)
+			}
+		}
+
 		// create an activity for installing only if we're in a terminal error state
 		if cmdResult.Status == fleet.MDMAppleStatusError ||
 			cmdResult.Status == fleet.MDMAppleStatusCommandFormatError {
@@ -3790,11 +5612,13 @@ func (svc *MDMAppleCheckinAndCommandService) CommandAndReportResults(r *mdm.Requ
 			// N.b., VPP uses 0-based retry_count, so this comparison gives
 			// MaxSoftwareInstallAttempts retries (not attempts). This pre-dates
 			// the non-policy retry feature and is intentionally left as-is.
+			// Exception: the BYOD already-installed case is terminal — retrying
+			// would just hit the same wall.
 			vppInstall, err := svc.ds.GetHostVPPInstallByCommandUUID(r.Context, cmdResult.CommandUUID)
 			if err != nil {
 				return nil, ctxerr.Wrap(r.Context, err, "fetching host vpp install by command uuid")
 			}
-			if vppInstall != nil && vppInstall.RetryCount < fleet.MaxSoftwareInstallAttempts {
+			if !alreadyInstalledBYOD && vppInstall != nil && vppInstall.RetryCount < fleet.MaxSoftwareInstallAttempts {
 				if err := svc.ds.RetryVPPInstall(r.Context, vppInstall); err != nil {
 					return nil, ctxerr.Wrap(r.Context, err, "retrying VPP install for host")
 				}
@@ -3810,7 +5634,7 @@ func (svc *MDMAppleCheckinAndCommandService) CommandAndReportResults(r *mdm.Requ
 				HostUUID:      cmdResult.Identifier(),
 				CommandUUID:   cmdResult.CommandUUID,
 				CommandStatus: cmdResult.Status,
-			}, true); err != nil {
+			}, svc.newActivityFn); err != nil {
 				return nil, ctxerr.Wrap(r.Context, err, "updating setup experience status from VPP install result")
 			} else if updated {
 				// TODO: call next step of setup experience?
@@ -3821,13 +5645,42 @@ func (svc *MDMAppleCheckinAndCommandService) CommandAndReportResults(r *mdm.Requ
 			user, act, err := svc.ds.GetPastActivityDataForVPPAppInstall(r.Context, cmdResult)
 			if err != nil {
 				if fleet.IsNotFound(err) {
-					// Then this isn't a VPP install, so no activity generated
+					// Not a VPP install; it may be an in-house app (.ipa) install.
+					inHouseUser, inHouseAct, inHouseErr := svc.ds.GetPastActivityDataForInHouseAppInstall(r.Context, cmdResult)
+					if inHouseErr != nil {
+						if fleet.IsNotFound(inHouseErr) {
+							// Not an in-house install either, so no activity generated
+							return nil, nil
+						}
+						return nil, ctxerr.Wrap(r.Context, inHouseErr, "fetching data for installed in-house app activity")
+					}
+					if inHouseAct == nil {
+						return nil, nil
+					}
+					inHouseAct.FromSetupExperience = fromSetupExperience
+					if err := svc.newActivityFn(r.Context, inHouseUser, inHouseAct); err != nil {
+						return nil, ctxerr.Wrap(r.Context, err, "creating activity for installed in-house app")
+					}
 					return nil, nil
 				}
 
 				return nil, ctxerr.Wrap(r.Context, err, "fetching data for installed app store app activity")
 			}
+			if act == nil {
+				return nil, nil
+			}
+			// Auto-update terminal failures land here (all retries exhausted), so
+			// we need to carry the from_auto_update flag onto the emitted activity
+			// alongside from_setup_experience. Without this, WasFromAutomation()
+			// returns false and the activity is attributed to actor_full_name
+			// instead of Fleet. The success path is handled separately in the
+			// InstalledApplicationList result handler.
+			fromAutoUpdate, err := svc.ds.IsAutoUpdateVPPInstall(r.Context, cmdResult.CommandUUID)
+			if err != nil {
+				return nil, ctxerr.Wrap(r.Context, err, "checking if failed vpp install is from auto update")
+			}
 			act.FromSetupExperience = fromSetupExperience
+			act.FromAutoUpdate = fromAutoUpdate
 			if err := svc.newActivityFn(r.Context, user, act); err != nil {
 				return nil, ctxerr.Wrap(r.Context, err, "creating activity for installed app store app")
 			}
@@ -3897,9 +5750,111 @@ func (svc *MDMAppleCheckinAndCommandService) CommandAndReportResults(r *mdm.Requ
 		if err := svc.runCommandHandlers(r.Context, fleet.SetRecoveryLockCmdName, res); err != nil {
 			return nil, ctxerr.Wrap(r.Context, err, "SetRecoveryLock: calling handlers")
 		}
+	case fleet.VerifyRecoveryLockCmdName:
+		res := NewRecoveryLockResult(cmdResult)
+		if err := svc.runCommandHandlers(r.Context, fleet.VerifyRecoveryLockCmdName, res); err != nil {
+			return nil, ctxerr.Wrap(r.Context, err, "VerifyRecoveryLock: calling handlers")
+		}
+
+	case fleet.AccountConfigurationCmdName:
+		// Look up managed local account by command_uuid to distinguish from SSO-only AccountConfiguration
+		host, err := svc.ds.GetManagedLocalAccountByCommandUUID(r.Context, cmdResult.CommandUUID)
+		if err != nil && !fleet.IsNotFound(err) {
+			return nil, ctxerr.Wrap(r.Context, err, "get managed local account for command")
+		}
+		if host != nil && host.UUID != "" {
+			// Validate that the command response is from the expected device.
+			if host.UUID != r.ID {
+				svc.logger.WarnContext(r.Context, "managed local account command UUID matched a different host",
+					"expected_host_uuid", host.UUID, "checkin_host_uuid", r.ID, "command_uuid", cmdResult.CommandUUID)
+				break
+			}
+			// This AccountConfiguration included a managed local account
+			switch cmdResult.Status {
+			case fleet.MDMAppleStatusAcknowledged:
+				if err := svc.ds.SetHostManagedLocalAccountStatus(r.Context, host.UUID, fleet.MDMDeliveryVerified); err != nil {
+					return nil, ctxerr.Wrap(r.Context, err, "set managed local account status to verified")
+				}
+				if err := svc.newActivityFn(r.Context, nil, fleet.ActivityTypeCreatedManagedLocalAccount{HostID: host.ID, HostDisplayName: host.DisplayName()}); err != nil {
+					return nil, ctxerr.Wrap(r.Context, err, "create managed local account activity")
+				}
+				// Kickstart a refetch so we capture _fleetadmin's UUID from osquery on the next
+				// detail cycle (needed by SetAutoAdminPassword for rotation). Best-effort.
+				svc.maybeRefetchForManagedLocalAccountUUID(r.Context, host)
+
+			case fleet.MDMAppleStatusError, fleet.MDMAppleStatusCommandFormatError:
+				if err := svc.ds.SetHostManagedLocalAccountStatus(r.Context, host.UUID, fleet.MDMDeliveryFailed); err != nil {
+					return nil, ctxerr.Wrap(r.Context, err, "set managed local account status to failed")
+				}
+			}
+		}
+		// No matching row = SSO-only AccountConfiguration, no-op
+
+	case fleet.SetAutoAdminPasswordCmdName:
+		host, err := svc.ds.GetManagedLocalAccountByPendingCommandUUID(r.Context, cmdResult.CommandUUID)
+		if err != nil {
+			if fleet.IsNotFound(err) {
+				// Hard to say what happened here, most likely a command was superseded by another or a user
+				// sent this command manually (e.g. via Commands endpoint)
+				break
+			}
+			return nil, ctxerr.Wrap(r.Context, err, "get managed local account by pending command uuid")
+		}
+		if host == nil || host.UUID == "" {
+			break
+		}
+		if host.UUID != r.ID {
+			svc.logger.WarnContext(r.Context, "SetAutoAdminPassword command UUID matched a different host",
+				"expected_host_uuid", host.UUID, "checkin_host_uuid", r.ID, "command_uuid", cmdResult.CommandUUID)
+			break
+		}
+		// NotNow will leave the row in pending state; the device will retry on the next checkin.
+		switch cmdResult.Status {
+		case fleet.MDMAppleStatusAcknowledged:
+			if err := svc.ds.CompleteManagedLocalAccountRotation(r.Context, host.UUID, cmdResult.CommandUUID); err != nil {
+				return nil, ctxerr.Wrap(r.Context, err, "complete managed local account rotation")
+			}
+		case fleet.MDMAppleStatusError, fleet.MDMAppleStatusCommandFormatError:
+			errMsg := "device returned " + cmdResult.Status
+			if err := svc.ds.FailManagedLocalAccountRotation(r.Context, host.UUID, cmdResult.CommandUUID, errMsg); err != nil {
+				return nil, ctxerr.Wrap(r.Context, err, "fail managed local account rotation")
+			}
+			// Failure activity is always attributed to Fleet (no viewer context here,
+			// and the original initiating user — if any — isn't tracked on the row).
+			if err := svc.newActivityFn(r.Context, nil, fleet.ActivityTypeFailedToRotateManagedLocalAccountPassword{
+				HostID:          host.ID,
+				HostDisplayName: host.DisplayName(),
+			}); err != nil {
+				return nil, ctxerr.Wrap(r.Context, err, "create failed-to-rotate managed local account activity")
+			}
+		}
 	}
 
 	return nil, nil
+}
+
+// maybeRefetchForManagedLocalAccountUUID requests a host refetch when the
+// managed local account row exists but we haven't yet captured _fleetadmin's
+// uuid from osquery. This shortens the window between AccountConfiguration ack
+// and being able to rotate the password (which requires the uuid) without
+// changing the host detail interval. Best-effort — errors are logged only.
+func (svc *MDMAppleCheckinAndCommandService) maybeRefetchForManagedLocalAccountUUID(ctx context.Context, host *fleet.Host) {
+	existing, err := svc.ds.GetManagedLocalAccountUUID(ctx, host.UUID)
+	if fleet.IsNotFound(err) {
+		return
+	}
+	if err != nil {
+		svc.logger.ErrorContext(ctx, "get managed local account uuid for refetch kickstart",
+			"err", err, "host_id", host.ID, "host_uuid", host.UUID)
+		return
+	}
+	if existing != nil {
+		return
+	}
+	if err := svc.ds.UpdateHostRefetchRequested(ctx, host.ID, true); err != nil {
+		svc.logger.ErrorContext(ctx, "request host refetch after managed local account ack",
+			"err", err, "host_id", host.ID, "host_uuid", host.UUID)
+	}
 }
 
 func (svc *MDMAppleCheckinAndCommandService) handleRefetch(r *mdm.Request, cmdResult *mdm.CommandResults) (*mdm.Command, error) {
@@ -3914,7 +5869,7 @@ func (svc *MDMAppleCheckinAndCommandService) handleRefetch(r *mdm.Request, cmdRe
 		return svc.handleRefetchAppsResults(ctx, host, cmdResult)
 
 	case strings.HasPrefix(cmdResult.CommandUUID, fleet.RefetchCertsCommandUUIDPrefix):
-		return svc.handleRefetchCertsResults(ctx, host, cmdResult)
+		return svc.handleRefetchCertsResults(ctx, host, r.EnrollID, cmdResult)
 
 	case strings.HasPrefix(cmdResult.CommandUUID, fleet.RefetchDeviceCommandUUIDPrefix):
 		// for devices added via legacy enrollment flows, we may need to set an enroll reference
@@ -4007,12 +5962,42 @@ func (svc *MDMAppleCheckinAndCommandService) handleRefetchAppsResults(ctx contex
 		}
 	}
 
+	// Best-effort cleanup of stale refetch commands of the same type.
+	if err := svc.ds.CleanupStaleNanoRefetchCommands(ctx, host.UUID, fleet.RefetchAppsCommandUUIDPrefix, cmdResult.CommandUUID); err != nil {
+		svc.logger.ErrorContext(ctx, "cleanup stale nano refetch apps commands", "err", err, "host_uuid", host.UUID, "command_prefix", fleet.RefetchAppsCommandUUIDPrefix)
+	}
+
 	return nil, nil
 }
 
 var versionPattern = regexp.MustCompile(
 	`^v?\s*(\d+(?:\.\d+)*)\s*$`,
 )
+
+// Allows alphanumeric characters, spaces, and the punctuation Apple uses in RSR suffixes (e.g. "(a)").
+var supplementalOSVersionExtraRe = regexp.MustCompile(`^[A-Za-z0-9 ()._-]+$`)
+
+// buildOSVersion combines osVersion and supplementalOSVersionExtra into a
+// single version string, validating the supplemental value before appending.
+// The result is capped at 150 characters to match the operating_systems.version
+// column, which is the tighter of the two columns this value is written to.
+// Callers that prepend a platform prefix (e.g. "iOS ") must still truncate the
+// final combined string to fit their own column limit.
+func buildOSVersion(osVersion, supplementalOSVersionExtra string) (string, error) {
+	if supplementalOSVersionExtra != "" {
+		if len(supplementalOSVersionExtra) > 32 {
+			return "", fmt.Errorf("invalid SupplementalOSVersionExtra: too long (length=%d, value=%q)", len(supplementalOSVersionExtra), supplementalOSVersionExtra)
+		}
+		if !supplementalOSVersionExtraRe.MatchString(supplementalOSVersionExtra) {
+			return "", fmt.Errorf("invalid SupplementalOSVersionExtra: contains disallowed characters (value=%q)", supplementalOSVersionExtra)
+		}
+		osVersion += " " + supplementalOSVersionExtra
+	}
+	if len(osVersion) > 150 {
+		osVersion = osVersion[:150]
+	}
+	return osVersion, nil
+}
 
 // trimLeadingZeros converts "00123" → "123", "000" → "0", "0" → "0"
 func trimLeadingZeros(s string) string {
@@ -4106,17 +6091,15 @@ func (svc *MDMAppleCheckinAndCommandService) handleScheduledUpdates(
 		return ctxerr.Wrap(ctx, err, "get VPP token if can install VPP apps")
 	}
 
-	// Check if the device is managed or BYOD.
+	// Confirm the host has a nano enrollment record. User-enrolled (BYOD)
+	// hosts are no longer skipped — InstallVPPAppPostValidation routes them
+	// through the user-scoped VPP path (clientUserIds) downstream.
 	enrollment, err := svc.ds.GetNanoMDMEnrollment(ctx, host.UUID)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "getting nano mdm enrollment")
 	}
 	if enrollment == nil {
 		logger.DebugContext(ctx, "skipping updates, missing nano enrollment type")
-		return nil
-	}
-	if enrollment.Type == mdm.EnrollType(mdm.UserEnrollmentDevice).String() {
-		logger.DebugContext(ctx, "skipping updates, software install isn't supported on personal (BYOD) iOS and iPadOS hosts")
 		return nil
 	}
 
@@ -4344,10 +6327,19 @@ func (svc *MDMAppleCheckinAndCommandService) handleScheduledUpdates(
 		"count", len(softwaresWithinUpdateScheduleNoRecentInstalls),
 	)
 
-	// 4. Filter out software that already has a pending installation.
+	// 4. Filter out software that already has a pending installation, either activated and
+	// awaiting verification, or still waiting in the host's upcoming activity queue.
+	//
+	// This needs no in-run tracking like the policy loop has, because ListSoftwareAutoUpdateSchedules
+	// filters on the source derived from the host's platform above. A team can hold the same adam_id
+	// as two titles, one per platform, so widening that filter would let one run reach an app twice.
 	adamIDsPendingInstallForHost, err := svc.ds.MapAdamIDsPendingInstallVerification(ctx, host.ID)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "get Adam IDs pending install for host")
+	}
+	adamIDsQueuedInstallForHost, err := svc.ds.MapAdamIDsQueuedInstalls(ctx, host.ID)
+	if err != nil {
+		return ctxerr.Wrap(ctx, err, "get Adam IDs queued installs for host")
 	}
 	var softwaresWithinUpdateScheduleToInstall []*fleet.SoftwareTitle
 	for _, softwareWithinUpdateSchedule := range softwaresWithinUpdateScheduleNoRecentInstalls {
@@ -4361,6 +6353,13 @@ func (svc *MDMAppleCheckinAndCommandService) handleScheduledUpdates(
 		}
 		if _, ok := adamIDsPendingInstallForHost[softwareTitle.AppStoreApp.AdamID]; ok {
 			logger.DebugContext(ctx, "skipping software, pending install for title",
+				"software_title_id", softwareTitle.ID,
+				"adam_id", softwareTitle.AppStoreApp.AdamID,
+			)
+			continue
+		}
+		if _, ok := adamIDsQueuedInstallForHost[softwareTitle.AppStoreApp.AdamID]; ok {
+			logger.DebugContext(ctx, "skipping software, install already queued for title",
 				"software_title_id", softwareTitle.ID,
 				"adam_id", softwareTitle.AppStoreApp.AdamID,
 			)
@@ -4414,6 +6413,9 @@ func (svc *MDMAppleCheckinAndCommandService) handleScheduledUpdates(
 
 		commandUUID, err := svc.vppInstaller.InstallVPPAppPostValidation(ctx, host, vppApp, vppToken.Token, fleet.HostSoftwareInstallOptions{
 			ForScheduledUpdates: true,
+			// scheduled updates fan out to many hosts at once, like policy
+			// automations, so they respect the same release budget
+			DeferActivation: svc.deferFleetInitiatedActivation,
 		})
 		if err != nil {
 			logger.ErrorContext(ctx, "install VPP app post validation",
@@ -4501,7 +6503,12 @@ func parseHHMM(s string) (hour, min_ int, err error) {
 	return h, m, nil
 }
 
-func (svc *MDMAppleCheckinAndCommandService) handleRefetchCertsResults(ctx context.Context, host *fleet.Host, cmdResult *mdm.CommandResults) (*mdm.Command, error) {
+// handleRefetchCertsResults ingests a CertificateList response. The response
+// only covers the keychain of the channel it was sent to — system on the device
+// channel, the responding user's login keychain on the user channel — so the
+// answering enrollment decides which scope the certs are recorded under and
+// which scope may be reconciled. A nil enrollID reads as the device channel.
+func (svc *MDMAppleCheckinAndCommandService) handleRefetchCertsResults(ctx context.Context, host *fleet.Host, enrollID *mdm.EnrollID, cmdResult *mdm.CommandResults) (*mdm.Command, error) {
 	if !strings.HasPrefix(cmdResult.CommandUUID, fleet.RefetchCertsCommandUUIDPrefix) {
 		// Caller should have checked this, but just in case we'll return an error.
 		return nil, ctxerr.New(ctx, fmt.Sprintf("expected REFETCH-CERTS- prefix but got %s", cmdResult.CommandUUID))
@@ -4515,27 +6522,225 @@ func (svc *MDMAppleCheckinAndCommandService) handleRefetchCertsResults(ctx conte
 		return nil, ctxerr.Wrap(ctx, err, "refetch certs: remove refetch command")
 	}
 
-	// TODO(mna): when we add iOS/iPadOS support for https://github.com/fleetdm/fleet/issues/26913,
-	// this is where we'll need to identify user-keychain certs for iPad/iPhone. For now we set
-	// them all as "system" certificates.
 	var listResp fleet.MDMAppleCertificateListResponse
 	if err := plist.Unmarshal(cmdResult.Raw, &listResp); err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "refetch certs: unmarshal certificate list command result")
 	}
+
+	// normalize() gives user-channel enrollments a ParentID; device ones have none.
+	isUserChannel := enrollID != nil && enrollID.ParentID != ""
+	// nano keys its queue and result rows on the answering enrollment, not the host UUID.
+	enrollmentID := host.UUID
+	if enrollID != nil && enrollID.ID != "" {
+		enrollmentID = enrollID.ID
+	}
+
+	// TODO(mna): when we add iOS/iPadOS support for https://github.com/fleetdm/fleet/issues/26913,
+	// this is where we'll need to identify user-keychain certs for iPad/iPhone;
+	// those refetches run on the device channel, so they land here as system.
+	certSource := fleet.SystemHostCertificate
+	var username string
+	if isUserChannel {
+		certSource = fleet.UserHostCertificate
+		var err error
+		username, err = svc.userChannelShortName(ctx, host.UUID, enrollmentID, &listResp)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	payload := make([]*fleet.HostCertificateRecord, 0, len(listResp.CertificateList))
 	for _, cert := range listResp.CertificateList {
 		parsed, err := cert.Parse(host.ID)
 		if err != nil {
 			return nil, ctxerr.Wrap(ctx, err, "refetch certs: parse certificate")
 		}
+		parsed.Source = certSource
+		parsed.Username = username
 		payload = append(payload, parsed)
 	}
 
-	if err := svc.ds.UpdateHostCertificates(ctx, host.ID, host.UUID, payload); err != nil {
+	// Reconcile only the keychain this response describes; the other channel's
+	// certs weren't observed and must not be soft-deleted.
+	observedScopes := []fleet.HostCertificateScope{{Source: certSource, Username: username}}
+	if err := svc.ds.UpdateHostCertificates(ctx, host.ID, host.UUID, payload, fleet.HostCertificateOriginMDM, observedScopes); err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "refetch certs: update host certificates")
 	}
 
+	// Best-effort cleanup of stale refetch commands of the same type.
+	if err := svc.ds.CleanupStaleNanoRefetchCommands(ctx, enrollmentID, fleet.RefetchCertsCommandUUIDPrefix, cmdResult.CommandUUID); err != nil {
+		svc.logger.ErrorContext(ctx, "cleanup stale nano refetch certs commands", "err", err, "enrollment_id", enrollmentID, "command_prefix", fleet.RefetchCertsCommandUUIDPrefix)
+	}
+
 	return nil, nil
+}
+
+// userChannelShortName resolves the user whose login keychain a user-channel
+// CertificateList describes, matching the scope osquery reports the same certs
+// under (it derives the username from the keychain path). Falls back to nano's
+// record for devices that omit UserShortName.
+//
+// An unknown user is an error rather than an empty username: certs recorded
+// under an empty user scope reconcile against nothing, so they would pile up
+// beside the real ones instead of replacing them.
+func (svc *MDMAppleCheckinAndCommandService) userChannelShortName(ctx context.Context, hostUUID, enrollmentID string, listResp *fleet.MDMAppleCertificateListResponse) (string, error) {
+	if listResp.UserShortName != "" {
+		return listResp.UserShortName, nil
+	}
+	// nano's record only exposes the host's first active user enrollment, so it
+	// is only usable when that is the enrollment that answered.
+	shortName, userID, err := svc.ds.GetNanoMDMUserEnrollmentUsernameAndUUID(ctx, hostUUID)
+	if err != nil {
+		return "", ctxerr.Wrap(ctx, err, "get user enrollment short name")
+	}
+	if shortName == "" || hostUUID+":"+userID != enrollmentID {
+		return "", ctxerr.Errorf(ctx, "no user short name on record for enrollment %s", enrollmentID)
+	}
+	return shortName, nil
+}
+
+// maybeQueueCertificateListForACMEProfile fires a CertificateList MDM command
+// after a macOS InstallProfile or RemoveProfile ack on a profile containing a
+// com.apple.security.acme payload. Install captures the new hardware-bound cert
+// (invisible to osquery) into host_certificates; remove lets the refetch
+// observe its absence so the stale row clears. iOS/iPadOS do not need this hook
+// because IOSiPadOSRefetch already runs CertificateList on a cron.
+//
+// Gating happens server-side in a single indexed query
+// (ProfileHasACMEPayloadForCommand): host platform, ACME payload presence, and
+// the profile's scope. The hot path early-returns for the common non-ACME /
+// non-darwin cases without parsing the profile or making additional roundtrips.
+//
+// We deliberately do NOT dedupe against an in-flight CertificateList: if a
+// previous refetch is still pending when this trigger fires, that earlier
+// refetch can capture state that predates the new ACME exchange completing
+// on-device. Letting the new install queue its own refetch ensures the new
+// cert is captured even if the earlier refetch was already in flight.
+// host_mdm_commands has a (host_id, command_type) PK so duplicate INSERTs
+// collapse via ON DUPLICATE KEY UPDATE, and handleRefetchCertsResults is
+// safe to call on an already-removed row.
+func (svc *MDMAppleCheckinAndCommandService) maybeQueueCertificateListForACMEProfile(ctx context.Context, hostUUID, commandUUID string) error {
+	res, err := svc.ds.ProfileHasACMEPayloadForCommand(ctx, hostUUID, commandUUID)
+	if err != nil {
+		if fleet.IsNotFound(err) {
+			return nil
+		}
+		return ctxerr.Wrap(ctx, err, "probe profile for ACME payload")
+	}
+	if res.Platform != "darwin" || !res.HasACMEPayload {
+		return nil
+	}
+
+	// For user-scoped profiles the ACME cert lands in the user's login
+	// keychain. CertificateList on the device channel only returns system-
+	// keychain certs, so send the command to the user enrollment instead.
+	enrollmentID := hostUUID
+	if res.Scope == fleet.PayloadScopeUser {
+		if res.UserEnrollmentID == "" {
+			// Nothing can report the login keychain, and the device channel
+			// would answer about the system keychain instead.
+			return nil
+		}
+		enrollmentID = res.UserEnrollmentID
+	}
+
+	// Track before the commander call so a fast device ack can't race the
+	// insert and leave an orphaned row that would suppress future triggers.
+	// Matches the iOS/iPadOS pattern in IOSiPadOSRefetch. On enqueue failure
+	// nothing was queued (the nano enqueue is transactional) and the row is
+	// removed again; if only the APNs notification failed the command is
+	// durably queued and the row must stay.
+	hostCmd := fleet.HostMDMCommand{
+		HostID:      res.HostID,
+		CommandType: fleet.RefetchCertsCommandUUIDPrefix,
+	}
+	if err := svc.ds.AddHostMDMCommands(ctx, []fleet.HostMDMCommand{hostCmd}); err != nil {
+		return ctxerr.Wrap(ctx, err, "track refetch certs command")
+	}
+
+	cmdUUID := uuid.NewString()
+	if err := svc.commander.CertificateList(ctx, []string{enrollmentID}, fleet.RefetchCertsCommandUUIDPrefix+cmdUUID); err != nil {
+		if _, isNotifErr := errors.AsType[*apple_mdm.NotificationFailedError](err); !isNotifErr {
+			if rmErr := svc.ds.RemoveHostMDMCommand(ctx, hostCmd); rmErr != nil {
+				svc.logger.ErrorContext(ctx, "untrack refetch certs command after enqueue failure",
+					"err", rmErr, "host_uuid", hostUUID, "enrollment_id", enrollmentID)
+			}
+		}
+		return ctxerr.Wrap(ctx, err, "enqueue CertificateList")
+	}
+	return nil
+}
+
+// handleDeviceNameCommandResult processes the result of a Settings/DeviceName
+// command sent to enforce a team's host name template. On acknowledgment the
+// host is renamed in Fleet right away — the device just applied the name, so
+// the next osquery/DeviceInformation ingest confirms the rename (verifying →
+// verified) instead of reverting an optimistic early write. On error the
+// enforcement row lands failed with Apple's error chain; the cron only picks
+// up queued rows, so a failed command is not retried until an admin resends.
+func (svc *MDMAppleCheckinAndCommandService) handleDeviceNameCommandResult(ctx context.Context, cmdResult *mdm.CommandResults) error {
+	status := cmdResult.Status
+	detail := ""
+	switch status {
+	case fleet.MDMAppleStatusAcknowledged:
+		// A Settings command can report per-item failures inside an
+		// acknowledged result; this command carries a single DeviceName item,
+		// so any item-level error means the rename failed.
+		if itemDetail, itemFailed := deviceNameSettingsItemError(ctx, svc.logger, cmdResult.Raw); itemFailed {
+			status = fleet.MDMAppleStatusError
+			detail = itemDetail
+		}
+	case fleet.MDMAppleStatusError, fleet.MDMAppleStatusCommandFormatError:
+		detail = apple_mdm.FmtErrorChain(cmdResult.ErrorChain)
+	default:
+		// Idle/NotNow — the command hasn't completed yet; nothing to record.
+		return nil
+	}
+
+	if status == fleet.MDMAppleStatusAcknowledged {
+		// On acknowledgment the datastore moves the row to verifying and renames
+		// the host in Fleet in the same transaction. A not-found means the row
+		// tracks a newer command (template re-saved or resend clicked before this
+		// result arrived); this result is stale and the newer command's result
+		// carries the final name, so it's ignored.
+		if err := svc.ds.UpdateHostDeviceNameStatusFromCommand(ctx, cmdResult.CommandUUID, true, ""); err != nil && !fleet.IsNotFound(err) {
+			return ctxerr.Wrap(ctx, err, "update device name row from acknowledged command")
+		}
+		return nil
+	}
+
+	if err := svc.ds.UpdateHostDeviceNameStatusFromCommand(ctx, cmdResult.CommandUUID, false, detail); err != nil && !fleet.IsNotFound(err) {
+		return ctxerr.Wrap(ctx, err, "update device name row from failed command")
+	}
+	return nil
+}
+
+// deviceNameSettingsItemError inspects a Settings command acknowledgment for
+// per-item statuses: each item in the Settings array of the response can
+// individually report an Error even when the overall command is Acknowledged.
+// It returns a human-readable detail and true when any item failed.
+func deviceNameSettingsItemError(ctx context.Context, logger *slog.Logger, raw []byte) (string, bool) {
+	var ack struct {
+		Settings []struct {
+			Status     string           `plist:"Status"`
+			ErrorChain []mdm.ErrorChain `plist:"ErrorChain"`
+		} `plist:"Settings"`
+	}
+	if err := plist.Unmarshal(raw, &ack); err != nil {
+		// A malformed per-item array shouldn't fail the acknowledged command.
+		logger.WarnContext(ctx, "unmarshal Settings command acknowledgment for per-item statuses", "err", err)
+		return "", false
+	}
+	for _, item := range ack.Settings {
+		if item.Status != "" && item.Status != fleet.MDMAppleStatusAcknowledged {
+			detail := apple_mdm.FmtErrorChain(item.ErrorChain)
+			if detail == "" {
+				detail = "Settings item returned status " + item.Status + "."
+			}
+			return detail, true
+		}
+	}
+	return "", false
 }
 
 func (svc *MDMAppleCheckinAndCommandService) handleRefetchDeviceResults(ctx context.Context, host *fleet.Host, cmdResult *mdm.CommandResults) (*mdm.Command, error) {
@@ -4558,65 +6763,154 @@ func (svc *MDMAppleCheckinAndCommandService) handleRefetchDeviceResults(ctx cont
 	if err := plist.Unmarshal(cmdResult.Raw, &deviceInformationResponse); err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "failed to unmarshal device information command result")
 	}
-	deviceName := deviceInformationResponse.QueryResponses["DeviceName"].(string)
-	deviceCapacity := deviceInformationResponse.QueryResponses["DeviceCapacity"].(float64)
-	availableDeviceCapacity := deviceInformationResponse.QueryResponses["AvailableDeviceCapacity"].(float64)
-	osVersion := deviceInformationResponse.QueryResponses["OSVersion"].(string)
-	var wifiMac string
-	wifiMacVal, ok := deviceInformationResponse.QueryResponses["WiFiMAC"]
-	if ok {
-		// WiFiMAC info is not present for user-enrolled devices
-		wifiMac = wifiMacVal.(string)
+	queryResponses := deviceInformationResponse.QueryResponses
+	deviceName, deviceNameOK := queryResponses["DeviceName"].(string)
+	deviceCapacity, deviceCapacityOK := queryResponses["DeviceCapacity"].(float64)
+	availableDeviceCapacity, availableDeviceCapacityOK := queryResponses["AvailableDeviceCapacity"].(float64)
+	rawOSVersion, osVersionOK := queryResponses["OSVersion"].(string)
+	var supplementalExtra string
+	if v, ok := queryResponses["SupplementalOSVersionExtra"]; ok {
+		supplementalExtra, _ = v.(string)
 	}
-	productName := deviceInformationResponse.QueryResponses["ProductName"].(string)
-	isLostModeEnabled := false
-	isLostModeEnabledVal, ok := deviceInformationResponse.QueryResponses["IsMDMLostModeEnabled"]
-	if ok {
-		isLostModeEnabled = isLostModeEnabledVal.(bool)
+	osVersion, err := buildOSVersion(rawOSVersion, supplementalExtra)
+	if err != nil {
+		svc.logger.WarnContext(ctx, "ignoring invalid SupplementalOSVersionExtra from device", "host_uuid", host.UUID, "err", err)
+		osVersion, _ = buildOSVersion(rawOSVersion, "")
 	}
-	host.ComputerName = deviceName
-	host.Hostname = deviceName
-	host.GigsDiskSpaceAvailable = availableDeviceCapacity
-	host.GigsTotalDiskSpace = deviceCapacity
+	productName, productNameOK := queryResponses["ProductName"].(string)
+	wifiMac, _ := queryResponses["WiFiMAC"].(string) // not present for user-enrolled devices
+	isLostModeEnabled, _ := queryResponses["IsMDMLostModeEnabled"].(bool)
+
+	var missingFields []string
+	if !deviceNameOK {
+		missingFields = append(missingFields, "DeviceName")
+	}
+	if !deviceCapacityOK {
+		missingFields = append(missingFields, "DeviceCapacity")
+	}
+	if !availableDeviceCapacityOK {
+		missingFields = append(missingFields, "AvailableDeviceCapacity")
+	}
+	if !osVersionOK {
+		missingFields = append(missingFields, "OSVersion")
+	}
+	if !productNameOK {
+		missingFields = append(missingFields, "ProductName")
+	}
+	if len(missingFields) > 0 {
+		svc.logger.WarnContext(ctx, "DeviceInformation response missing or unexpectedly typed fields; preserving existing host values",
+			"host_id", host.ID,
+			"host_uuid", host.UUID,
+			"missing_or_invalid_fields", missingFields,
+		)
+	}
+
+	if deviceNameOK {
+		host.ComputerName = deviceName
+		host.Hostname = deviceName
+	}
+	if availableDeviceCapacityOK {
+		host.GigsDiskSpaceAvailable = availableDeviceCapacity
+	}
+	if deviceCapacityOK {
+		host.GigsTotalDiskSpace = deviceCapacity
+	}
+
+	// Determine platform/osVersionPrefix from ProductName when present; otherwise
+	// fall back to the previously-known platform on the host.
 	var (
 		osVersionPrefix string
 		platform        string
 	)
-	if strings.HasPrefix(productName, "iPhone") || strings.HasPrefix(productName, "iPod") {
-		osVersionPrefix = "iOS"
-		platform = "ios"
-	} else { // iPad
-		osVersionPrefix = "iPadOS"
-		platform = "ipados"
+	if productNameOK {
+		if strings.HasPrefix(productName, "iPhone") || strings.HasPrefix(productName, "iPod") {
+			osVersionPrefix = "iOS"
+			platform = "ios"
+		} else { // iPad
+			osVersionPrefix = "iPadOS"
+			platform = "ipados"
+		}
+	} else {
+		// Fall back to the host's known platform when ProductName is absent so
+		// the OS version is still updated with the correct prefix.
+		platform = host.Platform
+		switch platform {
+		case "ios":
+			osVersionPrefix = "iOS"
+		case "ipados":
+			osVersionPrefix = "iPadOS"
+		}
 	}
-	host.OSVersion = osVersionPrefix + " " + osVersion
+
+	// Only update host.OSVersion when we have both the prefix (from ProductName or
+	// preserved platform) and the version string itself.
+	if osVersionOK && osVersionPrefix != "" {
+		host.OSVersion = osVersionPrefix + " " + osVersion
+		if len(host.OSVersion) > 255 {
+			host.OSVersion = host.OSVersion[:255]
+		}
+	}
 	host.PrimaryMac = wifiMac
-	host.HardwareModel = productName
+	if productNameOK {
+		host.HardwareModel = productName
+	}
 	host.DetailUpdatedAt = time.Now()
 	// iOS/iPadOS devices do not support dynamic labels at this time so we should update their LabelUpdatedAt timestamp
 	// on refetch similar to other platforms to simplify exclusion logic with dynamic labels
 	host.LabelUpdatedAt = time.Now()
 	host.RefetchRequested = false
 
-	timeZone, _ := deviceInformationResponse.QueryResponses["TimeZone"].(string)
+	timeZone, _ := queryResponses["TimeZone"].(string)
 	host.TimeZone = &timeZone
 
 	if err := svc.ds.UpdateHost(ctx, host); err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "failed to update host")
 	}
-	if err := svc.ds.SetOrUpdateHostDisksSpace(ctx, host.ID, availableDeviceCapacity, 100*availableDeviceCapacity/deviceCapacity,
-		deviceCapacity, nil); err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "failed to update host storage")
-	}
-	if err := svc.ds.UpdateHostOperatingSystem(ctx, host.ID, fleet.OperatingSystem{
-		Name:     osVersionPrefix,
-		Version:  osVersion,
-		Platform: platform,
-	}); err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "failed to update host operating system")
+
+	// A failure here is logged rather than returned: the refetch results are
+	// already persisted above, this is a non-critical write the next refetch
+	// will redo, and aborting would skip the MDM-enrollment-status and
+	// lost-mode reconciliation below. Mirrors UpdateHostDeviceNameStatusFromReport
+	// just below.
+	vitals := parseMDMAppleDeviceVitals(queryResponses)
+	if err := svc.ds.SetOrUpdateHostMDMAppleDeviceVitals(ctx, host.UUID, vitals); err != nil {
+		svc.logger.ErrorContext(ctx, "update host mdm apple device vitals from refetch", "host_uuid", host.UUID, "err", err)
 	}
 
-	if host.MDM.EnrollmentStatus != nil && *host.MDM.EnrollmentStatus == "Pending" {
+	if deviceNameOK && deviceName != "" && fleet.IsAppleMobilePlatform(host.Platform) {
+		// Reconcile the host-name enforcement row (if any) against the name the
+		// device reported: confirms a rename (verifying → verified) or records
+		// drift (verified → failed). No-op for hosts without a row. A failure here
+		// is logged rather than returned: the refetch results are already
+		// persisted, this is a non-critical verify transition the next refetch
+		// will redo, and aborting would fail the whole MDM check-in. Mirrors the
+		// macOS osquery hook (server/service/osquery.go).
+		if err := svc.ds.UpdateHostDeviceNameStatusFromReport(ctx, host.UUID, deviceName); err != nil {
+			svc.logger.ErrorContext(ctx, "update host device name status from refetch", "host_uuid", host.UUID, "err", err)
+		}
+	}
+
+	// Skip the disk space update when either capacity field is missing/invalid,
+	// since the percent-available calculation divides by deviceCapacity.
+	if deviceCapacityOK && availableDeviceCapacityOK && deviceCapacity > 0 {
+		if err := svc.ds.SetOrUpdateHostDisksSpace(ctx, host.ID, availableDeviceCapacity, 100*availableDeviceCapacity/deviceCapacity,
+			deviceCapacity, nil); err != nil {
+			return nil, ctxerr.Wrap(ctx, err, "failed to update host storage")
+		}
+	}
+	// Skip the operating system row update unless we have a version and a known
+	// platform/prefix to associate it with — otherwise we'd write a junk row.
+	if osVersionOK && osVersionPrefix != "" && platform != "" {
+		if err := svc.ds.UpdateHostOperatingSystem(ctx, host.ID, fleet.OperatingSystem{
+			Name:     osVersionPrefix,
+			Version:  osVersion,
+			Platform: platform,
+		}); err != nil {
+			return nil, ctxerr.Wrap(ctx, err, "failed to update host operating system")
+		}
+	}
+
+	if host.MDM.EnrollmentStatus != nil && *host.MDM.EnrollmentStatus == fleet.MDMEnrollmentStatusPending {
 		// Since the device has been refetched, we can assume it's enrolled.
 		if err := svc.ds.UpdateMDMData(ctx, host.ID, true); err != nil {
 			return nil, ctxerr.Wrap(ctx, err, "failed to update MDM data")
@@ -4641,6 +6935,11 @@ func (svc *MDMAppleCheckinAndCommandService) handleRefetchDeviceResults(ctx cont
 				return nil, ctxerr.Wrap(ctx, err, "update host lost mode status on refetch")
 			}
 		}
+	}
+
+	// Best-effort cleanup of stale refetch commands of the same type.
+	if err := svc.ds.CleanupStaleNanoRefetchCommands(ctx, host.UUID, fleet.RefetchDeviceCommandUUIDPrefix, cmdResult.CommandUUID); err != nil {
+		svc.logger.ErrorContext(ctx, "cleanup stale nano refetch device commands", "err", err, "host_uuid", host.UUID, "command_prefix", fleet.RefetchDeviceCommandUUIDPrefix)
 	}
 
 	return nil, nil
@@ -4827,1275 +7126,6 @@ func SendPushesToPendingDevices(
 	return nil
 }
 
-func ReconcileAppleDeclarations(
-	ctx context.Context,
-	ds fleet.Datastore,
-	commander *apple_mdm.MDMAppleCommander,
-	logger *slog.Logger,
-) error {
-	appConfig, err := ds.AppConfig(ctx)
-	if err != nil {
-		return fmt.Errorf("reading app config: %w", err)
-	}
-	if !appConfig.MDM.EnabledAndConfigured {
-		return nil
-	}
-
-	// batch set declarations as pending
-	changedHosts, err := ds.MDMAppleBatchSetHostDeclarationState(ctx)
-	if err != nil {
-		return ctxerr.Wrap(ctx, err, "updating host declaration state")
-	}
-
-	// Find any hosts that requested a resync. This is used to cover special cases where we're not
-	// 100% certain of the declarations on the device.
-	resyncHosts, err := ds.MDMAppleHostDeclarationsGetAndClearResync(ctx)
-	if err != nil {
-		return ctxerr.Wrap(ctx, err, "getting and clearing resync hosts")
-	}
-	if len(resyncHosts) > 0 {
-		changedHosts = append(changedHosts, resyncHosts...)
-		// Deduplicate changedHosts
-		uniqueHosts := make(map[string]struct{})
-		deduplicatedHosts := make([]string, 0, len(changedHosts))
-		for _, id := range changedHosts {
-			if _, exists := uniqueHosts[id]; !exists {
-				uniqueHosts[id] = struct{}{}
-				deduplicatedHosts = append(deduplicatedHosts, id)
-			}
-		}
-		changedHosts = deduplicatedHosts
-	}
-
-	if len(changedHosts) == 0 {
-		logger.InfoContext(ctx, "no hosts with changed declarations")
-		return nil
-	}
-
-	// send a DeclarativeManagement command to start a sync
-	if err := commander.DeclarativeManagement(ctx, changedHosts, uuid.NewString()); err != nil {
-		return ctxerr.Wrap(ctx, err, "issuing DeclarativeManagement command")
-	}
-
-	logger.InfoContext(ctx, "sent DeclarativeManagement command", "host_number", len(changedHosts))
-
-	return nil
-}
-
-// install/removeTargets are maps from profileUUID -> command uuid and host
-// UUIDs as the underlying MDM services are optimized to send one command to
-// multiple hosts at the same time. Note that the same command uuid is used
-// for all hosts in a given install/remove target operation.
-type cmdTarget struct {
-	cmdUUID       string
-	profIdent     string
-	enrollmentIDs []string
-}
-
-// Number of hours to wait for a user enrollment to exist for a host after its
-// device enrollment. After that duration, the user-scoped profiles will be
-// delivered to the device-channel.
-const hoursToWaitForUserEnrollmentAfterDeviceEnrollment = 2
-
-func ReconcileAppleProfiles(
-	ctx context.Context,
-	ds fleet.Datastore,
-	commander *apple_mdm.MDMAppleCommander,
-	logger *slog.Logger,
-) error {
-	appConfig, err := ds.AppConfig(ctx)
-	if err != nil {
-		return fmt.Errorf("reading app config: %w", err)
-	}
-	if !appConfig.MDM.EnabledAndConfigured {
-		return nil
-	}
-
-	// Map of host UUID->User Channel enrollment ID so that we can cache them per-device
-	userEnrollmentMap := make(map[string]string)
-	userEnrollmentsToHostUUIDsMap := make(map[string]string) // the same thing in reverse
-
-	assets, err := ds.GetAllMDMConfigAssetsByName(ctx, []fleet.MDMAssetName{
-		fleet.MDMAssetCACert,
-	}, nil)
-	if err != nil {
-		return ctxerr.Wrap(ctx, err, "getting Apple SCEP")
-	}
-
-	block, _ := pem.Decode(assets[fleet.MDMAssetCACert].Value)
-	if block == nil || block.Type != "CERTIFICATE" {
-		return ctxerr.Wrap(ctx, err, "failed to decode PEM block from SCEP certificate")
-	}
-
-	if err := ensureFleetProfiles(ctx, ds, logger, block.Bytes); err != nil {
-		logger.ErrorContext(ctx, "unable to ensure a fleetd configuration profiles are in place", "details", err)
-	}
-
-	// retrieve the profiles to install/remove.
-	toInstall, toRemove, err := ds.ListMDMAppleProfilesToInstallAndRemove(ctx)
-	if err != nil {
-		return ctxerr.Wrap(ctx, err, "getting profiles to install and remove")
-	}
-
-	// Exclude macOS only profiles from iPhones/iPads.
-	toInstall = fleet.FilterMacOSOnlyProfilesFromIOSIPadOS(toInstall)
-
-	getHostUserEnrollmentID := func(hostUUID string) (string, error) {
-		userEnrollmentID, ok := userEnrollmentMap[hostUUID]
-		if !ok {
-			userNanoEnrollment, err := ds.GetNanoMDMUserEnrollment(ctx, hostUUID)
-			if err != nil {
-				return "", ctxerr.Wrap(ctx, err, "getting user enrollment for host")
-			}
-			if userNanoEnrollment != nil {
-				userEnrollmentID = userNanoEnrollment.ID
-			}
-			userEnrollmentMap[hostUUID] = userEnrollmentID
-			if userEnrollmentID != "" {
-				userEnrollmentsToHostUUIDsMap[userEnrollmentID] = hostUUID
-			}
-		}
-		return userEnrollmentID, nil
-	}
-
-	isAwaitingUserEnrollment := func(prof *fleet.MDMAppleProfilePayload) (bool, error) {
-		if prof.Scope != fleet.PayloadScopeUser {
-			return false, nil
-		}
-
-		userEnrollmentID, err := getHostUserEnrollmentID(prof.HostUUID)
-		if userEnrollmentID != "" || err != nil {
-			// there is a user enrollment (so it is not waiting for one), or it failed looking for one
-			return false, err
-		}
-
-		if prof.DeviceEnrolledAt != nil && time.Since(*prof.DeviceEnrolledAt) < hoursToWaitForUserEnrollmentAfterDeviceEnrollment*time.Hour {
-			return true, nil
-		}
-		return false, nil
-	}
-
-	// Perform aggregations to support all the operations we need to do
-
-	// toGetContents contains the UUIDs of all the profiles from which we
-	// need to retrieve contents. Since the previous query returns one row
-	// per host, it would be too expensive to retrieve the profile contents
-	// there, so we make another request. Using a map to deduplicate.
-	toGetContents := make(map[string]bool)
-
-	// hostProfiles tracks each host_mdm_apple_profile we need to upsert
-	// with the new status, operation_type, etc.
-	hostProfiles := make([]*fleet.MDMAppleBulkUpsertHostProfilePayload, 0, len(toInstall)+len(toRemove))
-
-	// profileIntersection tracks profilesToAdd ∩ profilesToRemove, this is used to avoid:
-	//
-	// - Sending a RemoveProfile followed by an InstallProfile for a
-	// profile with an identifier that's already installed, which can cause
-	// racy behaviors.
-	// - Sending a InstallProfile command for a profile that's exactly the
-	// same as the one installed. Customers have reported that sending the
-	// command causes unwanted behavior.
-	profileIntersection := apple_mdm.NewProfileBimap()
-	profileIntersection.IntersectByIdentifierAndHostUUID(toInstall, toRemove)
-
-	// hostProfilesToCleanup is used to track profiles that should be removed
-	// from the database directly without having to issue a RemoveProfile
-	// command.
-	hostProfilesToCleanup := []*fleet.MDMAppleProfilePayload{}
-
-	// Index host profiles to install by host and profile UUID, for easier bulk error processing
-	hostProfilesToInstallMap := make(map[hostProfileUUID]*fleet.MDMAppleBulkUpsertHostProfilePayload, len(toInstall))
-
-	installTargets, removeTargets := make(map[string]*cmdTarget), make(map[string]*cmdTarget)
-	for _, p := range toInstall {
-		if pp, ok := profileIntersection.GetMatchingProfileInCurrentState(p); ok {
-			// if the profile was in any other status than `failed`
-			// and the checksums match (the profiles are exactly
-			// the same) we don't send another InstallProfile
-			// command.
-
-			if pp.Status != &fleet.MDMDeliveryFailed && bytes.Equal(pp.Checksum, p.Checksum) {
-				hostProfile := &fleet.MDMAppleBulkUpsertHostProfilePayload{
-					ProfileUUID:       p.ProfileUUID,
-					HostUUID:          p.HostUUID,
-					ProfileIdentifier: p.ProfileIdentifier,
-					ProfileName:       p.ProfileName,
-					Checksum:          p.Checksum,
-					SecretsUpdatedAt:  p.SecretsUpdatedAt,
-					OperationType:     pp.OperationType,
-					Status:            pp.Status,
-					CommandUUID:       pp.CommandUUID,
-					Detail:            pp.Detail,
-					Scope:             pp.Scope,
-				}
-				hostProfiles = append(hostProfiles, hostProfile)
-				hostProfilesToInstallMap[hostProfileUUID{HostUUID: p.HostUUID, ProfileUUID: p.ProfileUUID}] = hostProfile
-				continue
-			}
-		}
-
-		wait, err := isAwaitingUserEnrollment(p)
-		if err != nil {
-			return err
-		}
-		if wait {
-			// user-scoped profile still waiting for a user enrollment, leave the
-			// profile in NULL status
-			hostProfile := &fleet.MDMAppleBulkUpsertHostProfilePayload{
-				ProfileUUID:       p.ProfileUUID,
-				HostUUID:          p.HostUUID,
-				ProfileIdentifier: p.ProfileIdentifier,
-				ProfileName:       p.ProfileName,
-				Checksum:          p.Checksum,
-				SecretsUpdatedAt:  p.SecretsUpdatedAt,
-				OperationType:     fleet.MDMOperationTypeInstall,
-				Status:            nil,
-				Scope:             p.Scope,
-			}
-			hostProfiles = append(hostProfiles, hostProfile)
-			hostProfilesToInstallMap[hostProfileUUID{HostUUID: p.HostUUID, ProfileUUID: p.ProfileUUID}] = hostProfile
-			continue
-		}
-
-		toGetContents[p.ProfileUUID] = true
-
-		target := installTargets[p.ProfileUUID]
-		if target == nil {
-			target = &cmdTarget{
-				cmdUUID:   uuid.New().String(),
-				profIdent: p.ProfileIdentifier,
-			}
-			installTargets[p.ProfileUUID] = target
-		}
-
-		if p.Scope == fleet.PayloadScopeUser {
-			userEnrollmentID, err := getHostUserEnrollmentID(p.HostUUID)
-			if err != nil {
-				return err
-			}
-			if userEnrollmentID == "" {
-				var errorDetail string
-				if fleet.IsAppleMobilePlatform(p.HostPlatform) {
-					errorDetail = "This setting couldn't be enforced because the user channel isn't available on iOS and iPadOS hosts."
-				} else {
-					errorDetail = "This setting couldn't be enforced because the user channel doesn't exist for this host. Currently, Fleet creates the user channel for hosts that automatically enroll."
-					logger.WarnContext(ctx, "host does not have a user enrollment, failing profile installation",
-						"host_uuid", p.HostUUID, "profile_uuid", p.ProfileUUID, "profile_identifier", p.ProfileIdentifier)
-				}
-
-				hostProfile := &fleet.MDMAppleBulkUpsertHostProfilePayload{
-					ProfileUUID:       p.ProfileUUID,
-					HostUUID:          p.HostUUID,
-					OperationType:     fleet.MDMOperationTypeInstall,
-					Status:            &fleet.MDMDeliveryFailed,
-					Detail:            errorDetail,
-					CommandUUID:       "",
-					ProfileIdentifier: p.ProfileIdentifier,
-					ProfileName:       p.ProfileName,
-					Checksum:          p.Checksum,
-					SecretsUpdatedAt:  p.SecretsUpdatedAt,
-					Scope:             p.Scope,
-				}
-				hostProfiles = append(hostProfiles, hostProfile)
-				continue
-			}
-
-			target.enrollmentIDs = append(target.enrollmentIDs, userEnrollmentID)
-		} else {
-			target.enrollmentIDs = append(target.enrollmentIDs, p.HostUUID)
-		}
-		toGetContents[p.ProfileUUID] = true
-
-		hostProfile := &fleet.MDMAppleBulkUpsertHostProfilePayload{
-			ProfileUUID:       p.ProfileUUID,
-			HostUUID:          p.HostUUID,
-			OperationType:     fleet.MDMOperationTypeInstall,
-			Status:            &fleet.MDMDeliveryPending,
-			CommandUUID:       target.cmdUUID,
-			ProfileIdentifier: p.ProfileIdentifier,
-			ProfileName:       p.ProfileName,
-			Checksum:          p.Checksum,
-			SecretsUpdatedAt:  p.SecretsUpdatedAt,
-			Scope:             p.Scope,
-		}
-		hostProfiles = append(hostProfiles, hostProfile)
-		hostProfilesToInstallMap[hostProfileUUID{HostUUID: p.HostUUID, ProfileUUID: p.ProfileUUID}] = hostProfile
-	}
-
-	for _, p := range toRemove {
-		// Exclude profiles that are also marked for installation.
-		if _, ok := profileIntersection.GetMatchingProfileInDesiredState(p); ok {
-			hostProfilesToCleanup = append(hostProfilesToCleanup, p)
-			continue
-		}
-
-		if p.FailedInstallOnHost() {
-			// then we shouldn't send an additional remove command since it failed to install on the host.
-			hostProfilesToCleanup = append(hostProfilesToCleanup, p)
-			continue
-		}
-		if p.PendingInstallOnHost() {
-			// The profile most likely did not install on host. However, it is possible that the profile
-			// is currently being installed. So, we clean up the profile from the database, but also send
-			// a remove command to the host.
-			hostProfilesToCleanup = append(hostProfilesToCleanup, p)
-			// IgnoreError is set since the removal command is likely to fail.
-			p.IgnoreError = true
-		}
-
-		target := removeTargets[p.ProfileUUID]
-		if target == nil {
-			target = &cmdTarget{
-				cmdUUID:   uuid.New().String(),
-				profIdent: p.ProfileIdentifier,
-			}
-			removeTargets[p.ProfileUUID] = target
-		}
-
-		if p.Scope == fleet.PayloadScopeUser {
-			userEnrollmentID, err := getHostUserEnrollmentID(p.HostUUID)
-			if err != nil {
-				return err
-			}
-			if userEnrollmentID == "" {
-				logger.WarnContext(ctx, "host does not have a user enrollment, cannot remove user scoped profile",
-					"host_uuid", p.HostUUID, "profile_uuid", p.ProfileUUID, "profile_identifier", p.ProfileIdentifier)
-				hostProfilesToCleanup = append(hostProfilesToCleanup, p)
-				continue
-			}
-
-			target.enrollmentIDs = append(target.enrollmentIDs, userEnrollmentID)
-		} else {
-			target.enrollmentIDs = append(target.enrollmentIDs, p.HostUUID)
-		}
-
-		hostProfiles = append(hostProfiles, &fleet.MDMAppleBulkUpsertHostProfilePayload{
-			ProfileUUID:       p.ProfileUUID,
-			HostUUID:          p.HostUUID,
-			OperationType:     fleet.MDMOperationTypeRemove,
-			Status:            &fleet.MDMDeliveryPending,
-			CommandUUID:       target.cmdUUID,
-			ProfileIdentifier: p.ProfileIdentifier,
-			ProfileName:       p.ProfileName,
-			Checksum:          p.Checksum,
-			SecretsUpdatedAt:  p.SecretsUpdatedAt,
-			IgnoreError:       p.IgnoreError,
-			Scope:             p.Scope,
-		})
-	}
-
-	// delete all profiles that have a matching identifier to be installed.
-	// This is to prevent sending both a `RemoveProfile` and an
-	// `InstallProfile` for the same identifier, which can cause race
-	// conditions. It's better to "update" the profile by sending a single
-	// `InstallProfile` command.
-	//
-	// Create a map of command UUIDs to host IDs
-	commandUUIDToHostIDsCleanupMap := make(map[string][]string)
-	for _, hp := range hostProfilesToCleanup {
-		// Certain failure scenarios may leave the profile without a command UUID, so skip those
-		if hp.CommandUUID != "" {
-			commandUUIDToHostIDsCleanupMap[hp.CommandUUID] = append(commandUUIDToHostIDsCleanupMap[hp.CommandUUID], hp.HostUUID)
-		}
-	}
-	// We need to delete commands from the nano queue so they don't get sent to device.
-	if len(commandUUIDToHostIDsCleanupMap) > 0 {
-		if err := commander.BulkDeleteHostUserCommandsWithoutResults(ctx, commandUUIDToHostIDsCleanupMap); err != nil {
-			return ctxerr.Wrap(ctx, err, "deleting nano commands without results")
-		}
-	}
-	if err := ds.BulkDeleteMDMAppleHostsConfigProfiles(ctx, hostProfilesToCleanup); err != nil {
-		return ctxerr.Wrap(ctx, err, "deleting profiles that didn't change")
-	}
-
-	// FIXME: How does this impact variable profiles? This happens before pre-processing, doesn't
-	// this potentially race with the command uuid and variable substitution?
-	//
-	// First update all the profiles in the database before sending the
-	// commands, this prevents race conditions where we could get a
-	// response from the device before we set its status as 'pending'
-	//
-	// We'll do another pass at the end to revert any changes for failed
-	// deliveries.
-	if err := ds.BulkUpsertMDMAppleHostProfiles(ctx, hostProfiles); err != nil {
-		return ctxerr.Wrap(ctx, err, "updating host profiles")
-	}
-
-	// Grab the contents of all the profiles we need to install
-	profileUUIDs := make([]string, 0, len(toGetContents))
-	for pUUID := range toGetContents {
-		profileUUIDs = append(profileUUIDs, pUUID)
-	}
-	profileContents, err := ds.GetMDMAppleProfilesContents(ctx, profileUUIDs)
-	if err != nil {
-		return ctxerr.Wrap(ctx, err, "get profile contents")
-	}
-
-	groupedCAs, err := ds.GetGroupedCertificateAuthorities(ctx, true)
-	if err != nil {
-		return ctxerr.Wrap(ctx, err, "getting grouped certificate authorities")
-	}
-
-	// Insert variables into profile contents of install targets. Variables may be host-specific.
-	err = preprocessProfileContents(ctx, appConfig, ds,
-		eeservice.NewSCEPConfigService(logger, nil),
-		digicert.NewService(digicert.WithLogger(logger)),
-		logger, installTargets, profileContents, hostProfilesToInstallMap, userEnrollmentsToHostUUIDsMap, groupedCAs)
-	if err != nil {
-		return err
-	}
-
-	// Find the profiles containing secret variables.
-	profilesWithSecrets, err := findProfilesWithSecrets(ctx, logger, installTargets, profileContents)
-	if err != nil {
-		return err
-	}
-
-	type remoteResult struct {
-		Err     error
-		CmdUUID string
-	}
-
-	// Send the install/remove commands for each profile.
-	var wgProd, wgCons sync.WaitGroup
-	ch := make(chan remoteResult)
-
-	execCmd := func(profUUID string, target *cmdTarget, op fleet.MDMOperationType) {
-		defer wgProd.Done()
-
-		var err error
-		switch op {
-		case fleet.MDMOperationTypeInstall:
-			if _, ok := profilesWithSecrets[profUUID]; ok {
-				err = commander.EnqueueCommandInstallProfileWithSecrets(ctx, target.enrollmentIDs, profileContents[profUUID], target.cmdUUID)
-			} else {
-				err = commander.InstallProfile(ctx, target.enrollmentIDs, profileContents[profUUID], target.cmdUUID)
-			}
-		case fleet.MDMOperationTypeRemove:
-			err = commander.RemoveProfile(ctx, target.enrollmentIDs, target.profIdent, target.cmdUUID)
-		}
-
-		var e *apple_mdm.APNSDeliveryError
-		switch {
-		case errors.As(err, &e):
-			logger.DebugContext(ctx, "sending push notifications, profiles still enqueued", "details", err)
-		case err != nil:
-			logger.ErrorContext(ctx, fmt.Sprintf("enqueue command to %s profiles", op), "details", err)
-			ch <- remoteResult{err, target.cmdUUID}
-		}
-	}
-	for profUUID, target := range installTargets {
-		wgProd.Add(1)
-		go execCmd(profUUID, target, fleet.MDMOperationTypeInstall)
-	}
-	for profUUID, target := range removeTargets {
-		wgProd.Add(1)
-		go execCmd(profUUID, target, fleet.MDMOperationTypeRemove)
-	}
-
-	// index the host profiles by cmdUUID, for ease of error processing in the
-	// consumer goroutine below.
-	hostProfsByCmdUUID := make(map[string][]*fleet.MDMAppleBulkUpsertHostProfilePayload, len(installTargets)+len(removeTargets))
-	for _, hp := range hostProfiles {
-		hostProfsByCmdUUID[hp.CommandUUID] = append(hostProfsByCmdUUID[hp.CommandUUID], hp)
-	}
-
-	// Grab all the failed deliveries and update the status so they're picked up
-	// again in the next run.
-	//
-	// Note that if the APNs push failed we won't try again, as the command was
-	// successfully enqueued, this is only to account for internal errors like DB
-	// failures.
-	failed := []*fleet.MDMAppleBulkUpsertHostProfilePayload{}
-	wgCons.Add(1)
-	go func() {
-		defer wgCons.Done()
-
-		for resp := range ch {
-			hostProfs := hostProfsByCmdUUID[resp.CmdUUID]
-			for _, hp := range hostProfs {
-				// clear the command as it failed to enqueue, will need to emit a new command
-				hp.CommandUUID = ""
-				// set status to nil so it is retried on the next cron run
-				hp.Status = nil
-				failed = append(failed, hp)
-			}
-		}
-	}()
-
-	wgProd.Wait()
-	close(ch) // done sending at this point, this triggers end of for loop in consumer
-	wgCons.Wait()
-
-	if err := ds.BulkUpsertMDMAppleHostProfiles(ctx, failed); err != nil {
-		return ctxerr.Wrap(ctx, err, "reverting status of failed profiles")
-	}
-
-	return nil
-}
-
-func findProfilesWithSecrets(
-	ctx context.Context,
-	logger *slog.Logger,
-	installTargets map[string]*cmdTarget,
-	profileContents map[string]mobileconfig.Mobileconfig,
-) (map[string]struct{}, error) {
-	profilesWithSecrets := make(map[string]struct{})
-	for profUUID := range installTargets {
-		p, ok := profileContents[profUUID]
-		if !ok { // Should never happen
-			logger.ErrorContext(ctx, "profile content not found in ReconcileAppleProfiles", "profile_uuid", profUUID)
-			continue
-		}
-		profileStr := string(p)
-		vars := fleet.ContainsPrefixVars(profileStr, fleet.ServerSecretPrefix)
-		if len(vars) > 0 {
-			profilesWithSecrets[profUUID] = struct{}{}
-		}
-	}
-	return profilesWithSecrets, nil
-}
-
-func preprocessProfileContents(
-	ctx context.Context,
-	appConfig *fleet.AppConfig,
-	ds fleet.Datastore,
-	scepConfig fleet.SCEPConfigService,
-	digiCertService fleet.DigiCertService,
-	logger *slog.Logger,
-	targets map[string]*cmdTarget,
-	profileContents map[string]mobileconfig.Mobileconfig,
-	hostProfilesToInstallMap map[hostProfileUUID]*fleet.MDMAppleBulkUpsertHostProfilePayload,
-	userEnrollmentsToHostUUIDsMap map[string]string,
-	groupedCAs *fleet.GroupedCertificateAuthorities,
-) error {
-	// This method replaces Fleet variables ($FLEET_VAR_<NAME>) in the profile
-	// contents, generating a unique profile for each host. For a 2KB profile and
-	// 30K hosts, this method may generate ~60MB of profile data in memory.
-
-	var (
-		// Copy of NDES SCEP config which will contain unencrypted password, if needed
-		ndesConfig    *fleet.NDESSCEPProxyCA
-		digiCertCAs   map[string]*fleet.DigiCertCA
-		customSCEPCAs map[string]*fleet.CustomSCEPProxyCA
-		smallstepCAs  map[string]*fleet.SmallstepSCEPProxyCA
-	)
-
-	// this is used to cache the host ID corresponding to the UUID, so we don't
-	// need to look it up more than once per host.
-	hostIDForUUIDCache := make(map[string]uint)
-
-	var addedTargets map[string]*cmdTarget
-	for profUUID, target := range targets {
-		contents, ok := profileContents[profUUID]
-		if !ok {
-			// This should never happen
-			continue
-		}
-
-		// Check if Fleet variables are present.
-		contentsStr := string(contents)
-		fleetVars := variables.Find(contentsStr)
-		if len(fleetVars) == 0 {
-			continue
-		}
-
-		var variablesUpdatedAt *time.Time
-
-		// Do common validation that applies to all hosts in the target
-		valid := true
-		// Check if there are any CA variables first so that if a non-CA variable causes
-		// preprocessing to fail, we still set the variablesUpdatedAt timestamp so that
-		// validation works as expected
-		// In the future we should expand variablesUpdatedAt logic to include non-CA variables as
-		// well
-		for _, fleetVar := range fleetVars {
-			if fleetVar == string(fleet.FleetVarSCEPRenewalID) ||
-				fleetVar == string(fleet.FleetVarNDESSCEPChallenge) || fleetVar == string(fleet.FleetVarNDESSCEPProxyURL) || fleetVar == string(fleet.FleetVarHostUUID) ||
-				strings.HasPrefix(fleetVar, string(fleet.FleetVarSmallstepSCEPChallengePrefix)) || strings.HasPrefix(fleetVar, string(fleet.FleetVarSmallstepSCEPProxyURLPrefix)) ||
-				strings.HasPrefix(fleetVar, string(fleet.FleetVarDigiCertPasswordPrefix)) || strings.HasPrefix(fleetVar, string(fleet.FleetVarDigiCertDataPrefix)) ||
-				strings.HasPrefix(fleetVar, string(fleet.FleetVarCustomSCEPChallengePrefix)) || strings.HasPrefix(fleetVar, string(fleet.FleetVarCustomSCEPProxyURLPrefix)) {
-				// Give a few minutes leeway to account for clock skew
-				variablesUpdatedAt = ptr.Time(time.Now().UTC().Add(-3 * time.Minute))
-				break
-			}
-		}
-
-	initialFleetVarLoop:
-		for _, fleetVar := range fleetVars {
-			switch {
-			case fleetVar == string(fleet.FleetVarNDESSCEPChallenge) || fleetVar == string(fleet.FleetVarNDESSCEPProxyURL):
-				configured, err := isNDESSCEPConfigured(ctx, groupedCAs, ds, hostProfilesToInstallMap, userEnrollmentsToHostUUIDsMap, profUUID, target)
-				if err != nil {
-					return ctxerr.Wrap(ctx, err, "checking NDES SCEP configuration")
-				}
-				if !configured {
-					valid = false
-					break initialFleetVarLoop
-				}
-
-			case fleetVar == string(fleet.FleetVarHostEndUserEmailIDP) || fleetVar == string(fleet.FleetVarHostHardwareSerial) || fleetVar == string(fleet.FleetVarHostPlatform) ||
-				fleetVar == string(fleet.FleetVarHostEndUserIDPUsername) || fleetVar == string(fleet.FleetVarHostEndUserIDPUsernameLocalPart) ||
-				fleetVar == string(fleet.FleetVarHostEndUserIDPGroups) || fleetVar == string(fleet.FleetVarHostEndUserIDPDepartment) || fleetVar == string(fleet.FleetVarSCEPRenewalID) ||
-				fleetVar == string(fleet.FleetVarHostEndUserIDPFullname) || fleetVar == string(fleet.FleetVarHostUUID):
-				// No extra validation needed for these variables
-
-			case strings.HasPrefix(fleetVar, string(fleet.FleetVarDigiCertPasswordPrefix)) || strings.HasPrefix(fleetVar, string(fleet.FleetVarDigiCertDataPrefix)):
-				var caName string
-				if strings.HasPrefix(fleetVar, string(fleet.FleetVarDigiCertPasswordPrefix)) {
-					caName = strings.TrimPrefix(fleetVar, string(fleet.FleetVarDigiCertPasswordPrefix))
-				} else {
-					caName = strings.TrimPrefix(fleetVar, string(fleet.FleetVarDigiCertDataPrefix))
-				}
-				if digiCertCAs == nil {
-					digiCertCAs = make(map[string]*fleet.DigiCertCA)
-				}
-				configured, err := isDigiCertConfigured(ctx, groupedCAs, ds, hostProfilesToInstallMap, userEnrollmentsToHostUUIDsMap, digiCertCAs, profUUID, target, caName, fleetVar)
-				if err != nil {
-					return ctxerr.Wrap(ctx, err, "checking DigiCert configuration")
-				}
-				if !configured {
-					valid = false
-					break initialFleetVarLoop
-				}
-
-			case strings.HasPrefix(fleetVar, string(fleet.FleetVarCustomSCEPChallengePrefix)) || strings.HasPrefix(fleetVar, string(fleet.FleetVarCustomSCEPProxyURLPrefix)):
-				var caName string
-				if strings.HasPrefix(fleetVar, string(fleet.FleetVarCustomSCEPChallengePrefix)) {
-					caName = strings.TrimPrefix(fleetVar, string(fleet.FleetVarCustomSCEPChallengePrefix))
-				} else {
-					caName = strings.TrimPrefix(fleetVar, string(fleet.FleetVarCustomSCEPProxyURLPrefix))
-				}
-				if customSCEPCAs == nil {
-					customSCEPCAs = make(map[string]*fleet.CustomSCEPProxyCA)
-					for _, ca := range groupedCAs.CustomScepProxy {
-						customSCEPCAs[ca.Name] = &ca
-					}
-				}
-				err := profiles.IsCustomSCEPConfigured(ctx, customSCEPCAs, caName, fleetVar, func(errMsg string) error {
-					_, err := markProfilesFailed(ctx, ds, target, hostProfilesToInstallMap, userEnrollmentsToHostUUIDsMap, profUUID, errMsg, ptr.Time(time.Now().UTC()))
-					return err
-				})
-				if err != nil {
-					valid = false
-					break initialFleetVarLoop
-				}
-
-			case strings.HasPrefix(fleetVar, string(fleet.FleetVarSmallstepSCEPChallengePrefix)) || strings.HasPrefix(fleetVar, string(fleet.FleetVarSmallstepSCEPProxyURLPrefix)):
-				if smallstepCAs == nil {
-					smallstepCAs = make(map[string]*fleet.SmallstepSCEPProxyCA)
-				}
-				var caName string
-				if strings.HasPrefix(fleetVar, string(fleet.FleetVarSmallstepSCEPChallengePrefix)) {
-					caName = strings.TrimPrefix(fleetVar, string(fleet.FleetVarSmallstepSCEPChallengePrefix))
-				} else {
-					caName = strings.TrimPrefix(fleetVar, string(fleet.FleetVarSmallstepSCEPProxyURLPrefix))
-				}
-				configured, err := isSmallstepSCEPConfigured(ctx, groupedCAs, ds, hostProfilesToInstallMap, userEnrollmentsToHostUUIDsMap, smallstepCAs, profUUID, target, caName,
-					fleetVar)
-				if err != nil {
-					return ctxerr.Wrap(ctx, err, "checking Smallstep SCEP configuration")
-				}
-				if !configured {
-					valid = false
-					break initialFleetVarLoop
-				}
-
-			default:
-				// Otherwise, error out since this variable is unknown
-				detail := fmt.Sprintf("Unknown Fleet variable $FLEET_VAR_%s found in profile. Please update or remove.",
-					fleetVar)
-				_, err := markProfilesFailed(ctx, ds, target, hostProfilesToInstallMap, userEnrollmentsToHostUUIDsMap, profUUID, detail, variablesUpdatedAt)
-				if err != nil {
-					return err
-				}
-				valid = false
-			}
-		}
-		if !valid {
-			// We marked the profile as failed, so we will not do any additional processing on it
-			delete(targets, profUUID)
-			continue
-		}
-
-		// Currently, all supported Fleet variables are unique per host, so we split the profile into multiple profiles.
-		// We generate a new temporary profileUUID which is currently only used to install the profile.
-		// The profileUUID in host_mdm_apple_profiles is still the original profileUUID.
-		// We also generate a new commandUUID which is used to install the profile via nano_commands table.
-		if addedTargets == nil {
-			addedTargets = make(map[string]*cmdTarget, 1)
-		}
-		// We store the timestamp when the challenge was retrieved to know if it has expired.
-		var managedCertificatePayloads []*fleet.MDMManagedCertificate
-		// We need to update the profiles of each host with the new command UUID
-		profilesToUpdate := make([]*fleet.MDMAppleBulkUpsertHostProfilePayload, 0, len(target.enrollmentIDs))
-		for _, enrollmentID := range target.enrollmentIDs {
-			tempProfUUID := uuid.NewString()
-			// Use the same UUID for command UUID, which will be the primary key for nano_commands
-			tempCmdUUID := tempProfUUID
-			profile, ok := getHostProfileToInstallByEnrollmentID(hostProfilesToInstallMap, userEnrollmentsToHostUUIDsMap, enrollmentID, profUUID)
-			if !ok { // Should never happen
-				continue
-			}
-			// Fetch the host UUID, which may not be the same as the Enrollment ID, from the profile
-			hostUUID := profile.HostUUID
-
-			// some variables need more information about the host; build a skeleton host and hydrate if we need more info
-			hostLite := fleet.Host{UUID: hostUUID}
-			onMismatchedHostCount := func(hostCount int) error {
-				return ctxerr.Wrap(ctx, ds.UpdateOrDeleteHostMDMAppleProfile(ctx, &fleet.HostMDMAppleProfile{
-					CommandUUID:   target.cmdUUID,
-					HostUUID:      hostLite.UUID,
-					Status:        &fleet.MDMDeliveryFailed,
-					Detail:        fmt.Sprintf("Unexpected number of hosts (%d) for UUID %s.", hostCount, hostLite.UUID),
-					OperationType: fleet.MDMOperationTypeInstall,
-				}), "could not retrieve host by UUID for profile variable substitution")
-			}
-
-			profile.CommandUUID = tempCmdUUID
-			profile.VariablesUpdatedAt = variablesUpdatedAt
-
-			hostContents := contentsStr
-			failed := false
-
-		fleetVarLoop:
-			for _, fleetVar := range fleetVars {
-				var err error
-				switch {
-				case fleetVar == string(fleet.FleetVarNDESSCEPChallenge):
-					if ndesConfig == nil {
-						ndesConfig = groupedCAs.NDESSCEP
-					}
-					logger.DebugContext(ctx, "fetching NDES challenge", "host_uuid", hostUUID, "profile_uuid", profUUID)
-					// Insert the SCEP challenge into the profile contents
-					challenge, err := scepConfig.GetNDESSCEPChallenge(ctx, *ndesConfig)
-					if err != nil {
-						detail := ""
-						switch {
-						case errors.As(err, &eeservice.NDESInvalidError{}):
-							detail = fmt.Sprintf("Invalid NDES admin credentials. "+
-								"Fleet couldn't populate $FLEET_VAR_%s. "+
-								"Please update credentials in Settings > Integrations > Mobile Device Management > Simple Certificate Enrollment Protocol.",
-								fleet.FleetVarNDESSCEPChallenge)
-						case errors.As(err, &eeservice.NDESPasswordCacheFullError{}):
-							detail = fmt.Sprintf("The NDES password cache is full. "+
-								"Fleet couldn't populate $FLEET_VAR_%s. "+
-								"Please increase the number of cached passwords in NDES and try again.",
-								fleet.FleetVarNDESSCEPChallenge)
-						case errors.As(err, &eeservice.NDESInsufficientPermissionsError{}):
-							detail = fmt.Sprintf("This account does not have sufficient permissions to enroll with SCEP. "+
-								"Fleet couldn't populate $FLEET_VAR_%s. "+
-								"Please update the account with NDES SCEP enroll permissions and try again.",
-								fleet.FleetVarNDESSCEPChallenge)
-						default:
-							detail = fmt.Sprintf("Fleet couldn't populate $FLEET_VAR_%s. %s", fleet.FleetVarNDESSCEPChallenge, err.Error())
-						}
-						err := ds.UpdateOrDeleteHostMDMAppleProfile(ctx, &fleet.HostMDMAppleProfile{
-							CommandUUID:        target.cmdUUID,
-							HostUUID:           hostUUID,
-							Status:             &fleet.MDMDeliveryFailed,
-							Detail:             detail,
-							OperationType:      fleet.MDMOperationTypeInstall,
-							VariablesUpdatedAt: variablesUpdatedAt,
-						})
-						if err != nil {
-							return ctxerr.Wrap(ctx, err, "updating host MDM Apple profile for NDES SCEP challenge")
-						}
-						failed = true
-						break fleetVarLoop
-					}
-					payload := &fleet.MDMManagedCertificate{
-						HostUUID:             hostUUID,
-						ProfileUUID:          profUUID,
-						ChallengeRetrievedAt: ptr.Time(time.Now()),
-						Type:                 fleet.CAConfigNDES,
-						CAName:               "NDES",
-					}
-					managedCertificatePayloads = append(managedCertificatePayloads, payload)
-
-					hostContents = profiles.ReplaceFleetVariableInXML(fleetVarNDESSCEPChallengeRegexp, hostContents, challenge)
-
-				case fleetVar == string(fleet.FleetVarNDESSCEPProxyURL):
-					// Insert the SCEP URL into the profile contents
-					proxyURL := fmt.Sprintf("%s%s%s", appConfig.MDMUrl(), apple_mdm.SCEPProxyPath,
-						url.PathEscape(fmt.Sprintf("%s,%s,NDES", hostUUID, profUUID)))
-					hostContents = profiles.ReplaceFleetVariableInXML(fleetVarNDESSCEPProxyURLRegexp, hostContents, proxyURL)
-
-				case fleetVar == string(fleet.FleetVarSCEPRenewalID):
-					// Insert the SCEP renewal ID into the SCEP Payload CN or OU
-					fleetRenewalID := "fleet-" + profUUID
-					hostContents = profiles.ReplaceFleetVariableInXML(fleetVarSCEPRenewalIDRegexp, hostContents, fleetRenewalID)
-
-				case strings.HasPrefix(fleetVar, string(fleet.FleetVarCustomSCEPChallengePrefix)):
-					replacedContents, replacedVariable, err := profiles.ReplaceCustomSCEPChallengeVariable(ctx, logger, fleetVar, customSCEPCAs, hostContents)
-					if err != nil {
-						return ctxerr.Wrap(ctx, err, "replacing custom SCEP challenge variable")
-					}
-					if !replacedVariable {
-						continue
-					}
-					hostContents = replacedContents
-
-				case strings.HasPrefix(fleetVar, string(fleet.FleetVarCustomSCEPProxyURLPrefix)):
-					replacedContents, managedCertificate, replacedVariable, err := profiles.ReplaceCustomSCEPProxyURLVariable(ctx, logger, ds, appConfig, fleetVar, customSCEPCAs, hostContents, hostUUID, profUUID)
-					if err != nil {
-						return ctxerr.Wrap(ctx, err, "replacing custom SCEP proxy URL variable")
-					}
-					if !replacedVariable {
-						continue
-					}
-					hostContents = replacedContents
-					managedCertificatePayloads = append(managedCertificatePayloads, managedCertificate)
-
-				case strings.HasPrefix(fleetVar, string(fleet.FleetVarSmallstepSCEPChallengePrefix)):
-					caName := strings.TrimPrefix(fleetVar, string(fleet.FleetVarSmallstepSCEPChallengePrefix))
-					ca, ok := smallstepCAs[caName]
-					if !ok {
-						logger.ErrorContext(ctx, "Smallstep SCEP CA not found. "+
-							"This error should never happen since we validated/populated CAs earlier", "ca_name", caName)
-						continue
-					}
-					logger.DebugContext(ctx, "fetching Smallstep SCEP challenge", "host_uuid", hostUUID, "profile_uuid", profUUID)
-					challenge, err := scepConfig.GetSmallstepSCEPChallenge(ctx, *ca)
-					if err != nil {
-						detail := fmt.Sprintf("Fleet couldn't populate $FLEET_VAR_%s. %s", fleet.FleetVarSmallstepSCEPChallengePrefix, err.Error())
-						err := ds.UpdateOrDeleteHostMDMAppleProfile(ctx, &fleet.HostMDMAppleProfile{
-							CommandUUID:        target.cmdUUID,
-							HostUUID:           hostUUID,
-							Status:             &fleet.MDMDeliveryFailed,
-							Detail:             detail,
-							OperationType:      fleet.MDMOperationTypeInstall,
-							VariablesUpdatedAt: variablesUpdatedAt,
-						})
-						if err != nil {
-							return ctxerr.Wrap(ctx, err, "updating host MDM Apple profile for Smallstep SCEP challenge")
-						}
-						failed = true
-						break fleetVarLoop
-					}
-					logger.InfoContext(ctx, "retrieved SCEP challenge from Smallstep", "host_uuid", hostUUID, "profile_uuid", profUUID)
-
-					payload := &fleet.MDMManagedCertificate{
-						HostUUID:             hostUUID,
-						ProfileUUID:          profUUID,
-						ChallengeRetrievedAt: ptr.Time(time.Now()),
-						Type:                 fleet.CAConfigSmallstep,
-						CAName:               caName,
-					}
-					managedCertificatePayloads = append(managedCertificatePayloads, payload)
-					hostContents, err = profiles.ReplaceExactFleetPrefixVariableInXML(string(fleet.FleetVarSmallstepSCEPChallengePrefix), ca.Name, hostContents, challenge)
-					if err != nil {
-						return ctxerr.Wrap(ctx, err, "replacing Smallstep SCEP challenge variable")
-					}
-
-				case strings.HasPrefix(fleetVar, string(fleet.FleetVarSmallstepSCEPProxyURLPrefix)):
-					// Insert the SCEP URL into the profile contents
-					caName := strings.TrimPrefix(fleetVar, string(fleet.FleetVarSmallstepSCEPProxyURLPrefix))
-					proxyURL := fmt.Sprintf("%s%s%s", appConfig.MDMUrl(), apple_mdm.SCEPProxyPath,
-						url.PathEscape(fmt.Sprintf("%s,%s,%s", hostUUID, profUUID, caName)))
-					hostContents, err = profiles.ReplaceExactFleetPrefixVariableInXML(string(fleet.FleetVarSmallstepSCEPProxyURLPrefix), caName, hostContents, proxyURL)
-					if err != nil {
-						return ctxerr.Wrap(ctx, err, "replacing Smallstep SCEP URL variable")
-					}
-
-				case fleetVar == string(fleet.FleetVarHostEndUserEmailIDP):
-					email, ok, err := getFirstIDPEmail(ctx, ds, target, hostUUID)
-					if err != nil {
-						return ctxerr.Wrap(ctx, err, "getting IDP email")
-					}
-					if !ok {
-						failed = true
-						break fleetVarLoop
-					}
-					hostContents = profiles.ReplaceFleetVariableInXML(fleetVarHostEndUserEmailIDPRegexp, hostContents, email)
-
-				case fleetVar == string(fleet.FleetVarHostHardwareSerial):
-					hostLite, ok, err = profiles.HydrateHost(ctx, ds, hostLite, onMismatchedHostCount)
-					if err != nil {
-						return ctxerr.Wrap(ctx, err, "getting host hardware serial")
-					}
-					if !ok {
-						failed = true
-						break fleetVarLoop
-					}
-					hostContents = profiles.ReplaceFleetVariableInXML(fleet.FleetVarHostHardwareSerialRegexp, hostContents, hostLite.HardwareSerial)
-				case fleetVar == string(fleet.FleetVarHostPlatform):
-					hostLite, ok, err = profiles.HydrateHost(ctx, ds, hostLite, onMismatchedHostCount)
-					if err != nil {
-						return ctxerr.Wrap(ctx, err, "getting host platform")
-					}
-					if !ok {
-						failed = true
-						break fleetVarLoop
-					}
-					platform := hostLite.Platform
-					if platform == "darwin" {
-						platform = "macos"
-					}
-
-					hostContents = profiles.ReplaceFleetVariableInXML(fleet.FleetVarHostPlatformRegexp, hostContents, platform)
-				case fleetVar == string(fleet.FleetVarHostEndUserIDPUsername) || fleetVar == string(fleet.FleetVarHostEndUserIDPUsernameLocalPart) ||
-					fleetVar == string(fleet.FleetVarHostEndUserIDPGroups) || fleetVar == string(fleet.FleetVarHostEndUserIDPDepartment) ||
-					fleetVar == string(fleet.FleetVarHostEndUserIDPFullname):
-					replacedContents, replacedVariable, err := profiles.ReplaceHostEndUserIDPVariables(ctx, ds, fleetVar, hostContents, hostUUID, hostIDForUUIDCache, func(errMsg string) error {
-						err := ds.UpdateOrDeleteHostMDMAppleProfile(ctx, &fleet.HostMDMAppleProfile{
-							CommandUUID:   target.cmdUUID,
-							HostUUID:      hostUUID,
-							Status:        &fleet.MDMDeliveryFailed,
-							Detail:        errMsg,
-							OperationType: fleet.MDMOperationTypeInstall,
-						})
-						return err
-					})
-					if err != nil {
-						return ctxerr.Wrap(ctx, err, "replacing host end user IDP variables")
-					}
-					if !replacedVariable {
-						failed = true
-						break fleetVarLoop
-					}
-
-					hostContents = replacedContents
-
-				case strings.HasPrefix(fleetVar, string(fleet.FleetVarDigiCertPasswordPrefix)):
-					// We will replace the password when we populate the certificate data
-
-				case fleetVar == string(fleet.FleetVarHostUUID):
-					hostContents = profiles.ReplaceFleetVariableInXML(fleetVarHostUUIDRegexp, hostContents, hostUUID)
-
-				case strings.HasPrefix(fleetVar, string(fleet.FleetVarDigiCertDataPrefix)):
-					caName := strings.TrimPrefix(fleetVar, string(fleet.FleetVarDigiCertDataPrefix))
-					ca, ok := digiCertCAs[caName]
-					if !ok {
-						logger.ErrorContext(ctx, "Custom DigiCert CA not found. "+
-							"This error should never happen since we validated/populated CAs earlier", "ca_name", caName)
-						continue
-					}
-					caCopy := *ca
-					// Deep copy the UPN slice to prevent cross-host contamination: a
-					// shallow copy shares the backing array, so in-place substitutions for
-					// one host would corrupt the cached CA used by subsequent hosts.
-					caCopy.CertificateUserPrincipalNames = slices.Clone(ca.CertificateUserPrincipalNames)
-
-					// Populate Fleet vars in the CA fields
-					caVarsCache := make(map[string]string)
-
-					ok, err := replaceFleetVarInItem(ctx, ds, target, hostLite, caVarsCache, &caCopy.CertificateCommonName, onMismatchedHostCount)
-					if err != nil {
-						return ctxerr.Wrap(ctx, err, "populating Fleet variables in DigiCert CA common name")
-					}
-					if !ok {
-						failed = true
-						break fleetVarLoop
-					}
-					ok, err = replaceFleetVarInItem(ctx, ds, target, hostLite, caVarsCache, &caCopy.CertificateSeatID, onMismatchedHostCount)
-					if err != nil {
-						return ctxerr.Wrap(ctx, err, "populating Fleet variables in DigiCert CA common name")
-					}
-					if !ok {
-						failed = true
-						break fleetVarLoop
-					}
-					if len(caCopy.CertificateUserPrincipalNames) > 0 {
-						for i := range caCopy.CertificateUserPrincipalNames {
-							ok, err = replaceFleetVarInItem(ctx, ds, target, hostLite, caVarsCache, &caCopy.CertificateUserPrincipalNames[i], onMismatchedHostCount)
-							if err != nil {
-								return ctxerr.Wrap(ctx, err, "populating Fleet variables in DigiCert CA common name")
-							}
-							if !ok {
-								failed = true
-								break fleetVarLoop
-							}
-						}
-					}
-
-					cert, err := digiCertService.GetCertificate(ctx, caCopy)
-					if err != nil {
-						detail := fmt.Sprintf("Couldn't get certificate from DigiCert for %s. %s", caCopy.Name, err)
-						err = ds.UpdateOrDeleteHostMDMAppleProfile(ctx, &fleet.HostMDMAppleProfile{
-							CommandUUID:        target.cmdUUID,
-							HostUUID:           hostUUID,
-							Status:             &fleet.MDMDeliveryFailed,
-							Detail:             detail,
-							OperationType:      fleet.MDMOperationTypeInstall,
-							VariablesUpdatedAt: variablesUpdatedAt,
-						})
-						if err != nil {
-							return ctxerr.Wrap(ctx, err, "updating host MDM Apple profile for DigiCert")
-						}
-						failed = true
-						break fleetVarLoop
-					}
-					hostContents, err = profiles.ReplaceExactFleetPrefixVariableInXML(string(fleet.FleetVarDigiCertDataPrefix), caName, hostContents,
-						base64.StdEncoding.EncodeToString(cert.PfxData))
-					if err != nil {
-						return ctxerr.Wrap(ctx, err, "replacing Fleet variable for DigiCert data")
-					}
-					hostContents, err = profiles.ReplaceExactFleetPrefixVariableInXML(string(fleet.FleetVarDigiCertPasswordPrefix), caName, hostContents, cert.Password)
-					if err != nil {
-						return ctxerr.Wrap(ctx, err, "replacing Fleet variable for DigiCert password")
-					}
-					managedCertificatePayloads = append(managedCertificatePayloads, &fleet.MDMManagedCertificate{
-						HostUUID:       hostUUID,
-						ProfileUUID:    profUUID,
-						NotValidBefore: &cert.NotValidBefore,
-						NotValidAfter:  &cert.NotValidAfter,
-						Type:           fleet.CAConfigDigiCert,
-						CAName:         caName,
-						Serial:         &cert.SerialNumber,
-					})
-
-				default:
-					// This was handled in the above switch statement, so we should never reach this case
-				}
-			}
-			if !failed {
-				addedTargets[tempProfUUID] = &cmdTarget{
-					cmdUUID:       tempCmdUUID,
-					profIdent:     target.profIdent,
-					enrollmentIDs: []string{enrollmentID},
-				}
-				profileContents[tempProfUUID] = mobileconfig.Mobileconfig(hostContents)
-				profilesToUpdate = append(profilesToUpdate, profile)
-			}
-		}
-		// Update profiles with the new command UUID
-		if len(profilesToUpdate) > 0 {
-			if err := ds.BulkUpsertMDMAppleHostProfiles(ctx, profilesToUpdate); err != nil {
-				return ctxerr.Wrap(ctx, err, "updating host profiles")
-			}
-		}
-		if len(managedCertificatePayloads) != 0 {
-			// TODO: We could filter out failed profiles, but at the moment we don't, see Windows impl. for how it's done there.
-			err := ds.BulkUpsertMDMManagedCertificates(ctx, managedCertificatePayloads)
-			if err != nil {
-				return ctxerr.Wrap(ctx, err, "updating managed certificates")
-			}
-		}
-		// Remove the parent target, since we will use host-specific targets
-		delete(targets, profUUID)
-	}
-	if len(addedTargets) > 0 {
-		// Add the new host-specific targets to the original targets map
-		for profUUID, target := range addedTargets {
-			targets[profUUID] = target
-		}
-	}
-	return nil
-}
-
-func getFirstIDPEmail(ctx context.Context, ds fleet.Datastore, target *cmdTarget, hostUUID string) (string, bool, error) {
-	// Insert the end user email IDP into the profile contents
-	emails, err := ds.GetHostEmails(ctx, hostUUID, fleet.DeviceMappingMDMIdpAccounts)
-	if err != nil {
-		// This is a server error, so we exit.
-		return "", false, ctxerr.Wrap(ctx, err, "getting host emails")
-	}
-	if len(emails) == 0 {
-		// We couldn't retrieve the end user email IDP, so mark the profile as failed with additional detail.
-		err := ds.UpdateOrDeleteHostMDMAppleProfile(ctx, &fleet.HostMDMAppleProfile{
-			CommandUUID: target.cmdUUID,
-			HostUUID:    hostUUID,
-			Status:      &fleet.MDMDeliveryFailed,
-			Detail: fmt.Sprintf("There is no IdP email for this host. "+
-				"Fleet couldn't populate $FLEET_VAR_%s. "+
-				"[Learn more](https://fleetdm.com/learn-more-about/idp-email)",
-				fleet.FleetVarHostEndUserEmailIDP),
-			OperationType: fleet.MDMOperationTypeInstall,
-		})
-		if err != nil {
-			return "", false, ctxerr.Wrap(ctx, err, "updating host MDM Apple profile for end user email IdP")
-		}
-		return "", false, nil
-	}
-	return emails[0], true, nil
-}
-
-func replaceFleetVarInItem(ctx context.Context, ds fleet.Datastore, target *cmdTarget, hostLite fleet.Host, caVarsCache map[string]string, item *string, onMismatchedHostCount func(int) error) (bool, error) {
-	caFleetVars := variables.Find(*item)
-	for _, caVar := range caFleetVars {
-		switch caVar {
-		case string(fleet.FleetVarHostEndUserEmailIDP):
-			email, ok := caVarsCache[string(fleet.FleetVarHostEndUserEmailIDP)]
-			if !ok {
-				var err error
-				email, ok, err = getFirstIDPEmail(ctx, ds, target, hostLite.UUID)
-				if err != nil {
-					return false, ctxerr.Wrap(ctx, err, "getting IDP email")
-				}
-				if !ok {
-					return false, nil
-				}
-				caVarsCache[string(fleet.FleetVarHostEndUserEmailIDP)] = email
-			}
-			*item = profiles.ReplaceFleetVariableInXML(fleetVarHostEndUserEmailIDPRegexp, *item, email)
-		case string(fleet.FleetVarHostHardwareSerial):
-			hardwareSerial, ok := caVarsCache[string(fleet.FleetVarHostHardwareSerial)]
-			if !ok {
-				var err error
-				hostLite, ok, err = profiles.HydrateHost(ctx, ds, hostLite, onMismatchedHostCount)
-				if err != nil {
-					return false, ctxerr.Wrap(ctx, err, "getting host hardware serial")
-				}
-				if !ok {
-					return false, nil
-				}
-				hardwareSerial = hostLite.HardwareSerial
-				caVarsCache[string(fleet.FleetVarHostHardwareSerial)] = hostLite.HardwareSerial
-			}
-			*item = profiles.ReplaceFleetVariableInXML(fleet.FleetVarHostHardwareSerialRegexp, *item, hardwareSerial)
-		case string(fleet.FleetVarHostPlatform):
-			platform, ok := caVarsCache[string(fleet.FleetVarHostPlatform)]
-			if !ok {
-				var err error
-				hostLite, ok, err = profiles.HydrateHost(ctx, ds, hostLite, onMismatchedHostCount)
-				if err != nil {
-					return false, ctxerr.Wrap(ctx, err, "getting host hardware serial")
-				}
-				if !ok {
-					return false, nil
-				}
-				platform = hostLite.Platform
-				if platform == "darwin" {
-					platform = "macos"
-				}
-
-				caVarsCache[string(fleet.FleetVarHostPlatform)] = platform
-			}
-			*item = profiles.ReplaceFleetVariableInXML(fleet.FleetVarHostPlatformRegexp, *item, platform)
-		default:
-			// We should not reach this since we validated the variables when saving app config
-		}
-	}
-	return true, nil
-}
-
-func isDigiCertConfigured(ctx context.Context, groupedCAs *fleet.GroupedCertificateAuthorities, ds fleet.Datastore,
-	hostProfilesToInstallMap map[hostProfileUUID]*fleet.MDMAppleBulkUpsertHostProfilePayload,
-	userEnrollmentsToHostUUIDsMap map[string]string,
-	existingDigiCertCAs map[string]*fleet.DigiCertCA, profUUID string, target *cmdTarget, caName string, fleetVar string,
-) (bool, error) {
-	if !license.IsPremium(ctx) {
-		return markProfilesFailed(ctx, ds, target, hostProfilesToInstallMap, userEnrollmentsToHostUUIDsMap, profUUID, "DigiCert integration requires a Fleet Premium license.", ptr.Time(time.Now().UTC()))
-	}
-	if _, ok := existingDigiCertCAs[caName]; ok {
-		return true, nil
-	}
-	configured := false
-	var digiCertCA *fleet.DigiCertCA
-	if len(groupedCAs.DigiCert) > 0 {
-		for _, ca := range groupedCAs.DigiCert {
-			if ca.Name == caName {
-				digiCertCA = &ca
-				configured = true
-				break
-			}
-		}
-	}
-	if !configured || digiCertCA == nil {
-		return markProfilesFailed(ctx, ds, target, hostProfilesToInstallMap, userEnrollmentsToHostUUIDsMap, profUUID,
-			fmt.Sprintf("Fleet couldn't populate $%s because %s certificate authority doesn't exist.", fleetVar, caName), ptr.Time(time.Now().UTC()))
-	}
-
-	existingDigiCertCAs[caName] = digiCertCA
-	return true, nil
-}
-
-func isNDESSCEPConfigured(ctx context.Context, groupedCAs *fleet.GroupedCertificateAuthorities, ds fleet.Datastore,
-	hostProfilesToInstallMap map[hostProfileUUID]*fleet.MDMAppleBulkUpsertHostProfilePayload, userEnrollmentsToHostUUIDsMap map[string]string, profUUID string, target *cmdTarget,
-) (bool, error) {
-	if !license.IsPremium(ctx) {
-		return markProfilesFailed(ctx, ds, target, hostProfilesToInstallMap, userEnrollmentsToHostUUIDsMap, profUUID, "NDES SCEP Proxy requires a Fleet Premium license.", ptr.Time(time.Now().UTC()))
-	}
-	if groupedCAs.NDESSCEP == nil {
-		return markProfilesFailed(ctx, ds, target, hostProfilesToInstallMap, userEnrollmentsToHostUUIDsMap, profUUID,
-			"NDES SCEP Proxy is not configured. Please configure in Settings > Integrations > Certificates.", ptr.Time(time.Now().UTC()))
-	}
-	return true, nil
-}
-
-func isSmallstepSCEPConfigured(ctx context.Context, groupedCAs *fleet.GroupedCertificateAuthorities, ds fleet.Datastore,
-	hostProfilesToInstallMap map[hostProfileUUID]*fleet.MDMAppleBulkUpsertHostProfilePayload,
-	userEnrollmentsToHostUUIDsMap map[string]string,
-	existingSmallstepSCEPCAs map[string]*fleet.SmallstepSCEPProxyCA, profUUID string, target *cmdTarget, caName string, fleetVar string,
-) (bool, error) {
-	if !license.IsPremium(ctx) {
-		return markProfilesFailed(ctx, ds, target, hostProfilesToInstallMap, userEnrollmentsToHostUUIDsMap, profUUID, "Smallstep SCEP integration requires a Fleet Premium license.", ptr.Time(time.Now().UTC()))
-	}
-	if _, ok := existingSmallstepSCEPCAs[caName]; ok {
-		return true, nil
-	}
-	configured := false
-	var scepCA *fleet.SmallstepSCEPProxyCA
-	if len(groupedCAs.Smallstep) > 0 {
-		for _, ca := range groupedCAs.Smallstep {
-			if ca.Name == caName {
-				scepCA = &ca
-				configured = true
-				break
-			}
-		}
-	}
-	if !configured || scepCA == nil {
-		return markProfilesFailed(ctx, ds, target, hostProfilesToInstallMap, userEnrollmentsToHostUUIDsMap, profUUID,
-			fmt.Sprintf("Fleet couldn't populate $%s because %s certificate authority doesn't exist.", fleetVar, caName), ptr.Time(time.Now().UTC()))
-	}
-
-	existingSmallstepSCEPCAs[caName] = scepCA
-	return true, nil
-}
-
-func getHostProfileToInstallByEnrollmentID(hostProfilesToInstallMap map[hostProfileUUID]*fleet.MDMAppleBulkUpsertHostProfilePayload,
-	userEnrollmentsToHostUUIDsMap map[string]string,
-	enrollmentID,
-	profUUID string,
-) (*fleet.MDMAppleBulkUpsertHostProfilePayload, bool) {
-	profile, ok := hostProfilesToInstallMap[hostProfileUUID{HostUUID: enrollmentID, ProfileUUID: profUUID}]
-	if !ok {
-		var hostUUID string
-		// If sending to the user channel the enrollmentID will have to be mapped back to the host UUID.
-		hostUUID, ok = userEnrollmentsToHostUUIDsMap[enrollmentID]
-		if ok {
-			profile, ok = hostProfilesToInstallMap[hostProfileUUID{HostUUID: hostUUID, ProfileUUID: profUUID}]
-		}
-	}
-	return profile, ok
-}
-
-func markProfilesFailed(
-	ctx context.Context,
-	ds fleet.Datastore,
-	target *cmdTarget,
-	hostProfilesToInstallMap map[hostProfileUUID]*fleet.MDMAppleBulkUpsertHostProfilePayload,
-	userEnrollmentsToHostUUIDsMap map[string]string,
-	profUUID string,
-	detail string,
-	variablesUpdatedAt *time.Time,
-) (bool, error) {
-	profilesToUpdate := make([]*fleet.MDMAppleBulkUpsertHostProfilePayload, 0, len(target.enrollmentIDs))
-	for _, enrollmentID := range target.enrollmentIDs {
-		profile, ok := getHostProfileToInstallByEnrollmentID(hostProfilesToInstallMap, userEnrollmentsToHostUUIDsMap, enrollmentID, profUUID)
-		if !ok {
-			// If sending to the user channel the enrollmentID will have to be mapped back to the host UUID.
-			hostUUID, ok := userEnrollmentsToHostUUIDsMap[enrollmentID]
-			if ok {
-				profile, ok = hostProfilesToInstallMap[hostProfileUUID{HostUUID: hostUUID, ProfileUUID: profUUID}]
-			}
-			if !ok {
-				continue
-			}
-		}
-		profile.Status = &fleet.MDMDeliveryFailed
-		profile.Detail = detail
-		profile.VariablesUpdatedAt = variablesUpdatedAt
-		profilesToUpdate = append(profilesToUpdate, profile)
-	}
-	if err := ds.BulkUpsertMDMAppleHostProfiles(ctx, profilesToUpdate); err != nil {
-		return false, ctxerr.Wrap(ctx, err, "marking host profiles failed")
-	}
-	return false, nil
-}
-
 // scepCertRenewalThresholdDays defines the number of days before a SCEP
 // certificate must be renewed.
 const scepCertRenewalThresholdDays = 180
@@ -6117,10 +7147,11 @@ func RenewSCEPCertificates(
 	ds fleet.Datastore,
 	config *config.FleetConfig,
 	commander *apple_mdm.MDMAppleCommander,
+	acmeService fleet.ACMEWriteService,
 ) error {
 	renewalDisable, exists := os.LookupEnv("FLEET_MDM_APPLE_SCEP_RENEWAL_DISABLE")
 	if exists && (strings.EqualFold(renewalDisable, "true") || renewalDisable == "1") {
-		logger.InfoContext(ctx, "skipping renewal of macOS SCEP certificates as FLEET_MDM_APPLE_SCEP_RENEWAL_DISABLE is set to true")
+		logger.InfoContext(ctx, "skipping renewal of Apple SCEP certificates as FLEET_MDM_APPLE_SCEP_RENEWAL_DISABLE is set to true")
 		return nil
 	}
 
@@ -6129,12 +7160,12 @@ func RenewSCEPCertificates(
 		return fmt.Errorf("reading app config: %w", err)
 	}
 	if !appConfig.MDM.EnabledAndConfigured {
-		logger.DebugContext(ctx, "skipping renewal of macOS SCEP certificates as MDM is not fully configured")
+		logger.DebugContext(ctx, "skipping renewal of Apple SCEP certificates as MDM is not fully configured")
 		return nil
 	}
 
 	if commander == nil {
-		logger.DebugContext(ctx, "skipping renewal of macOS SCEP certificates as apple_mdm.MDMAppleCommander was not provided")
+		logger.DebugContext(ctx, "skipping renewal of Apple SCEP certificates as apple_mdm.MDMAppleCommander was not provided")
 		return nil
 	}
 
@@ -6148,6 +7179,8 @@ func RenewSCEPCertificates(
 		logger.DebugContext(ctx, "no certs to renew")
 		return nil
 	}
+	// maybeACMEUUIDs stores a subset of host UUIDs that we want to check for ACME renewal requirements.
+	maybeACMEUUIDs := make([]string, 0, len(certAssociations))
 
 	// assocsWithRefs stores hosts that have enrollment references on their
 	// enrollment profiles. This is the case for ADE-enrolled hosts using
@@ -6175,6 +7208,11 @@ func RenewSCEPCertificates(
 			continue
 		}
 
+		// Note we don't want to check ACME renewal requirements for hosts that were enrolled from
+		// migration or using account driven user enrollment. Now that those are ruled out we can
+		// append maybeACMEUUIDs.
+		maybeACMEUUIDs = append(maybeACMEUUIDs, assoc.HostUUID)
+
 		if assoc.EnrollReference != "" {
 			assocsWithRefs = append(assocsWithRefs, assoc)
 			continue
@@ -6187,6 +7225,26 @@ func RenewSCEPCertificates(
 		return ctxerr.Wrap(ctx, err, "extracting topic from APNs certificate")
 	}
 
+	acmeRequiredByHostUUID := make(map[string]fleet.DeviceInfoForACMERenewal)
+	if appConfig.MDM.AppleRequireHardwareAttestation {
+		// get info needed to determine whether ACME is required
+		di, err := ds.GetDeviceInfoForACMERenewal(ctx, maybeACMEUUIDs)
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "getting device info for ACME renewal")
+		}
+		logErrs := []any{}
+		for _, info := range di {
+			if ok, err := isACMESupported(ctx, logger, info.HardwareModel, info.OSVersion); err != nil {
+				logErrs = append(logErrs, "host_uuid", info.HostUUID, "error", err)
+			} else if ok {
+				acmeRequiredByHostUUID[info.HostUUID] = info
+			}
+		}
+		if len(logErrs) > 0 {
+			logger.ErrorContext(ctx, "checking ACME requirement for hosts renewing SCEP certificates", logErrs...)
+		}
+	}
+
 	assets, err := ds.GetAllMDMConfigAssetsByName(ctx, []fleet.MDMAssetName{
 		fleet.MDMAssetSCEPChallenge,
 	}, nil)
@@ -6195,23 +7253,81 @@ func RenewSCEPCertificates(
 	}
 	scepChallenge := string(assets[fleet.MDMAssetSCEPChallenge].Value)
 
-	// send a single command for all the hosts without references.
+	// acmeAssocsByHostUUID will store the associations for hosts that require ACME renewal, which
+	// will be handled separately since they require a different enrollment profile.
+	acmeAssocsByHostUUID := make(map[string]fleet.SCEPIdentityAssociation)
+
+	// Filter for ACME requirements then send a single command for all the hosts without references.
 	if len(assocsWithoutRefs) > 0 {
-		profile, err := apple_mdm.GenerateEnrollmentProfileMobileconfig(
-			appConfig.OrgInfo.OrgName,
-			appConfig.MDMUrl(),
-			scepChallenge,
-			mdmPushCertTopic,
-		)
-		if err != nil {
-			return ctxerr.Wrap(ctx, err, "generating enrollment profile for hosts without enroll reference")
+		var filteredAssocs []fleet.SCEPIdentityAssociation
+		for _, assoc := range assocsWithoutRefs {
+			if _, ok := acmeRequiredByHostUUID[assoc.HostUUID]; ok {
+				acmeAssocsByHostUUID[assoc.HostUUID] = assoc
+				continue
+			}
+			filteredAssocs = append(filteredAssocs, assoc)
 		}
 
-		if err := renewSCEPWithProfile(ctx, ds, commander, logger, assocsWithoutRefs, profile); err != nil {
-			return ctxerr.Wrap(ctx, err, "sending profile to hosts without associations")
+		if len(filteredAssocs) > 0 {
+			// Bucket the renewals by their (personal, rights) tuple. Every host in
+			// a bucket gets a byte-identical enrollment profile, so we can collapse
+			// them into a single InstallProfile command instead of one per host.
+			// The nano command tables are hot, and in practice there are only two
+			// distinct buckets (company-owned vs. BYOD), so this keeps renewal write
+			// traffic close to the pre-BYOD single-command behaviour.
+			type renewalBucket struct {
+				personal bool
+				rights   int
+			}
+			buckets := make(map[renewalBucket][]fleet.SCEPIdentityAssociation)
+			// Preserve a deterministic order so the commands we enqueue don't depend
+			// on Go's randomized map iteration.
+			bucketOrder := make([]renewalBucket, 0, 2)
+			for _, assoc := range filteredAssocs {
+				personal, rights, err := renewalEnrollmentParams(ctx, ds, assoc.HostUUID)
+				if err != nil {
+					return ctxerr.Wrap(ctx, err, "getting stored enrollment permissions for renewal")
+				}
+				key := renewalBucket{personal: personal, rights: rights}
+				if _, ok := buckets[key]; !ok {
+					bucketOrder = append(bucketOrder, key)
+				}
+				buckets[key] = append(buckets[key], assoc)
+			}
+
+			for _, key := range bucketOrder {
+				assocs := buckets[key]
+				// Apple rejects ServerURL changes on profile replacement, so the
+				// renewed URL must match the URL the device was enrolled with.
+				// BYOD devices carry byod=1 in their initial ServerURL (set by
+				// AddPersonalEnrollmentToFleetURL on the OTA/EE path); reapply
+				// the same flag for personal enrollments. Pre-feature and
+				// company-owned devices have personal=false here, leaving
+				// MDMUrl unchanged.
+				renewURL, err := apple_mdm.AddPersonalEnrollmentToFleetURL(appConfig.MDMUrl(), key.personal)
+				if err != nil {
+					return ctxerr.Wrap(ctx, err, "building renewal URL with personal flag")
+				}
+
+				profile, err := apple_mdm.GenerateEnrollmentProfileMobileconfig(
+					appConfig.OrgInfo.OrgName,
+					renewURL,
+					scepChallenge,
+					mdmPushCertTopic,
+					key.rights,
+					false, // renewal: must NOT carry the new-enrollment Subject marker
+				)
+				if err != nil {
+					return ctxerr.Wrap(ctx, err, "generating enrollment profile for hosts without enroll reference")
+				}
+				if err := renewMDMAppleEnrollmentProfile(ctx, ds, commander, logger, assocs, profile, appConfig.OrgInfo.OrgName+" enrollment"); err != nil {
+					return ctxerr.Wrap(ctx, err, "sending profile to hosts without associations")
+				}
+			}
 		}
 	}
 
+	// Note we don't screen userDeviceAssocs for ACME requirements.
 	if len(userDeviceAssocs) > 0 {
 		hostUUIDs := make([]string, 0, len(userDeviceAssocs))
 		for i := 0; i < len(userDeviceAssocs); i++ {
@@ -6240,23 +7356,41 @@ func RenewSCEPCertificates(
 				scepChallenge,
 				mdmPushCertTopic,
 				email,
+				false, // renewal: must NOT carry the new-enrollment Subject marker
 			)
 			if err != nil {
 				return ctxerr.Wrap(ctx, err, "generating enrollment profile for hosts with enroll reference")
 			}
 
 			// each host with association needs a different enrollment profile, and thus a different command.
-			if err := renewSCEPWithProfile(ctx, ds, commander, logger, []fleet.SCEPIdentityAssociation{assoc}, profile); err != nil {
+			if err := renewMDMAppleEnrollmentProfile(ctx, ds, commander, logger, []fleet.SCEPIdentityAssociation{assoc}, profile, appConfig.OrgInfo.OrgName+" account driven enrollment"); err != nil {
 				return ctxerr.Wrap(ctx, err, "sending account driven enrollment profile renewal to hosts")
 			}
 		}
 	}
 
-	// send individual commands for each host with a reference
+	// Filter for ACME requirement, then send individual commands for each host with a reference
 	for _, assoc := range assocsWithRefs {
+		if _, ok := acmeRequiredByHostUUID[assoc.HostUUID]; ok {
+			acmeAssocsByHostUUID[assoc.HostUUID] = assoc
+			continue
+		}
+
 		enrollURL, err := apple_mdm.AddEnrollmentRefToFleetURL(appConfig.MDMUrl(), assoc.EnrollReference)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "adding reference to fleet URL")
+		}
+
+		personal, rights, err := renewalEnrollmentParams(ctx, ds, assoc.HostUUID)
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "getting stored enrollment permissions for renewal with ref")
+		}
+		// Apple rejects ServerURL changes on profile replacement; preserve the
+		// byod=1 flag on the renewed URL for personal enrollments. See the
+		// matching block above (without ref) for the full rationale.
+		enrollURL, err = apple_mdm.AddPersonalEnrollmentToFleetURL(enrollURL, personal)
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "building renewal URL with personal flag for ref renewal")
 		}
 
 		profile, err := apple_mdm.GenerateEnrollmentProfileMobileconfig(
@@ -6264,17 +7398,72 @@ func RenewSCEPCertificates(
 			enrollURL,
 			scepChallenge,
 			mdmPushCertTopic,
+			rights,
+			false, // renewal: must NOT carry the new-enrollment Subject marker
 		)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "generating enrollment profile for hosts with enroll reference")
 		}
 
 		// each host with association needs a different enrollment profile, and thus a different command.
-		if err := renewSCEPWithProfile(ctx, ds, commander, logger, []fleet.SCEPIdentityAssociation{assoc}, profile); err != nil {
+		if err := renewMDMAppleEnrollmentProfile(ctx, ds, commander, logger, []fleet.SCEPIdentityAssociation{assoc}, profile, appConfig.OrgInfo.OrgName+" enrollment"); err != nil {
 			return ctxerr.Wrap(ctx, err, "sending profile to hosts without associations")
 		}
 	}
 
+	// Generate and send enrollment profiles for hosts that require ACME renewal
+	for hostUUID, assoc := range acmeAssocsByHostUUID {
+		enrollURL := appConfig.MDMUrl()
+		if assoc.EnrollReference != "" {
+			var err error
+			enrollURL, err = apple_mdm.AddEnrollmentRefToFleetURL(appConfig.MDMUrl(), assoc.EnrollReference)
+			if err != nil {
+				return ctxerr.Wrap(ctx, err, "adding reference to fleet URL for ACME renewal")
+			}
+		}
+
+		di, ok := acmeRequiredByHostUUID[hostUUID]
+		if !ok {
+			logger.ErrorContext(ctx, "host missing from ACME renewal map, skipping ACME renewal for this host", "host_uuid", hostUUID)
+			continue
+		}
+
+		acmeIdent, err := acmeService.NewACMEEnrollment(ctx, di.HardwareSerial)
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "creating new ACME enrollment")
+		}
+
+		personal, acmeRights, err := renewalEnrollmentParams(ctx, ds, hostUUID)
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "getting stored enrollment permissions for ACME renewal")
+		}
+		// Defensive: BYOD enrolls only via OTA which doesn't use ACME, so this
+		// branch should never see a personal enrollment today. Still match the
+		// URL shape in case that combination becomes possible later.
+		enrollURL, err = apple_mdm.AddPersonalEnrollmentToFleetURL(enrollURL, personal)
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "building renewal URL with personal flag for ACME renewal")
+		}
+
+		profile, err := apple_mdm.GenerateACMEEnrollmentProfileMobileconfig(
+			appConfig.OrgInfo.OrgName,
+			enrollURL,
+			acmeIdent,
+			di.HardwareSerial,
+			mdmPushCertTopic,
+			acmeRights,
+			false, // renewal: must NOT carry the new-enrollment Subject marker
+		)
+		if err != nil {
+			return ctxerr.Wrap(ctx, err, "generating enrollment profile for hosts requiring ACME renewal")
+		}
+
+		if err := renewMDMAppleEnrollmentProfile(ctx, ds, commander, logger, []fleet.SCEPIdentityAssociation{assoc}, profile, appConfig.OrgInfo.OrgName+" ACME enrollment"); err != nil {
+			return ctxerr.Wrap(ctx, err, "sending ACME enrollment profile to hosts")
+		}
+	}
+
+	// Note we don't screen assocsFromMigration for ACME requirements.
 	decodedMigrationEnrollmentProfile, err := base64.StdEncoding.DecodeString(os.Getenv("FLEET_SILENT_MIGRATION_ENROLLMENT_PROFILE"))
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "failed to decode silent migration enrollment profile")
@@ -6287,7 +7476,7 @@ func RenewSCEPCertificates(
 	}
 	if migrationEnrollmentProfile != "" && hasAssocsFromMigration {
 		profileBytes := []byte(migrationEnrollmentProfile)
-		if err := renewSCEPWithProfile(ctx, ds, commander, logger, assocsFromMigration, profileBytes); err != nil {
+		if err := renewMDMAppleEnrollmentProfile(ctx, ds, commander, logger, assocsFromMigration, profileBytes, appConfig.OrgInfo.OrgName+" migration enrollment"); err != nil {
 			return ctxerr.Wrap(ctx, err, "sending profile to hosts from migration")
 		}
 	}
@@ -6295,13 +7484,50 @@ func RenewSCEPCertificates(
 	return nil
 }
 
-func renewSCEPWithProfile(
+// renewalEnrollmentParams loads the personal-enrollment flag and the access
+// rights bitmask that must be reused when generating a SCEP/ACME renewal
+// profile. Apple does not allow ServerURL changes or access-rights widening
+// on profile replacement, so the renewal must reuse the exact values the
+// device was originally enrolled with.
+//
+// The personal flag is sourced from host_mdm.is_personal_enrollment (set
+// during the initial Authenticate by the host upsert, which is fatal on
+// failure). The access rights default to MDMAccessRightAll unless a stored
+// row in host_mdm_apple_enrollment_permissions narrows them. As a safety
+// net for the rare case where the rights persist failed during the initial
+// Authenticate (it is logged but non-fatal), a personal device whose stored
+// rights came back unrestricted is renarrowed here.
+//
+// Pre-feature devices have is_personal_enrollment=0 (column default) and no
+// permissions row, so they return (personal=false, MDMAccessRightAll) —
+// matching their original raw ServerURL and full rights.
+func renewalEnrollmentParams(ctx context.Context, ds fleet.Datastore, hostUUID string) (personal bool, rights int, err error) {
+	stored, err := ds.GetHostMDMAppleEnrollmentPermissions(ctx, hostUUID)
+	if err != nil && !fleet.IsNotFound(err) {
+		return false, 0, err
+	}
+	rights = apple_mdm.MDMAccessRightAll
+	if stored != nil {
+		personal = stored.IsPersonalEnrollment
+		rights = stored.AccessRights
+		if personal && rights == apple_mdm.MDMAccessRightAll {
+			// Permissions row was missing or stale; re-derive the narrowed
+			// bitmask from the authoritative personal flag so the renewal
+			// doesn't attempt to widen.
+			rights = apple_mdm.AppleEnrollmentAccessRights(true)
+		}
+	}
+	return personal, rights, nil
+}
+
+func renewMDMAppleEnrollmentProfile(
 	ctx context.Context,
 	ds fleet.Datastore,
 	commander *apple_mdm.MDMAppleCommander,
 	logger *slog.Logger,
 	assocs []fleet.SCEPIdentityAssociation,
 	profile []byte,
+	profileName string,
 ) error {
 	cmdUUID := uuid.NewString()
 	var uuids []string
@@ -6321,7 +7547,7 @@ func renewSCEPWithProfile(
 		uuids = append(uuids, assoc.HostUUID)
 	}
 
-	if err := commander.InstallProfile(ctx, uuids, profile, cmdUUID); err != nil {
+	if err := commander.InstallProfile(ctx, uuids, profile, cmdUUID, profileName); err != nil {
 		return ctxerr.Wrapf(ctx, err, "sending InstallProfile command for hosts %s", uuids)
 	}
 
@@ -6367,30 +7593,50 @@ func (svc *MDMAppleDDMService) DeclarativeManagement(r *mdm.Request, dm *mdm.Dec
 		return nil, nano_service.NewHTTPStatusError(http.StatusBadRequest, ctxerr.New(r.Context, "missing UDID/EnrollmentID in request"))
 	}
 
+	// A DDM check-in can arrive on the device channel or the user channel. The
+	// host UUID is the same for both (dm.Identifier() is the device UDID), but
+	// the channel determines which declarations we serve, so declarations stay
+	// scoped to their channel.
+	hostUUID := dm.Identifier()
+	scope := ddmScopeForRequest(r)
+
 	switch {
 	case dm.Endpoint == "tokens":
-		svc.logger.DebugContext(r.Context, "received tokens request")
-		return svc.handleTokens(r.Context, dm.Identifier())
+		svc.logger.DebugContext(r.Context, "received tokens request", "scope", scope)
+		return svc.handleTokens(r.Context, hostUUID, scope)
 
 	case dm.Endpoint == "declaration-items":
-		svc.logger.DebugContext(r.Context, "received declaration-items request")
-		return svc.handleDeclarationItems(r.Context, dm.Identifier())
+		svc.logger.DebugContext(r.Context, "received declaration-items request", "scope", scope)
+		return svc.handleDeclarationItems(r.Context, hostUUID, scope)
 
 	case dm.Endpoint == "status":
-		svc.logger.DebugContext(r.Context, "received status request")
-		return nil, svc.handleDeclarationStatus(r.Context, dm)
+		svc.logger.DebugContext(r.Context, "received status request", "scope", scope)
+		return nil, svc.handleDeclarationStatus(r.Context, dm, hostUUID, scope)
 
 	case strings.HasPrefix(dm.Endpoint, "declaration/"):
-		svc.logger.DebugContext(r.Context, "received declarations request")
-		return svc.handleDeclarationsResponse(r.Context, dm.Endpoint, dm.Identifier())
+		svc.logger.DebugContext(r.Context, "received declarations request", "scope", scope)
+		return svc.handleDeclarationsResponse(r.Context, dm.Endpoint, hostUUID, scope)
 
 	default:
 		return nil, nano_service.NewHTTPStatusError(http.StatusBadRequest, ctxerr.New(r.Context, fmt.Sprintf("unrecognized declarations endpoint: %s", dm.Endpoint)))
 	}
 }
 
-func (svc *MDMAppleDDMService) handleTokens(ctx context.Context, hostUUID string) ([]byte, error) {
-	tok, err := svc.ds.MDMAppleDDMDeclarationsToken(ctx, hostUUID)
+// ddmScopeForRequest resolves the channel (scope) of a DDM check-in from the
+// request's normalized enrollment id. nanomdm populates r.EnrollID before
+// dispatching: a user-channel enrollment carries the device UUID in ParentID
+// (its ID is "<deviceUUID>:<userID>"), while a device-channel enrollment has an
+// empty ParentID. We can't tell the channels apart from dm.Identifier() alone
+// because on macOS both channels report the device UDID.
+func ddmScopeForRequest(r *mdm.Request) fleet.PayloadScope {
+	if r != nil && r.EnrollID != nil && r.ParentID != "" {
+		return fleet.PayloadScopeUser
+	}
+	return fleet.PayloadScopeSystem
+}
+
+func (svc *MDMAppleDDMService) handleTokens(ctx context.Context, hostUUID string, scope fleet.PayloadScope) ([]byte, error) {
+	tok, err := svc.ds.MDMAppleDDMDeclarationsToken(ctx, hostUUID, scope)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "getting synchronization tokens")
 	}
@@ -6409,14 +7655,35 @@ func (svc *MDMAppleDDMService) handleTokens(ctx context.Context, hostUUID string
 }
 
 // handleDeclarationItems retrieves the declaration items to send back to the client to update
-func (svc *MDMAppleDDMService) handleDeclarationItems(ctx context.Context, hostUUID string) ([]byte, error) {
-	di, err := svc.ds.MDMAppleDDMDeclarationItems(ctx, hostUUID)
+func (svc *MDMAppleDDMService) handleDeclarationItems(ctx context.Context, hostUUID string, scope fleet.PayloadScope) ([]byte, error) {
+	di, err := svc.ds.MDMAppleDDMDeclarationItems(ctx, hostUUID, scope)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "getting synchronization tokens")
 	}
 
-	activations := []fleet.MDMAppleDDMManifest{}
-	configurations := []fleet.MDMAppleDDMManifest{}
+	// Custom activations are fetched separately so the activation section is
+	// built from activation data, with its own token and its own variable check,
+	// rather than columns carried along on each declaration row.
+	allDeclUUIDs := make([]string, 0, len(di))
+	for _, d := range di {
+		allDeclUUIDs = append(allDeclUUIDs, d.DeclarationUUID)
+	}
+	customActivations, err := svc.ds.ListCustomActivationsForDeclarations(ctx, allDeclUUIDs)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "listing custom activations")
+	}
+	activationByDecl := make(map[string]*fleet.MDMAppleDDMActivationItem, len(customActivations))
+	for _, a := range customActivations {
+		activationByDecl[a.DeclarationUUID] = a
+	}
+
+	// Pass 1: keep the declarations this host should install, and record the
+	// removes that still need marking pending.
+	type installable struct {
+		item           fleet.MDMAppleDDMDeclarationItem
+		effectiveToken string
+	}
+	var toInstall []installable
 	var removeDeclarationUUIDsToUpdateToPending []string
 	for _, d := range di {
 		if d.OperationType == nil {
@@ -6428,31 +7695,139 @@ func (svc *MDMAppleDDMService) handleDeclarationItems(ctx context.Context, hostU
 			}
 			continue
 		}
-		configurations = append(configurations, fleet.MDMAppleDDMManifest{
-			Identifier:  d.Identifier,
-			ServerToken: d.ServerToken,
+
+		// For declarations with fleet variables, check if the variables can
+		// be resolved for this host. If not, mark as failed and skip the
+		// declaration from the manifest so the device does not attempt to
+		// fetch or apply it. NOTE: the declaration is still included in the token
+		// computation below so that the token matches the SQL-computed
+		// token from handleTokens.
+		if d.VariablesUpdatedAt != nil && d.RawJSON != nil {
+			if _, err := svc.replaceDeclarationFleetVariables(ctx, string(*d.RawJSON), hostUUID); err != nil {
+				if nryErr, ok := errors.AsType[notReadyYetError](err); ok {
+					if err := svc.markDeclarationPending(ctx, hostUUID, d.DeclarationUUID, nryErr.Message); err != nil {
+						return nil, ctxerr.Wrap(ctx, err, "mark declaration as pending")
+					}
+					continue
+				}
+				if err := svc.markDeclarationFailed(ctx, hostUUID, d.DeclarationUUID, err.Error()); err != nil {
+					return nil, ctxerr.Wrap(ctx, err, "mark declaration as failed")
+				}
+				continue
+			}
+		}
+
+		toInstall = append(toInstall, installable{
+			item:           d,
+			effectiveToken: fleet.EffectiveDDMToken(d.ServerToken, d.VariablesUpdatedAt, d.AssetsUpdatedAt, d.ActivationUpdatedAt),
 		})
+	}
+
+	// Pass 2: build the activations. A custom activation is expanded at delivery
+	// like a declaration, so its variables are checked here -- against the
+	// activation itself, which may carry variables the declaration doesn't.
+	activations := []fleet.MDMAppleDDMManifest{}
+	failedByActivation := make(map[string]struct{})
+	for _, in := range toInstall {
+		d := in.item
+		if d.DeclarationType != nil && strings.HasPrefix(*d.DeclarationType, fleet.MDMAppleManagementTypePrefix) {
+			// Activations only take StandardConfigurations, never management.
+			continue
+		}
+
+		act := activationByDecl[d.DeclarationUUID]
+		if act == nil {
+			activations = append(activations, fleet.MDMAppleDDMManifest{
+				Identifier:  d.DeclarationUUID + fleet.MDMAppleGeneratedActivationSuffix,
+				ServerToken: in.effectiveToken,
+			})
+			continue
+		}
+
+		if act.HasFleetVariables {
+			if _, err := svc.replaceDeclarationFleetVariables(ctx, string(act.RawJSON), hostUUID); err != nil {
+				// Same not-ready-yet distinction the declaration gets: a value that
+				// hasn't arrived yet is pending, not a failure.
+				if nryErr, ok := errors.AsType[notReadyYetError](err); ok {
+					if err := svc.markDeclarationPending(ctx, hostUUID, d.DeclarationUUID, nryErr.Message); err != nil {
+						return nil, ctxerr.Wrap(ctx, err, "mark declaration as pending")
+					}
+					failedByActivation[d.DeclarationUUID] = struct{}{}
+					continue
+				}
+				if err := svc.markDeclarationFailed(ctx, hostUUID, d.DeclarationUUID, err.Error()); err != nil {
+					return nil, ctxerr.Wrap(ctx, err, "mark declaration as failed")
+				}
+				failedByActivation[d.DeclarationUUID] = struct{}{}
+				continue
+			}
+		}
+
 		activations = append(activations, fleet.MDMAppleDDMManifest{
-			Identifier:  fmt.Sprintf("%s.activation", d.Identifier),
-			ServerToken: d.ServerToken,
+			Identifier:  act.Identifier,
+			ServerToken: fleet.EffectiveDDMToken(act.Token, in.item.VariablesUpdatedAt, nil, nil),
+		})
+	}
+
+	// Pass 3: the core profile flow.
+	configurations := []fleet.MDMAppleDDMManifest{}
+	management := []fleet.MDMAppleDDMManifest{}
+	declarationUUIDs := []string{}
+	for _, in := range toInstall {
+		d := in.item
+		if _, failed := failedByActivation[d.DeclarationUUID]; failed {
+			continue
+		}
+
+		// Management declarations can reference assets too (organization-info
+		// carries one), so they belong in the asset lookup as well.
+		declarationUUIDs = append(declarationUUIDs, d.DeclarationUUID)
+
+		entry := fleet.MDMAppleDDMManifest{Identifier: d.Identifier, ServerToken: in.effectiveToken}
+		if d.DeclarationType != nil && strings.HasPrefix(*d.DeclarationType, fleet.MDMAppleManagementTypePrefix) {
+			management = append(management, entry)
+			continue
+		}
+		configurations = append(configurations, entry)
+	}
+
+	referencedAssets, err := svc.ds.GetAppleDDMAssetsReferencedByDeclarations(ctx, declarationUUIDs)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "getting referenced assets")
+	}
+
+	ddmAssets := []fleet.MDMAppleDDMManifest{}
+	for _, asset := range referencedAssets {
+		ddmAssets = append(ddmAssets, fleet.MDMAppleDDMManifest{
+			Identifier: asset.Identifier,
+			// Match how configurations/activations serve their ServerToken: a hex
+			// string of the token. asset.Checksum holds the raw binary(16) token, so
+			// hex-encode it here rather than emitting raw bytes through JSON.
+			ServerToken: hex.EncodeToString(asset.Checksum),
 		})
 	}
 
 	// Calculate token based on count and concatenated tokens for install items
 	var count int
 	type tokenSorting struct {
-		token           string
-		uploadedAt      time.Time
-		declarationUUID string
+		token               string
+		variablesUpdatedAt  *time.Time
+		assetsUpdatedAt     *time.Time
+		activationUpdatedAt *time.Time
+		uploadedAt          time.Time
+		declarationUUID     string
 	}
 	var tokens []tokenSorting
 	for _, d := range di {
 		if d.OperationType != nil && *d.OperationType == string(fleet.MDMOperationTypeInstall) {
 			// Extract d.ServerToken and order by d.UploadedAt descending and then by d.DeclarationUUID ascending
 			sorting := tokenSorting{
-				token:           d.ServerToken,
-				uploadedAt:      d.UploadedAt,
-				declarationUUID: d.DeclarationUUID,
+				token:               d.ServerToken,
+				variablesUpdatedAt:  d.VariablesUpdatedAt,
+				assetsUpdatedAt:     d.AssetsUpdatedAt,
+				activationUpdatedAt: d.ActivationUpdatedAt,
+				uploadedAt:          d.UploadedAt,
+				declarationUUID:     d.DeclarationUUID,
 			}
 			tokens = append(tokens, sorting)
 			count++
@@ -6467,7 +7842,18 @@ func (svc *MDMAppleDDMService) handleDeclarationItems(ctx context.Context, hostU
 	})
 	var tokenBuilder strings.Builder
 	for _, t := range tokens {
+		// Must match MySQL's CONCAT order and DATETIME(6) string representation
+		// used in MDMAppleDDMDeclarationsToken.
 		tokenBuilder.WriteString(t.token)
+		if t.variablesUpdatedAt != nil {
+			tokenBuilder.WriteString(t.variablesUpdatedAt.Format("2006-01-02 15:04:05.000000"))
+		}
+		if t.assetsUpdatedAt != nil {
+			tokenBuilder.WriteString(t.assetsUpdatedAt.Format("2006-01-02 15:04:05.000000"))
+		}
+		if t.activationUpdatedAt != nil {
+			tokenBuilder.WriteString(t.activationUpdatedAt.Format("2006-01-02 15:04:05.000000"))
+		}
 	}
 
 	var token string
@@ -6482,8 +7868,8 @@ func (svc *MDMAppleDDMService) handleDeclarationItems(ctx context.Context, hostU
 		Declarations: fleet.MDMAppleDDMManifestItems{
 			Activations:    activations,
 			Configurations: configurations,
-			Assets:         []fleet.MDMAppleDDMManifest{},
-			Management:     []fleet.MDMAppleDDMManifest{},
+			Assets:         ddmAssets,
+			Management:     management,
 		},
 		DeclarationsToken: token,
 	})
@@ -6504,7 +7890,7 @@ func (svc *MDMAppleDDMService) handleDeclarationItems(ctx context.Context, hostU
 	return b, nil
 }
 
-func (svc *MDMAppleDDMService) handleDeclarationsResponse(ctx context.Context, endpoint string, hostUUID string) ([]byte, error) {
+func (svc *MDMAppleDDMService) handleDeclarationsResponse(ctx context.Context, endpoint string, hostUUID string, scope fleet.PayloadScope) ([]byte, error) {
 	parts := strings.Split(endpoint, "/")
 	if len(parts) != 3 {
 		return nil, nano_service.NewHTTPStatusError(http.StatusBadRequest, ctxerr.Errorf(ctx, "unrecognized declarations endpoint: %s", endpoint))
@@ -6513,24 +7899,64 @@ func (svc *MDMAppleDDMService) handleDeclarationsResponse(ctx context.Context, e
 
 	switch parts[1] {
 	case "activation":
-		return svc.handleActivationDeclaration(ctx, parts, hostUUID)
+		return svc.handleActivationDeclaration(ctx, parts, hostUUID, scope)
 	case "configuration":
-		return svc.handleConfigurationDeclaration(ctx, parts, hostUUID)
+		return svc.handleConfigurationDeclaration(ctx, parts, hostUUID, scope, false)
+	case "management":
+		return svc.handleConfigurationDeclaration(ctx, parts, hostUUID, scope, true)
+	case "asset":
+		return svc.handleDeclarationAsset(ctx, parts, hostUUID)
 	default:
 		return nil, nano_service.NewHTTPStatusError(http.StatusNotFound, ctxerr.Errorf(ctx, "declaration type not supported: %s", parts[1]))
 	}
 }
 
-func (svc *MDMAppleDDMService) handleActivationDeclaration(ctx context.Context, parts []string, hostUUID string) ([]byte, error) {
-	references := strings.TrimSuffix(parts[2], ".activation")
+func (svc *MDMAppleDDMService) handleDeclarationAsset(ctx context.Context, parts []string, hostUUID string) ([]byte, error) {
+	assetIdentifier := parts[2]
 
-	// ensure the declaration for the requested activation still exists
-	d, err := svc.ds.MDMAppleDDMDeclarationsResponse(ctx, references, hostUUID)
+	asset, err := svc.ds.GetAppleDDMAssetForDelivery(ctx, assetIdentifier, hostUUID)
 	if err != nil {
 		if fleet.IsNotFound(err) {
 			return nil, nano_service.NewHTTPStatusError(http.StatusNotFound, err)
 		}
-		return nil, ctxerr.Wrap(ctx, err, "getting linked configuration for activation declaration")
+		return nil, ctxerr.Wrap(ctx, err, "getting asset by identifier")
+	}
+
+	expanded, err := svc.ds.ExpandEmbeddedSecrets(ctx, string(asset.Data))
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, fmt.Sprintf("expanding embedded secrets for identifier:%s", parts[2]))
+	}
+
+	var tempd map[string]any
+	if err := json.Unmarshal([]byte(expanded), &tempd); err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "unmarshaling stored declaration")
+	}
+
+	// asset.Checksum is the generated token column, MD5(raw_json + secrets_updated_at),
+	// so it already reflects secret updates. Serve it hex-encoded to match how the
+	// manifest advertises this asset's ServerToken (see handleDeclarationItems).
+	tempd["ServerToken"] = hex.EncodeToString(asset.Checksum)
+
+	b, err := json.Marshal(tempd)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "marshaling declaration")
+	}
+	return b, nil
+}
+
+func (svc *MDMAppleDDMService) handleActivationDeclaration(ctx context.Context, parts []string, hostUUID string, scope fleet.PayloadScope) ([]byte, error) {
+	act, err := svc.ds.MDMAppleDDMActivationResponse(ctx, parts[2], hostUUID, scope)
+	if err != nil {
+		if fleet.IsNotFound(err) {
+			return nil, nano_service.NewHTTPStatusError(http.StatusNotFound, err)
+		}
+		return nil, ctxerr.Wrap(ctx, err, "getting activation declaration")
+	}
+
+	effectiveToken := fleet.EffectiveDDMToken(act.Token, act.VariablesUpdatedAt, act.AssetsUpdatedAt, act.ActivationUpdatedAt)
+
+	if len(act.RawJSON) > 0 {
+		return svc.serveCustomActivation(ctx, act, hostUUID, effectiveToken)
 	}
 
 	response := fmt.Sprintf(`
@@ -6541,13 +7967,48 @@ func (svc *MDMAppleDDMService) handleActivationDeclaration(ctx context.Context, 
   },
   "ServerToken": "%s",
   "Type": "com.apple.activation.simple"
-}`, parts[2], references, d.Token)
+}`, parts[2], act.ConfigurationIdentifier, effectiveToken)
 
 	return []byte(response), nil
 }
 
-func (svc *MDMAppleDDMService) handleConfigurationDeclaration(ctx context.Context, parts []string, hostUUID string) ([]byte, error) {
-	d, err := svc.ds.MDMAppleDDMDeclarationsResponse(ctx, parts[2], hostUUID)
+// serveCustomActivation returns the stored activation stamped with its own
+// token, which is what handleDeclarationItems advertised for it. effectiveToken
+// is only the fallback for a row that somehow has no activation token.
+func (svc *MDMAppleDDMService) serveCustomActivation(ctx context.Context, act *fleet.MDMAppleDDMActivationForDelivery, hostUUID, effectiveToken string) ([]byte, error) {
+	expanded, err := svc.ds.ExpandEmbeddedSecrets(ctx, string(act.RawJSON))
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "expanding embedded secrets for activation")
+	}
+
+	expanded, err = svc.replaceDeclarationFleetVariables(ctx, expanded, hostUUID)
+	if err != nil {
+		if err := svc.markDeclarationFailed(ctx, hostUUID, act.DeclarationUUID, err.Error()); err != nil {
+			return nil, ctxerr.Wrap(ctx, err, "mark declaration as failed")
+		}
+		return nil, nil
+	}
+
+	tempd := make(map[string]any)
+	if err := json.Unmarshal([]byte(expanded), &tempd); err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "unmarshaling stored activation")
+	}
+	// Must match what handleDeclarationItems advertised for this activation.
+	serverToken := effectiveToken
+	if act.ActivationToken != nil {
+		serverToken = fleet.EffectiveDDMToken(*act.ActivationToken, act.VariablesUpdatedAt, nil, nil)
+	}
+	tempd["ServerToken"] = serverToken
+
+	b, err := json.Marshal(tempd)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "marshaling activation")
+	}
+	return b, nil
+}
+
+func (svc *MDMAppleDDMService) handleConfigurationDeclaration(ctx context.Context, parts []string, hostUUID string, scope fleet.PayloadScope, wantManagement bool) ([]byte, error) {
+	d, err := svc.ds.MDMAppleDDMDeclarationsResponse(ctx, parts[2], hostUUID, scope)
 	if err != nil {
 		if fleet.IsNotFound(err) {
 			return nil, nano_service.NewHTTPStatusError(http.StatusNotFound, err)
@@ -6555,16 +8016,47 @@ func (svc *MDMAppleDDMService) handleConfigurationDeclaration(ctx context.Contex
 		return nil, ctxerr.Wrap(ctx, err, "getting declaration response")
 	}
 
+	// The two endpoints share a lookup but must not serve each other's rows.
+	rawDecl, err := fleet.GetRawDeclarationValues(d.RawJSON)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "parsing stored declaration")
+	}
+	if isManagement := strings.HasPrefix(rawDecl.Type, fleet.MDMAppleManagementTypePrefix); isManagement != wantManagement {
+		return nil, nano_service.NewHTTPStatusError(http.StatusNotFound,
+			ctxerr.Errorf(ctx, "declaration %s is not served by this endpoint", parts[2]))
+	}
+
 	expanded, err := svc.ds.ExpandEmbeddedSecrets(ctx, string(d.RawJSON))
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, fmt.Sprintf("expanding embedded secrets for identifier:%s hostUUID:%s", parts[2], hostUUID))
+	}
+
+	// Replace Fleet variables with host-specific values
+	expanded, err = svc.replaceDeclarationFleetVariables(ctx, expanded, hostUUID)
+	if err != nil {
+		if nryErr, ok := errors.AsType[notReadyYetError](err); ok {
+			if err := svc.markDeclarationPending(ctx, hostUUID, d.DeclarationUUID, nryErr.Message); err != nil {
+				return nil, ctxerr.Wrap(ctx, err, "mark declaration as pending")
+			}
+			return nil, nil
+		}
+
+		// Mark this declaration as failed for this host, return empty 200
+		if err := svc.markDeclarationFailed(ctx, hostUUID, d.DeclarationUUID, err.Error()); err != nil {
+			return nil, ctxerr.Wrap(ctx, err, "mark declaration as failed")
+		}
+		return nil, nil
 	}
 
 	var tempd map[string]any
 	if err := json.Unmarshal([]byte(expanded), &tempd); err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "unmarshaling stored declaration")
 	}
-	tempd["ServerToken"] = d.Token
+	// PayloadScope is a Fleet extension, not part of Apple's DDM schema. It's
+	// normally stripped at delivery time since it is not a part of the Apple
+	// schema and unused by the device.
+	delete(tempd, "PayloadScope")
+	tempd["ServerToken"] = fleet.EffectiveDDMToken(d.Token, d.VariablesUpdatedAt, d.AssetsUpdatedAt, d.ActivationUpdatedAt) //nolint:nilaway // tempd is non-nil after successful json.Unmarshal
 
 	b, err := json.Marshal(tempd)
 	if err != nil {
@@ -6573,46 +8065,44 @@ func (svc *MDMAppleDDMService) handleConfigurationDeclaration(ctx context.Contex
 	return b, nil
 }
 
-func (svc *MDMAppleDDMService) handleDeclarationStatus(ctx context.Context, dm *mdm.DeclarativeManagement) error {
+func (svc *MDMAppleDDMService) handleDeclarationStatus(ctx context.Context, dm *mdm.DeclarativeManagement, hostUUID string, scope fleet.PayloadScope) error {
 	var statusReport fleet.MDMAppleDDMStatusReport
 	if err := json.Unmarshal(dm.Data, &statusReport); err != nil {
 		return ctxerr.Wrap(ctx, err, "unmarshalling response")
 	}
 
-	configurationReports := statusReport.StatusItems.Management.Declarations.Configurations
-	updates := make([]*fleet.MDMAppleHostDeclaration, len(configurationReports))
-	for i, r := range configurationReports {
-		var status fleet.MDMDeliveryStatus
-		var detail string
-		switch {
-		case r.Active && r.Valid == fleet.MDMAppleDeclarationValid:
-			status = fleet.MDMDeliveryVerified
-		case r.Valid == fleet.MDMAppleDeclarationInvalid || isUnknownDeclarationType(r):
-			status = fleet.MDMDeliveryFailed
-			detail = apple_mdm.FmtDDMError(r.Reasons)
-		case r.Valid == fleet.MDMAppleDeclarationValid: // should be rare/never
-			// The debug messages here can be used to figure out why a DDM profile is stuck in a certain state on a device.
-			svc.logger.DebugContext(ctx, "valid but inactive declaration status",
-				"status", r.Valid, "active", r.Active, "host", dm.Identifier(), "declaration", r.Identifier)
-			status = fleet.MDMDeliveryVerifying
-		case r.Valid == fleet.MDMAppleDeclarationUnknown: // should be rare
-			svc.logger.DebugContext(ctx, "unknown declaration status",
-				"status", r.Valid, "active", r.Active, "host", dm.Identifier(), "declaration", r.Identifier)
-			status = fleet.MDMDeliveryVerifying
-		default:
-			// This should never happen. If we see this happening, we should handle it.
-			svc.logger.ErrorContext(ctx, "undefined declaration status",
-				"status", r.Valid, "active", r.Active, "host", dm.Identifier(), "declaration", r.Identifier)
-			status = fleet.MDMDeliveryFailed
-			detail = fmt.Sprintf("undefined declaration status: %s; %s", r.Valid, apple_mdm.FmtDDMError(r.Reasons))
+	// A configuration whose activation didn't activate reports
+	// Error.ActivationFailed, which looks like a failure but isn't one when the
+	// cause is a predicate that simply evaluated false. Apple reports that as
+	// Info.Predicate on the *activation*, so the two have to be correlated.
+	predicateByActivation := make(map[string]*fleet.MDMAppleDDMStatusErrorReason)
+	for _, a := range statusReport.StatusItems.Management.Declarations.Activations {
+		if reason := declarationReasonCode(a, fleet.MDMAppleDDMReasonPredicate); reason != nil {
+			predicateByActivation[a.Identifier] = reason
 		}
+	}
 
-		updates[i] = &fleet.MDMAppleHostDeclaration{
+	// Configurations and management declarations are graded differently, so
+	// each gets its own pass.
+	decls := statusReport.StatusItems.Management.Declarations
+	updates := make([]*fleet.MDMAppleHostDeclaration, 0, len(decls.Configurations)+len(decls.Management))
+	for _, r := range decls.Configurations {
+		status, detail := svc.configurationDeclarationStatus(ctx, dm, r, predicateByActivation)
+		updates = append(updates, &fleet.MDMAppleHostDeclaration{
 			Status:        &status,
 			OperationType: fleet.MDMOperationTypeInstall,
 			Detail:        detail,
 			Token:         r.ServerToken,
-		}
+		})
+	}
+	for _, r := range decls.Management {
+		status, detail := managementDeclarationStatus(r)
+		updates = append(updates, &fleet.MDMAppleHostDeclaration{
+			Status:        &status,
+			OperationType: fleet.MDMOperationTypeInstall,
+			Detail:        detail,
+			Token:         r.ServerToken,
+		})
 	}
 
 	// MDMAppleStoreDDMStatusReport takes care of cleaning ("pending", "remove")
@@ -6628,7 +8118,7 @@ func (svc *MDMAppleDDMService) handleDeclarationStatus(ctx context.Context, dm *
 	//
 	// The best indication I found so far, is that if the declaration is
 	// not in the report, then it's implicitly removed.
-	if err := svc.ds.MDMAppleStoreDDMStatusReport(ctx, dm.Identifier(), updates); err != nil {
+	if err := svc.ds.MDMAppleStoreDDMStatusReport(ctx, hostUUID, scope, updates); err != nil {
 		return ctxerr.Wrap(ctx, err, "updating host declaration status with reports")
 	}
 
@@ -6636,6 +8126,95 @@ func (svc *MDMAppleDDMService) handleDeclarationStatus(ctx context.Context, dm *
 }
 
 // Checks the active, valid and first reason to verify if it is an unknown declaration type error
+// predicateNotApplied returns the activation's Info.Predicate reason when the
+// configuration's Error.ActivationFailed was caused by a predicate evaluating
+// false. Apple puts the activation's identifier in the failure's details.
+func predicateNotApplied(activationFailed *fleet.MDMAppleDDMStatusErrorReason, byActivation map[string]*fleet.MDMAppleDDMStatusErrorReason) *fleet.MDMAppleDDMStatusErrorReason {
+	id, _ := activationFailed.Details["Identifier"].(string)
+	if id == "" {
+		return nil
+	}
+	return byActivation[id]
+}
+
+// managementDeclarationStatus grades a com.apple.management.* declaration.
+// Apple: "A management declaration has an active state which is always false
+// and not part of the activation process", so validity alone decides.
+func managementDeclarationStatus(r fleet.MDMAppleDDMStatusDeclaration) (fleet.MDMDeliveryStatus, string) {
+	switch {
+	case r.Valid == fleet.MDMAppleDeclarationValid:
+		return fleet.MDMDeliveryVerified, ""
+	case r.Valid == fleet.MDMAppleDeclarationInvalid:
+		return fleet.MDMDeliveryFailed, apple_mdm.FmtDDMError(r.Reasons)
+	case len(r.Reasons) > 0:
+		// Still unknown, but the device reported reasons: something already went
+		// wrong, so surface it instead of waiting forever for a verdict.
+		return fleet.MDMDeliveryFailed, apple_mdm.FmtDDMError(r.Reasons)
+	default:
+		// Unknown with nothing to report: the device hasn't checked it yet.
+		return fleet.MDMDeliveryVerifying, ""
+	}
+}
+
+// configurationDeclarationStatus grades a com.apple.configuration.* declaration,
+// correlating against the activations that gate it.
+func (svc *MDMAppleDDMService) configurationDeclarationStatus(ctx context.Context, dm *mdm.DeclarativeManagement,
+	r fleet.MDMAppleDDMStatusDeclaration, predicateByActivation map[string]*fleet.MDMAppleDDMStatusErrorReason,
+) (fleet.MDMDeliveryStatus, string) {
+	switch activationFailed := declarationReasonCode(r, fleet.MDMAppleDDMReasonActivationFailed); {
+	case activationFailed != nil && predicateNotApplied(activationFailed, predicateByActivation) != nil:
+		// Not applied because the predicate excluded this host. Fleet delivered
+		// it correctly, so this is verified, not failed.
+		return fleet.MDMDeliveryVerified, fmtDDMPredicateNotApplied(predicateNotApplied(activationFailed, predicateByActivation))
+	case activationFailed != nil:
+		// The activation genuinely failed -- bad predicate syntax, or some other
+		// client-side error.
+		return fleet.MDMDeliveryFailed, apple_mdm.FmtDDMError(r.Reasons)
+	case r.Active && r.Valid == fleet.MDMAppleDeclarationValid:
+		return fleet.MDMDeliveryVerified, ""
+	case r.Valid == fleet.MDMAppleDeclarationInvalid || isUnknownDeclarationType(r):
+		return fleet.MDMDeliveryFailed, apple_mdm.FmtDDMError(r.Reasons)
+	case r.Valid == fleet.MDMAppleDeclarationValid:
+		// The debug messages here can be used to figure out why a DDM profile is stuck in a certain state on a device.
+		svc.logger.DebugContext(ctx, "valid but inactive declaration status",
+			"status", r.Valid, "active", r.Active, "host", dm.Identifier(), "declaration", r.Identifier)
+		return fleet.MDMDeliveryVerifying, ""
+	case r.Valid == fleet.MDMAppleDeclarationUnknown: // should be rare
+		svc.logger.DebugContext(ctx, "unknown declaration status",
+			"status", r.Valid, "active", r.Active, "host", dm.Identifier(), "declaration", r.Identifier)
+		return fleet.MDMDeliveryVerifying, ""
+	default:
+		// This should never happen. If we see this happening, we should handle it.
+		svc.logger.ErrorContext(ctx, "undefined declaration status",
+			"status", r.Valid, "active", r.Active, "host", dm.Identifier(), "declaration", r.Identifier)
+		return fleet.MDMDeliveryFailed,
+			fmt.Sprintf("undefined declaration status: %s; %s", r.Valid, apple_mdm.FmtDDMError(r.Reasons))
+	}
+}
+
+func declarationReasonCode(r fleet.MDMAppleDDMStatusDeclaration, code string) *fleet.MDMAppleDDMStatusErrorReason {
+	for i := range r.Reasons {
+		if r.Reasons[i].Code == code {
+			return &r.Reasons[i]
+		}
+	}
+	return nil
+}
+
+// fmtDDMPredicateNotApplied explains a configuration the device validated but
+// deliberately didn't apply, quoting the predicate when Apple supplies it.
+func fmtDDMPredicateNotApplied(reason *fleet.MDMAppleDDMStatusErrorReason) string {
+	if reason == nil {
+		return ""
+	}
+	for _, k := range []string{"Predicate", "predicate"} {
+		if v, ok := reason.Details[k]; ok {
+			return fmt.Sprintf("Fleet verified, but predicate (%v) evaluated to false and settings were not applied to this host.", v)
+		}
+	}
+	return "Fleet verified, but the activation predicate evaluated to false and settings were not applied to this host."
+}
+
 func isUnknownDeclarationType(declarationResponse fleet.MDMAppleDDMStatusDeclaration) bool {
 	return !declarationResponse.Active &&
 		declarationResponse.Valid == fleet.MDMAppleDeclarationUnknown &&
@@ -6750,7 +8329,7 @@ func (uploadABMTokenRequest) DecodeRequest(ctx context.Context, r *http.Request)
 }
 
 type uploadABMTokenResponse struct {
-	Token *fleet.ABMToken `json:"abm_token,omitempty"`
+	Token *fleet.ABMToken `json:"abm_token,omitempty" renameto:"ab_token,inline"`
 	Err   error           `json:"error,omitempty"`
 }
 
@@ -6820,7 +8399,7 @@ func (svc *Service) DeleteABMToken(ctx context.Context, tokenID uint) error {
 
 type listABMTokensResponse struct {
 	Err    error             `json:"error,omitempty"`
-	Tokens []*fleet.ABMToken `json:"abm_tokens"`
+	Tokens []*fleet.ABMToken `json:"abm_tokens" renameto:"ab_tokens,inline"`
 }
 
 func (r listABMTokensResponse) Error() error { return r.Err }
@@ -6884,10 +8463,11 @@ type updateABMTokenTeamsRequest struct {
 	MacOSTeamID  *uint `json:"macos_team_id" renameto:"macos_fleet_id"`
 	IOSTeamID    *uint `json:"ios_team_id" renameto:"ios_fleet_id"`
 	IPadOSTeamID *uint `json:"ipados_team_id" renameto:"ipados_fleet_id"`
+	BYODTeamID   *uint `json:"byod_team_id" renameto:"byod_fleet_id"`
 }
 
 type updateABMTokenTeamsResponse struct {
-	ABMToken *fleet.ABMToken `json:"abm_token,omitempty"`
+	ABMToken *fleet.ABMToken `json:"abm_token,omitempty" renameto:"ab_token,inline"`
 	Err      error           `json:"error,omitempty"`
 }
 
@@ -6896,7 +8476,7 @@ func (r updateABMTokenTeamsResponse) Error() error { return r.Err }
 func updateABMTokenTeamsEndpoint(ctx context.Context, request interface{}, svc fleet.Service) (fleet.Errorer, error) {
 	req := request.(*updateABMTokenTeamsRequest)
 
-	tok, err := svc.UpdateABMTokenTeams(ctx, req.TokenID, req.MacOSTeamID, req.IOSTeamID, req.IPadOSTeamID)
+	tok, err := svc.UpdateABMTokenTeams(ctx, req.TokenID, req.MacOSTeamID, req.IOSTeamID, req.IPadOSTeamID, req.BYODTeamID)
 	if err != nil {
 		return &updateABMTokenTeamsResponse{Err: err}, nil
 	}
@@ -6904,7 +8484,7 @@ func updateABMTokenTeamsEndpoint(ctx context.Context, request interface{}, svc f
 	return &updateABMTokenTeamsResponse{ABMToken: tok}, nil
 }
 
-func (svc *Service) UpdateABMTokenTeams(ctx context.Context, tokenID uint, macOSTeamID, iOSTeamID, iPadOSTeamID *uint) (*fleet.ABMToken, error) {
+func (svc *Service) UpdateABMTokenTeams(ctx context.Context, tokenID uint, macOSTeamID, iOSTeamID, iPadOSTeamID, byodTeamID *uint) (*fleet.ABMToken, error) {
 	// skipauth: No authorization check needed due to implementation returning
 	// only license error.
 	svc.authz.SkipAuthorization(ctx)
@@ -6950,7 +8530,7 @@ func (renewABMTokenRequest) DecodeRequest(ctx context.Context, r *http.Request) 
 }
 
 type renewABMTokenResponse struct {
-	ABMToken *fleet.ABMToken `json:"abm_token,omitempty"`
+	ABMToken *fleet.ABMToken `json:"abm_token,omitempty" renameto:"ab_token,inline"`
 	Err      error           `json:"error,omitempty"`
 }
 
@@ -6986,7 +8566,10 @@ func (svc *Service) RenewABMToken(ctx context.Context, token io.Reader, tokenID 
 
 type getOTAProfileRequest struct {
 	EnrollSecret string `query:"enroll_secret"`
-	IdpUUID      string // The UUID of the mdm_idp_account that was used if any, can be empty, will be taken from cookies
+	// Personal indicates the end user chose "Personal (BYOD)" on the /enroll page.
+	// Defaults to false (company-owned) when omitted.
+	Personal bool   `query:"byod"`
+	IdpUUID  string // The UUID of the mdm_idp_account that was used if any, can be empty, will be taken from cookies
 }
 
 func (getOTAProfileRequest) DecodeRequest(ctx context.Context, r *http.Request) (interface{}, error) {
@@ -6997,6 +8580,8 @@ func (getOTAProfileRequest) DecodeRequest(ctx context.Context, r *http.Request) 
 		}
 	}
 
+	personal := r.URL.Query().Get("byod") == "true" || r.URL.Query().Get("byod") == "1"
+
 	boydIdpCookie, err := r.Cookie(shared_mdm.BYODIdpCookieName)
 	if err != nil {
 		// r.Cookie only return ErrNoCookie and no other errors.
@@ -7004,6 +8589,7 @@ func (getOTAProfileRequest) DecodeRequest(ctx context.Context, r *http.Request) 
 		// We do not fail here if no cookie is found, we validate later down the line if it's required
 		return &getOTAProfileRequest{
 			EnrollSecret: enrollSecret,
+			Personal:     personal,
 			IdpUUID:      "",
 		}, nil
 	}
@@ -7017,13 +8603,14 @@ func (getOTAProfileRequest) DecodeRequest(ctx context.Context, r *http.Request) 
 
 	return &getOTAProfileRequest{
 		EnrollSecret: enrollSecret,
+		Personal:     personal,
 		IdpUUID:      boydIdpCookie.Value,
 	}, nil
 }
 
 func getOTAProfileEndpoint(ctx context.Context, request interface{}, svc fleet.Service) (fleet.Errorer, error) {
 	req := request.(*getOTAProfileRequest)
-	profile, err := svc.GetOTAProfile(ctx, req.EnrollSecret, req.IdpUUID)
+	profile, err := svc.GetOTAProfile(ctx, req.EnrollSecret, req.IdpUUID, req.Personal)
 	if err != nil {
 		return &getMDMAppleConfigProfileResponse{Err: err}, err
 	}
@@ -7032,7 +8619,7 @@ func getOTAProfileEndpoint(ctx context.Context, request interface{}, svc fleet.S
 	return &getMDMAppleConfigProfileResponse{fileReader: io.NopCloser(reader), fileLength: reader.Size(), fileName: "fleet-mdm-enrollment-profile"}, nil
 }
 
-func (svc *Service) GetOTAProfile(ctx context.Context, enrollSecret, idpUUID string) ([]byte, error) {
+func (svc *Service) GetOTAProfile(ctx context.Context, enrollSecret, idpUUID string, personal bool) ([]byte, error) {
 	// Skip authz as this endpoint is used by end users from their iPhones or iPads; authz is done
 	// by the enroll secret verification below
 	svc.authz.SkipAuthorization(ctx)
@@ -7042,10 +8629,23 @@ func (svc *Service) GetOTAProfile(ctx context.Context, enrollSecret, idpUUID str
 		return nil, ctxerr.Wrap(ctx, err, "getting app config to get org name")
 	}
 
-	// TODO(IB): Validate that the IdpUUID should be populated based on the criteria for showing the SSO in the first place
-	// Should be added with the work of #30660 or afterwars.
+	if cfg.MDM.OnlyAllowAppleBusinessEnrollment {
+		return nil, &fleet.ABOnlyEnrollmentForbiddenError{}
+	}
 
-	profBytes, err := apple_mdm.GenerateOTAEnrollmentProfileMobileconfig(cfg.OrgInfo.OrgName, cfg.MDMUrl(), enrollSecret, idpUUID)
+	requiresIDPUUID, err := shared_mdm.RequiresEnrollOTAAuthentication(ctx, svc.ds, enrollSecret, cfg.MDM.MacOSSetup.EnableEndUserAuthentication)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "checking if IDP UUID is required for OTA enrollment")
+	}
+	if requiresIDPUUID && idpUUID == "" {
+		return nil, ctxerr.Wrap(
+			ctx,
+			authz.ForbiddenWithInternal("required idp uuid to be set, but none found", nil, nil, nil),
+			"missing required idp uuid",
+		)
+	}
+
+	profBytes, err := apple_mdm.GenerateOTAEnrollmentProfileMobileconfig(cfg.OrgInfo.OrgName, cfg.MDMUrl(), enrollSecret, idpUUID, personal)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "generating ota mobileconfig file")
 	}
@@ -7065,6 +8665,9 @@ func (svc *Service) GetOTAProfile(ctx context.Context, enrollSecret, idpUUID str
 type mdmAppleOTARequest struct {
 	EnrollSecret string `query:"enroll_secret"`
 	IdpUUID      string `query:"idp_uuid"`
+	// Personal is set when the end user chose "Personal (BYOD)" on the /enroll page.
+	// It is propagated through the OTA mobileconfig POST-back URL by GetOTAProfile.
+	Personal     bool
 	Certificates []*x509.Certificate
 	RootSigner   *x509.Certificate
 	DeviceInfo   fleet.MDMAppleMachineInfo
@@ -7080,9 +8683,16 @@ func (mdmAppleOTARequest) DecodeRequest(ctx context.Context, r *http.Request) (i
 
 	idpUUID := r.URL.Query().Get("idp_uuid") // Can be empty.
 
-	rawData, err := io.ReadAll(r.Body)
+	rawData, err := io.ReadAll(io.LimitReader(r.Body, limit10KiB))
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "reading body from request")
+	}
+
+	if err := cryptoutil.ValidateBERDepth(rawData, cryptoutil.MaxBERDepth); err != nil {
+		return nil, &fleet.BadRequestError{
+			Message:     "invalid request body",
+			InternalErr: err,
+		}
 	}
 
 	p7, err := pkcs7.Parse(rawData)
@@ -7110,8 +8720,32 @@ func (mdmAppleOTARequest) DecodeRequest(ctx context.Context, r *http.Request) (i
 
 	request.EnrollSecret = enrollSecret
 	request.IdpUUID = idpUUID
+	request.Personal = r.URL.Query().Get("byod") == "true" || r.URL.Query().Get("byod") == "1"
 	request.Certificates = p7.Certificates
 	request.RootSigner = p7.GetOnlySigner()
+
+	// OTA is two phases, distinguished by who signed the request (the same
+	// predicate the service uses to decide its response).
+	if apple_mdm.VerifyFromAppleIphoneDeviceCA(request.RootSigner) == nil {
+		// Phase 1: signed by the Apple built-in device identity. Verify the
+		// Apple device signature over the body.
+		if err := verifyMachineInfoSignature(ctx, p7, &request.DeviceInfo, "ota_phase1"); err != nil {
+			return nil, err
+		}
+	} else {
+		// Phase 2: signed by the Fleet SCEP identity issued in phase 1. Verify
+		// the CMS signature over the body, proving possession of that
+		// certificate's private key (a copied certificate alone must not pass).
+		// The certificate itself is verified against Fleet's SCEP CA in the
+		// service (MDMAppleProcessOTAEnrollment).
+		if err := p7.Verify(); err != nil {
+			return nil, &fleet.BadRequestError{
+				Message:     "invalid request signature",
+				InternalErr: err,
+			}
+		}
+	}
+
 	return &request, nil
 }
 
@@ -7134,7 +8768,7 @@ func (r mdmAppleOTAResponse) HijackRender(ctx context.Context, w http.ResponseWr
 
 func mdmAppleOTAEndpoint(ctx context.Context, request interface{}, svc fleet.Service) (fleet.Errorer, error) {
 	req := request.(*mdmAppleOTARequest)
-	xml, err := svc.MDMAppleProcessOTAEnrollment(ctx, req.Certificates, req.RootSigner, req.EnrollSecret, req.IdpUUID, req.DeviceInfo)
+	xml, err := svc.MDMAppleProcessOTAEnrollment(ctx, req.Certificates, req.RootSigner, req.EnrollSecret, req.IdpUUID, req.Personal, req.DeviceInfo)
 	if err != nil {
 		return mdmAppleGetInstallerResponse{Err: err}, nil
 	}
@@ -7148,10 +8782,20 @@ func (svc *Service) MDMAppleProcessOTAEnrollment(
 	rootSigner *x509.Certificate,
 	enrollSecret string,
 	idpUUID string,
+	personal bool,
 	deviceInfo fleet.MDMAppleMachineInfo,
 ) ([]byte, error) {
 	// authorization is performed via the enroll secret and the provided certificates
 	svc.authz.SkipAuthorization(ctx)
+
+	appCfg, err := svc.ds.AppConfig(ctx)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "reading app config")
+	}
+
+	if appCfg.MDM.OnlyAllowAppleBusinessEnrollment {
+		return nil, &fleet.ABOnlyEnrollmentForbiddenError{}
+	}
 
 	if len(certificates) == 0 {
 		return nil, authz.ForbiddenWithInternal("no certificates provided", nil, nil, nil)
@@ -7177,11 +8821,6 @@ func (svc *Service) MDMAppleProcessOTAEnrollment(
 		return nil, fmt.Errorf("loading SCEP challenge from the database: %w", err)
 	}
 	scepChallenge := string(assets[fleet.MDMAssetSCEPChallenge].Value)
-
-	appCfg, err := svc.ds.AppConfig(ctx)
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "reading app config")
-	}
 
 	mdmURL := appCfg.MDMUrl()
 
@@ -7213,16 +8852,26 @@ func (svc *Service) MDMAppleProcessOTAEnrollment(
 		return nil, authz.ForbiddenWithInternal(fmt.Sprintf("payload signed with invalid certificate: %s", err), nil, nil, nil)
 	}
 
-	topic, err := svc.mdmPushCertTopic(ctx)
+	topic, err := apple_mdm.MDMPushCertTopic(ctx, svc.ds)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "extracting topic from APNs cert")
 	}
 
+	// NOTE: we don't offer ACME enrollment via OTA.
+	// Embed byod=1 in the MDM ServerURL so the Authenticate checkin handler
+	// can set is_personal_enrollment correctly on the host record.
+	enrollMDMURL, err := apple_mdm.AddPersonalEnrollmentToFleetURL(mdmURL, personal)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "building MDM URL with personal enrollment flag for OTA")
+	}
+	accessRights := apple_mdm.AppleEnrollmentAccessRights(personal)
 	enrollmentProf, err := apple_mdm.GenerateEnrollmentProfileMobileconfig(
 		appCfg.OrgInfo.OrgName,
-		mdmURL,
+		enrollMDMURL,
 		string(assets[fleet.MDMAssetSCEPChallenge].Value),
 		topic,
+		accessRights,
+		true, // fresh enrollment
 	)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "generating manual enrollment profile")
@@ -7262,6 +8911,16 @@ func (svc *Service) MDMAppleProcessOTAEnrollment(
 		return nil, ctxerr.Wrap(ctx, err, "signing profile")
 	}
 
+	softwareUpdateDeviceID := deviceInfo.Product
+	if isMac, _, _, err := fleet.IsMacIdentifier(deviceInfo.Product); isMac && err == nil && deviceInfo.SoftwareUpdateDeviceID != "" {
+		softwareUpdateDeviceID = deviceInfo.SoftwareUpdateDeviceID
+	}
+
+	// Best-effort: don't block enrollment profile delivery if this write fails.
+	if err := svc.ds.InsertAppleSoftwareUpdateDeviceID(ctx, deviceInfo.UDID, softwareUpdateDeviceID); err != nil {
+		svc.logger.ErrorContext(ctx, "inserting Apple software update device id", "host_uuid", deviceInfo.UDID, "err", err)
+	}
+
 	return signed, nil
 }
 
@@ -7276,7 +8935,7 @@ func EnsureMDMAppleServiceDiscovery(ctx context.Context, ds fleet.Datastore, dep
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "checking account driven enrollment service discovery")
 	}
-	sdURL := ac.MDMUrl() + urlPrefix + apple_mdm.ServiceDiscoveryPath
+	sdURL := ac.MDMUrl() + urlPrefix + apple_mdm.ServiceDiscoveryTokenPath
 
 	tokens, err := ds.ListABMTokens(ctx)
 	switch {
@@ -7285,106 +8944,44 @@ func EnsureMDMAppleServiceDiscovery(ctx context.Context, ds fleet.Datastore, dep
 	case len(tokens) == 0:
 		logger.InfoContext(ctx, "no ABM tokens found, skipping account driven enrollment service discovery")
 		return nil
-	case len(tokens) > 1:
-		logger.DebugContext(ctx, "multiple ABM tokens found, using the first one for account driven enrollment service discovery")
 	}
-	orgName := tokens[0].OrganizationName
 
-	details, err := depSvc.GetMDMAppleServiceDiscoveryDetails(ctx, orgName)
-	if err != nil {
-		switch {
-		case godep.IsServiceDiscoveryNotFound(err):
-			logger.InfoContext(ctx, "account driven enrollment profile not found") // proceed to assignment
-		case godep.IsServiceDiscoveryNotSupported(err):
-			logger.InfoContext(ctx, "account driven enrollment org not supported, skipping assignment")
-			return nil // skip assignment
-		default:
-			return ctxerr.Wrap(ctx, err, "fetching account driven enrollment profile") // skip assignment
+	for _, token := range tokens {
+		orgName := token.OrganizationName
+
+		details, err := depSvc.GetMDMAppleServiceDiscoveryDetails(ctx, orgName)
+		if err != nil {
+			switch {
+			case godep.IsServiceDiscoveryNotFound(err):
+				logger.InfoContext(ctx, "account driven enrollment profile not found") // proceed to assignment
+			case godep.IsServiceDiscoveryNotSupported(err):
+				logger.InfoContext(ctx, "account driven enrollment org not supported, skipping assignment")
+				continue // skip assignment
+			default:
+				logger.ErrorContext(ctx, "fetching account driven enrollment profile", "org_name", orgName, "err", err)
+				continue // skip assignment
+			}
 		}
-	}
 
-	var gotURL string
-	var lastUpdated time.Time
-	if details != nil {
-		gotURL = details.MDMServiceDiscoveryURL
-		lastUpdated = details.LastUpdatedTimestamp
-	}
-	logger.InfoContext(ctx, "account driven enrollment service discovery url confirmed", "service_discovery_url", gotURL, "last_updated", lastUpdated)
+		sdURLWithToken := strings.Replace(sdURL, "{token}", string(token.EnrollmentURLToken), 1)
 
-	if gotURL != sdURL {
-		// proced to assignment
-		return ctxerr.Wrap(ctx, depSvc.AssignMDMAppleServiceDiscoveryURL(ctx, orgName, sdURL),
-			"assigning account driven enrollment service discovery URL")
+		var gotURL string
+		var lastUpdated time.Time
+		if details != nil {
+			gotURL = details.MDMServiceDiscoveryURL
+			lastUpdated = details.LastUpdatedTimestamp
+		}
+		logger.InfoContext(ctx, "account driven enrollment service discovery url confirmed", "service_discovery_url", gotURL, "last_updated", lastUpdated)
+
+		if gotURL != sdURLWithToken {
+			logger.InfoContext(ctx, "account driven enrollment service discovery url needs update", "new_url", sdURLWithToken)
+			// proced to assignment
+			if err := depSvc.AssignMDMAppleServiceDiscoveryURL(ctx, orgName, sdURLWithToken); err != nil {
+				logger.ErrorContext(ctx, "assigning account driven enrollment service discovery URL", "org_name", orgName, "err", err)
+			}
+			continue
+		}
 	}
 
 	return nil
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// Apple MDM Recovery Lock Password
-
-// recoveryLockResult wraps mdm.CommandResults to implement fleet.MDMCommandResults
-type recoveryLockResult struct {
-	cmdResult *mdm.CommandResults
-}
-
-func (r *recoveryLockResult) Raw() []byte      { return r.cmdResult.Raw }
-func (r *recoveryLockResult) UUID() string     { return r.cmdResult.CommandUUID }
-func (r *recoveryLockResult) HostUUID() string { return r.cmdResult.UDID } // SetRecoveryLock is device-only, UDID is always present
-
-// NewRecoveryLockResult wraps an mdm.CommandResults to implement fleet.MDMCommandResults
-func NewRecoveryLockResult(cmdResult *mdm.CommandResults) fleet.MDMCommandResults {
-	return &recoveryLockResult{cmdResult: cmdResult}
-}
-
-// NewSetRecoveryLockResultsHandler processes SetRecoveryLock command results.
-// When a SetRecoveryLock command is acknowledged, it marks the recovery lock as verified.
-// On error, it marks the recovery lock as failed.
-func NewSetRecoveryLockResultsHandler(
-	ds fleet.Datastore,
-	logger *slog.Logger,
-) fleet.MDMCommandResultsHandler {
-	return func(ctx context.Context, results fleet.MDMCommandResults) error {
-		// Get the underlying result to access status and error chain
-		rlResult, ok := results.(*recoveryLockResult)
-		if !ok {
-			return ctxerr.New(ctx, "SetRecoveryLock handler: unexpected results type")
-		}
-
-		hostUUID := results.HostUUID()
-		status := rlResult.cmdResult.Status
-
-		logger.DebugContext(ctx, "SetRecoveryLock command result received",
-			"host_uuid", hostUUID,
-			"command_uuid", results.UUID(),
-			"status", status,
-		)
-
-		switch status {
-		case fleet.MDMAppleStatusAcknowledged:
-			// ACK means the password was successfully applied - mark as verified
-			if err := ds.SetRecoveryLockVerified(ctx, hostUUID); err != nil {
-				return ctxerr.Wrap(ctx, err, "SetRecoveryLock handler: set recovery lock verified")
-			}
-
-			logger.InfoContext(ctx, "SetRecoveryLock acknowledged, marked verified",
-				"host_uuid", hostUUID,
-			)
-
-		case fleet.MDMAppleStatusError, fleet.MDMAppleStatusCommandFormatError:
-			errorMsg := apple_mdm.FmtErrorChain(rlResult.cmdResult.ErrorChain)
-			if errorMsg == "" {
-				errorMsg = "SetRecoveryLock command failed"
-			}
-			if err := ds.SetRecoveryLockFailed(ctx, hostUUID, errorMsg); err != nil {
-				return ctxerr.Wrap(ctx, err, "SetRecoveryLock handler: set recovery lock failed")
-			}
-			logger.WarnContext(ctx, "SetRecoveryLock command failed",
-				"host_uuid", hostUUID,
-				"error", errorMsg,
-			)
-		}
-
-		return nil
-	}
 }

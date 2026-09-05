@@ -35,7 +35,9 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/hashicorp/go-multierror"
 	"github.com/jmoiron/sqlx"
-	semconv "go.opentelemetry.io/otel/semconv/v1.39.0"
+	"go.opentelemetry.io/otel/attribute"
+	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -82,8 +84,11 @@ type Datastore struct {
 	testDeleteMDMProfilesBatchSize int
 	// for tests, set to override the default batch size.
 	testUpsertMDMDesiredProfilesBatchSize int
-	// for tests set to override the default batch size.
-	testSelectMDMProfilesBatchSize int
+	// for tests, set to override the default page size of ReconcileWindowsProfilesStatus.
+	testWindowsProfilesStatusReconcileBatchSize int
+	// for tests, run dispatchWindowsProfilesStatusRollupRefresh synchronously so tests can assert
+	// rollup state immediately after bulk operations.
+	testSynchronousWindowsRollupDispatch bool
 
 	// set this to the execution ids of activities that should be activated in
 	// the next call to activateNextUpcomingActivity, instead of picking the next
@@ -94,6 +99,31 @@ type Datastore struct {
 	// This key is used to encrypt sensitive data stored in the Fleet DB, for example MDM
 	// certificates and keys.
 	serverPrivateKey string
+
+	// windowsFMAMatches caches the Windows Fleet-maintained apps that software ingestion
+	// matches reported program names against. The lookup joins software_installers and
+	// software_titles, and ingestion runs on every host software update, so it is held
+	// briefly rather than issued per check-in.
+	//
+	// Deliberately TTL-only, with no invalidation on installer or catalog changes. Fleet
+	// runs multiple server instances, so in-process invalidation would only clear the node
+	// that handled the change and the TTL would remain the real bound anyway; hooking the
+	// several direct and indirect mutation points would add staleness hazards to the flow
+	// this cache serves without removing the window.
+	//
+	// The window is bounded on both sides: adding an app merges existing titles straight
+	// away, and ReconcileWindowsMaintainedAppSoftwareTitles reads uncached, so anything a
+	// host reported while the entry was stale is repaired on its next run.
+	//
+	// The cached slice is replaced, never mutated, so a reader may keep using the value it
+	// received after a refresh. Callers must not mutate it.
+	windowsFMAMatches       []fleet.MaintainedApp
+	windowsFMAMatchesExpiry time.Time
+	windowsFMAMatchesMu     sync.RWMutex
+	// windowsFMAMatchesSF collapses a cache-miss stampede into one query per node, which is
+	// what a fleet-wide rollout of a maintained app produces: many hosts report the new
+	// program at once, and every one of them misses.
+	windowsFMAMatchesSF singleflight.Group
 }
 
 // WithPusher sets an APNs pusher for the datastore, used when activating
@@ -342,7 +372,10 @@ var otelTracedDriverName string
 func init() {
 	var err error
 	otelTracedDriverName, err = otelsql.Register("mysql",
-		otelsql.WithAttributes(semconv.DBSystemNameMySQL),
+		otelsql.WithAttributes(
+			attribute.String("db.system", "mysql"),
+			semconv.DBSystemNameMySQL,
+		),
 		otelsql.WithSpanOptions(otelsql.SpanOptions{
 			// DisableErrSkip ignores driver.ErrSkip errors which are frequently returned by the MySQL driver
 			// when certain optional methods or paths are not implemented/taken.
@@ -780,35 +813,53 @@ func (ds *Datastore) Close() error {
 
 // appendListOptionsToSelect will apply the given list options to ds and
 // return the new select dataset.
-//
-// NOTE: This is a copy of appendListOptionsToSQL that uses the goqu package.
-func appendListOptionsToSelect(ds *goqu.SelectDataset, opts fleet.ListOptions) *goqu.SelectDataset {
-	ds = appendOrderByToSelect(ds, opts)
+func appendListOptionsToSelect(ds *goqu.SelectDataset, opts fleet.ListOptions, allowlist common_mysql.OrderKeyAllowlist) (*goqu.SelectDataset, error) {
+	ds, err := appendOrderByToSelect(ds, opts, allowlist)
+	if err != nil {
+		return nil, err
+	}
 	ds = appendLimitOffsetToSelect(ds, opts)
-	return ds
+	return ds, nil
 }
 
-func appendOrderByToSelect(ds *goqu.SelectDataset, opts fleet.ListOptions) *goqu.SelectDataset {
-	if opts.OrderKey != "" {
-		ordersKeys := strings.Split(opts.OrderKey, ",")
-		for _, key := range ordersKeys {
-			sanitized := common_mysql.SanitizeColumn(key)
-			if sanitized == "" {
-				continue
-			}
-
-			var orderedExpr exp.OrderedExpression
-			if opts.OrderDirection == fleet.OrderDescending {
-				orderedExpr = goqu.L(sanitized).Desc()
-			} else {
-				orderedExpr = goqu.L(sanitized).Asc()
-			}
-
-			ds = ds.OrderAppend(orderedExpr)
-		}
+// appendOrderByToSelect appends the requested ordering to ds. Each query passes
+// its own allowlist, since the sortable columns differ per query; a key outside
+// it is rejected rather than reaching the ORDER BY. A nil allowlist rejects
+// every key. Mapped columns are quoted as identifiers, so they must be bare
+// column names rather than SQL expressions.
+func appendOrderByToSelect(ds *goqu.SelectDataset, opts fleet.ListOptions, allowlist common_mysql.OrderKeyAllowlist) (*goqu.SelectDataset, error) {
+	if opts.OrderKey == "" {
+		return ds, nil
 	}
 
-	return ds
+	// An order key may name more than one column, e.g. "name,version".
+	for key := range strings.SplitSeq(opts.OrderKey, ",") {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		column, ok := allowlist[key]
+		if !ok {
+			return nil, common_mysql.InvalidOrderKeyError{Key: key, Allowed: allowlist.AllowedKeys()}
+		}
+		sanitized := common_mysql.SanitizeColumn(column)
+		if sanitized == "" {
+			// The allowlist maps this key to something that isn't a column
+			// name, which would silently drop it from the ordering.
+			return nil, fmt.Errorf("order key %q maps to an invalid column %q", key, column)
+		}
+
+		var orderedExpr exp.OrderedExpression
+		if opts.OrderDirection == fleet.OrderDescending {
+			orderedExpr = goqu.L(sanitized).Desc()
+		} else {
+			orderedExpr = goqu.L(sanitized).Asc()
+		}
+
+		ds = ds.OrderAppend(orderedExpr)
+	}
+
+	return ds, nil
 }
 
 func appendLimitOffsetToSelect(ds *goqu.SelectDataset, opts fleet.ListOptions) *goqu.SelectDataset {
@@ -839,30 +890,12 @@ func sanitizeColumn(col string) string {
 	return common_mysql.SanitizeColumn(col)
 }
 
-// appendListOptionsToSQL is a facade that calls common_mysql.AppendListOptions.
-//
-// Deprecated: this method will be removed in favor of appendListOptionsWithCursorToSQL
-func appendListOptionsToSQL(sql string, opts *fleet.ListOptions) (string, []any) {
-	return appendListOptionsWithCursorToSQL(sql, nil, opts)
-}
-
 // appendListOptionsToSQLSecure is a facade that calls common_mysql.AppendListOptionsWithParamsSecure.
 // The allowlist parameter maps user-facing order key names to actual SQL column expressions.
 // This prevents SQL injection and information disclosure via arbitrary column sorting.
 // See common_mysql.OrderKeyAllowlist for details.
 func appendListOptionsToSQLSecure(sql string, opts *fleet.ListOptions, allowlist common_mysql.OrderKeyAllowlist) (string, []any, error) {
 	return appendListOptionsWithCursorToSQLSecure(sql, nil, opts, allowlist)
-}
-
-// appendListOptionsWithCursorToSQL is a facade that calls common_mysql.AppendListOptionsWithParams.
-// NOTE: this method will mutate opts.PerPage if it is 0, setting it to the default value.
-//
-// Deprecated: this method will be removed in favor of appendListOptionsWithCursorToSQLSecure
-func appendListOptionsWithCursorToSQL(sql string, params []any, opts *fleet.ListOptions) (string, []any) {
-	if opts.PerPage == 0 {
-		opts.PerPage = fleet.DefaultPerPage
-	}
-	return common_mysql.AppendListOptionsWithParams(sql, params, opts)
 }
 
 // appendListOptionsWithCursorToSQLSecure is a facade that calls common_mysql.AppendListOptionsWithParamsSecure.
@@ -1094,17 +1127,6 @@ func (ds *Datastore) whereOmitIDs(colName string, omit []uint) string {
 	}
 
 	return fmt.Sprintf("%s NOT IN (%s)", colName, strings.Join(idStrs, ","))
-}
-
-func (ds *Datastore) whereFilterHostsByIdentifier(identifier, stmt string, params []interface{}) (string, []interface{}) {
-	if identifier == "" {
-		return stmt, params
-	}
-
-	stmt += " AND ? IN (h.hostname, h.osquery_host_id, h.node_key, h.uuid, h.hardware_serial)"
-	params = append(params, identifier)
-
-	return stmt, params
 }
 
 // registerTLS adds client certificate configuration to the mysql connection.

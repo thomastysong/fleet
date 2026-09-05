@@ -9,7 +9,7 @@ Here's a real-world example of deploying Santa with the Fleet GitOps approach th
 
 **Step 1: Deploy the Santa app via Fleet GitOps**
 
-Santa is a [Fleet-maintained app](https://fmalibrary.com/) making deployment easy. Alternatively, you can use our deployment YAML file: https://github.com/fleetdm/fleet/blob/main/it-and-security/lib/macos/software/santa.yml
+Santa is a [Fleet-maintained app](https://fmalibrary.com/) making deployment easy. Alternatively, you can deploy a custom package via GitOps that references Santa's install URL, making sure to update the URL to the version you intend to deploy: https://github.com/fleetdm/fleet/blob/466ab4467f4749143ecbe45e9efab2ddd68b624b/it-and-security/lib/macos/software/santa.yml
 
 Either method allows the Santa app to be installed on a test device group through self service. This can be changed to fit your needs, for example, by using automatic deployment instead of self service or deploying to multiple labels. 
 
@@ -79,15 +79,7 @@ Here's a snippet from our [Santa rules configuration profile](https://github.com
 </array>
 ```
 
-**Step 3. Deploy Santa Extensions**
-
-Policy to check if extensions exist: https://github.com/fleetdm/fleet/blob/main/it-and-security/lib/macos/policies/install-santa-extension.yml 
-
-Script to install the extensions: https://github.com/fleetdm/fleet/blob/main/it-and-security/lib/macos/scripts/install-santa-extension.sh
-
-We chose to deploy these via policy automation since the Santa extensions don't exist natively in Fleet. We have a policy that checks for the existence of the Santa extension. If it is not found, Fleet will immediately run a remediation script that handles the download and configuration of fleetd to start using the extension.
-
-**Step 4. Collect Santa Events**
+**Step 3. Collect Santa Events**
 
 Collect Santa denied logs: https://github.com/fleetdm/fleet/blob/main/it-and-security/lib/macos/queries/collect-santa-denied-logs.yml
 

@@ -9,8 +9,19 @@ import {
   IPoliciesCountResponse,
   ILoadTeamPolicyResponse,
 } from "interfaces/policy";
+import { QueryablePlatform } from "interfaces/platform";
 import { API_NO_TEAM_ID } from "interfaces/team";
 import { buildQueryStringFromParams, QueryParams } from "utilities/url";
+import { GlobalPoliciesAutomationType } from "./global_policies";
+
+export type AutomationType =
+  | "software"
+  | "patch"
+  | "scripts"
+  | "profiles"
+  | "calendar"
+  | "conditional_access"
+  | "other";
 
 interface IPoliciesApiQueryParams {
   page?: number;
@@ -18,6 +29,9 @@ interface IPoliciesApiQueryParams {
   orderKey?: string;
   orderDirection?: "asc" | "desc";
   query?: string;
+  automationType?: AutomationType | GlobalPoliciesAutomationType;
+  /** Targeted platform to filter policies by. */
+  platform?: QueryablePlatform;
 }
 
 export interface IPoliciesApiParams extends IPoliciesApiQueryParams {
@@ -30,7 +44,10 @@ export interface ITeamPoliciesQueryKey extends IPoliciesApiParams {
 }
 
 export interface ITeamPoliciesCountQueryKey
-  extends Pick<IPoliciesApiParams, "query" | "teamId" | "mergeInherited"> {
+  extends Pick<
+    IPoliciesApiParams,
+    "query" | "teamId" | "mergeInherited" | "automationType" | "platform"
+  > {
   scope: "teamPoliciesCountMergeInherited" | "teamPoliciesCount";
 }
 
@@ -38,6 +55,8 @@ export interface IPoliciesCountApiParams {
   teamId: number;
   query?: string;
   mergeInherited?: boolean;
+  automationType?: AutomationType;
+  platform?: QueryablePlatform;
 }
 
 const ORDER_KEY = "name";
@@ -66,8 +85,13 @@ export default {
       critical,
       software_title_id,
       labels_include_any,
+      labels_include_all,
       labels_exclude_any,
-      // note absence of automations-related fields, which are only set by the UI via update
+      labels_exclude_all,
+      type,
+      patch_software_title_id,
+      continuous_automations_enabled,
+      patch_when_closed,
     } = data;
     const { TEAMS } = endpoints;
     const path = `${TEAMS}/${team_id}/policies`;
@@ -81,7 +105,13 @@ export default {
       critical,
       software_title_id,
       labels_include_any,
+      labels_include_all,
       labels_exclude_any,
+      labels_exclude_all,
+      type,
+      patch_software_title_id,
+      continuous_automations_enabled,
+      patch_when_closed,
     });
   },
   // TODO - response type Promise<IPolicy>
@@ -97,10 +127,16 @@ export default {
       // automations-related fields
       calendar_events_enabled,
       conditional_access_enabled,
+      continuous_automations_enabled,
+      patch_when_closed,
       software_title_id,
+      software_package_id,
       script_id,
+      profile_uuid,
       labels_include_any,
+      labels_include_all,
       labels_exclude_any,
+      labels_exclude_all,
     } = data;
     const { TEAMS } = endpoints;
     const path = `${TEAMS}/${team_id}/policies/${id}`;
@@ -114,10 +150,16 @@ export default {
       critical,
       calendar_events_enabled,
       conditional_access_enabled,
+      continuous_automations_enabled,
+      patch_when_closed,
       software_title_id,
+      software_package_id,
       script_id,
+      profile_uuid,
       labels_include_any,
+      labels_include_all,
       labels_exclude_any,
+      labels_exclude_all,
     });
   },
   destroy: (teamId: number | undefined, ids: number[]) => {
@@ -151,6 +193,8 @@ export default {
     orderDirection: orderDir = ORDER_DIRECTION,
     query,
     mergeInherited,
+    automationType,
+    platform,
   }: IPoliciesApiParams): Promise<ILoadTeamPoliciesResponse> => {
     const { TEAMS } = endpoints;
 
@@ -161,6 +205,8 @@ export default {
       orderDirection: orderDir,
       query,
       mergeInherited,
+      automationType,
+      platform,
     };
 
     const snakeCaseParams = convertParamsToSnakeCase(queryParams);
@@ -172,15 +218,19 @@ export default {
     query,
     teamId,
     mergeInherited = true,
+    automationType,
+    platform,
   }: Pick<
     IPoliciesCountApiParams,
-    "query" | "teamId" | "mergeInherited"
+    "query" | "teamId" | "mergeInherited" | "automationType" | "platform"
   >): Promise<IPoliciesCountResponse> => {
     const { TEAM_POLICIES } = endpoints;
     const path = `${TEAM_POLICIES(teamId)}/count`;
     const queryParams = {
       query,
       mergeInherited,
+      automationType,
+      platform,
     };
     const snakeCaseParams = convertParamsToSnakeCase(queryParams);
     const queryString = buildQueryStringFromParams(snakeCaseParams);

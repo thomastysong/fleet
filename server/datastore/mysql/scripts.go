@@ -15,12 +15,41 @@ import (
 	constants "github.com/fleetdm/fleet/v4/pkg/scripts"
 	"github.com/fleetdm/fleet/v4/server/contexts/ctxerr"
 	"github.com/fleetdm/fleet/v4/server/fleet"
+	"github.com/fleetdm/fleet/v4/server/mdm/android"
+	common_mysql "github.com/fleetdm/fleet/v4/server/platform/mysql"
 	"github.com/fleetdm/fleet/v4/server/ptr"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/micromdm/plist"
 )
 
+var scriptsAllowedOrderKeys = common_mysql.OrderKeyAllowlist{
+	"id":         "s.id",
+	"name":       "s.name",
+	"created_at": "s.created_at",
+	"updated_at": "s.updated_at",
+}
+
+// hostScriptDetailsAllowedOrderKeys is intentionally minimal: the service layer
+// pins OrderKey to "name" before reaching this datastore method.
+var hostScriptDetailsAllowedOrderKeys = common_mysql.OrderKeyAllowlist{
+	"name": "s.name",
+}
+
 func (ds *Datastore) NewHostScriptExecutionRequest(ctx context.Context, request *fleet.HostScriptRequestPayload) (*fleet.HostScriptResult, error) {
+	return ds.newHostScriptExecutionRequestPublic(ctx, request, false)
+}
+
+// NewInternalHostScriptExecutionRequest enqueues a host script run flagged
+// as internal (fleet-initiated). Internal scripts run even when scripts
+// are globally disabled and do not appear in the user-facing host activity
+// feed. Use for server-driven follow-up actions (e.g. cleanup scripts
+// after MDM events) rather than user-requested runs.
+func (ds *Datastore) NewInternalHostScriptExecutionRequest(ctx context.Context, request *fleet.HostScriptRequestPayload) (*fleet.HostScriptResult, error) {
+	return ds.newHostScriptExecutionRequestPublic(ctx, request, true)
+}
+
+func (ds *Datastore) newHostScriptExecutionRequestPublic(ctx context.Context, request *fleet.HostScriptRequestPayload, isInternal bool) (*fleet.HostScriptResult, error) {
 	var res *fleet.HostScriptResult
 	return res, ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		var err error
@@ -34,7 +63,7 @@ func (ds *Datastore) NewHostScriptExecutionRequest(ctx context.Context, request 
 			id, _ := scRes.LastInsertId()
 			request.ScriptContentID = uint(id) //nolint:gosec // dismiss G115
 		}
-		res, err = ds.newHostScriptExecutionRequest(ctx, tx, request, false)
+		res, err = ds.newHostScriptExecutionRequest(ctx, tx, request, isInternal)
 		return err
 	})
 }
@@ -120,8 +149,12 @@ VALUES
 		return "", 0, ctxerr.Wrap(ctx, err, "new join script upcoming activity")
 	}
 
-	if _, err := ds.activateNextUpcomingActivity(ctx, tx, request.HostID, ""); err != nil {
-		return "", 0, ctxerr.Wrap(ctx, err, "activate next activity")
+	// deferred activations are picked up by the fleet-initiated release cron
+	// within its per-minute budget
+	if !request.DeferActivation {
+		if _, err := ds.activateNextUpcomingActivity(ctx, tx, request.HostID, ""); err != nil {
+			return "", 0, ctxerr.Wrap(ctx, err, "activate next activity")
+		}
 	}
 
 	return execID, activityID, nil
@@ -594,7 +627,7 @@ WHERE
 	}
 
 	for _, upcomingExecution := range upcomingExecutions {
-		if _, err := ds.cancelHostUpcomingActivity(ctx, db, upcomingExecution.HostID, upcomingExecution.ExecutionID); err != nil {
+		if _, err := ds.cancelHostUpcomingActivity(ctx, db, upcomingExecution.HostID, upcomingExecution.ExecutionID, true); err != nil {
 			return ctxerr.Wrap(ctx, err, "canceling upcoming activity")
 		}
 	}
@@ -857,10 +890,11 @@ func (ds *Datastore) DeleteScript(ctx context.Context, id uint) error {
 
 	// we call this outside of the transaction to avoid a
 	// long-running/deadlock-prone transaction, as many hosts could be affected.
-	return ds.activateNextUpcomingActivityForBatchOfHosts(ctx, activateAffectedHosts)
+	_, err = ds.activateNextUpcomingActivityForBatchOfHosts(ctx, activateAffectedHosts)
+	return err
 }
 
-// deletePendingHostScriptExecutionsForPolicy should be called when a policy is deleted to remove any pending script executions
+// deletePendingHostScriptExecutionsForPolicy should be called before a policy is deleted to remove any pending script executions
 func (ds *Datastore) deletePendingHostScriptExecutionsForPolicy(ctx context.Context, teamID *uint, policyID uint) error {
 	var globalOrTeamID uint
 	if teamID != nil {
@@ -925,7 +959,8 @@ func (ds *Datastore) deletePendingHostScriptExecutionsForPolicy(ctx context.Cont
 		return err
 	}
 
-	return ds.activateNextUpcomingActivityForBatchOfHosts(ctx, affectedHosts)
+	_, err := ds.activateNextUpcomingActivityForBatchOfHosts(ctx, affectedHosts)
+	return err
 }
 
 func (ds *Datastore) ListScripts(ctx context.Context, teamID *uint, opt fleet.ListOptions) ([]*fleet.Script, *fleet.PaginationMetadata, error) {
@@ -949,7 +984,10 @@ WHERE
 	}
 
 	args := []any{globalOrTeamID}
-	stmt, args := appendListOptionsWithCursorToSQL(selectStmt, args, &opt)
+	stmt, args, err := appendListOptionsWithCursorToSQLSecure(selectStmt, args, &opt, scriptsAllowedOrderKeys)
+	if err != nil {
+		return nil, nil, ctxerr.Wrap(ctx, err, "list scripts")
+	}
 
 	if err := sqlx.SelectContext(ctx, ds.reader(ctx), &scripts, stmt, args...); err != nil {
 		return nil, nil, ctxerr.Wrap(ctx, err, "select scripts")
@@ -997,14 +1035,14 @@ func (ds *Datastore) GetHostScriptDetails(ctx context.Context, hostID uint, team
 		globalOrTeamID = *teamID
 	}
 
-	var extension string
+	var extensionPatterns []string
 	switch {
 	case hostPlatform == "windows":
 		// filter by .ps1 extension
-		extension = `%.ps1`
+		extensionPatterns = []string{`%.ps1`}
 	case fleet.IsUnixLike(hostPlatform):
-		// filter by .sh extension
-		extension = `%.sh`
+		// filter by .sh and .py extensions
+		extensionPatterns = []string{`%.sh`, `%.py`}
 	default:
 		// no extension filter
 	}
@@ -1101,13 +1139,24 @@ WHERE
 `
 
 	args := []any{hostID, hostID, hostID, globalOrTeamID}
-	if len(extension) > 0 {
-		args = append(args, extension)
+	if len(extensionPatterns) > 0 {
+		likeClauses := make([]string, 0, len(extensionPatterns))
+		for _, ext := range extensionPatterns {
+			likeClauses = append(likeClauses, "s.name LIKE ?")
+			args = append(args, ext)
+		}
 		sql += `
-		AND s.name LIKE ?
+		AND (
+			` + strings.Join(likeClauses, `
+			OR
+			`) + `
+		)
 		`
 	}
-	stmt, args := appendListOptionsWithCursorToSQL(sql, args, &opt)
+	stmt, args, err := appendListOptionsWithCursorToSQLSecure(sql, args, &opt, hostScriptDetailsAllowedOrderKeys)
+	if err != nil {
+		return nil, nil, ctxerr.Wrap(ctx, err, "get host script details")
+	}
 
 	var rows []*row
 	if err := sqlx.SelectContext(ctx, ds.reader(ctx), &rows, stmt, args...); err != nil {
@@ -1410,7 +1459,7 @@ ON DUPLICATE KEY UPDATE
 		return nil, err
 	}
 
-	if err := ds.activateNextUpcomingActivityForBatchOfHosts(ctx, activateAffectedHosts); err != nil {
+	if _, err := ds.activateNextUpcomingActivityForBatchOfHosts(ctx, activateAffectedHosts); err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "activate next upcoming activity for batch of hosts")
 	}
 
@@ -1418,11 +1467,12 @@ ON DUPLICATE KEY UPDATE
 }
 
 type hostMDMActions struct {
-	LockRef       *string `db:"lock_ref"`
-	WipeRef       *string `db:"wipe_ref"`
-	UnlockRef     *string `db:"unlock_ref"`
-	UnlockPIN     *string `db:"unlock_pin"`
-	FleetPlatform string  `db:"fleet_platform"`
+	LockRef          *string `db:"lock_ref"`
+	WipeRef          *string `db:"wipe_ref"`
+	UnlockRef        *string `db:"unlock_ref"`
+	UnlockPIN        *string `db:"unlock_pin"`
+	ClearPasscodeRef *string `db:"clear_passcode_ref"`
+	FleetPlatform    string  `db:"fleet_platform"`
 }
 
 func (ds *Datastore) GetHostLockWipeStatus(ctx context.Context, host *fleet.Host) (*fleet.HostLockWipeStatus, error) {
@@ -1432,6 +1482,7 @@ func (ds *Datastore) GetHostLockWipeStatus(ctx context.Context, host *fleet.Host
 			wipe_ref,
 			unlock_ref,
 			unlock_pin,
+			clear_passcode_ref,
 			fleet_platform
 		FROM
 			host_mdm_actions
@@ -1530,6 +1581,34 @@ func (ds *Datastore) GetHostLockWipeStatus(ctx context.Context, host *fleet.Host
 			status.WipeMDMCommandResult = cmdRes
 		}
 
+	case "android":
+		// Android lock/wipe/clear-passcode are AMAPI commands tracked in mdm_android_commands;
+		// lock_ref / wipe_ref / clear_passcode_ref store the Fleet-generated command_uuid (no
+		// unlock_ref on Android). All three fetch the same shape, so loop them.
+		for _, ref := range []struct {
+			label  string
+			refPtr *string
+			cmdOut **fleet.MDMCommand
+			resOut **fleet.MDMCommandResult
+		}{
+			{"lock", mdmActions.LockRef, &status.LockMDMCommand, &status.LockMDMCommandResult},
+			{"wipe", mdmActions.WipeRef, &status.WipeMDMCommand, &status.WipeMDMCommandResult},
+			{"clear-passcode", mdmActions.ClearPasscodeRef, &status.ClearPasscodeMDMCommand, &status.ClearPasscodeMDMCommandResult},
+		} {
+			if ref.refPtr == nil {
+				continue
+			}
+			cmd, cmdRes, err := ds.getHostMDMAndroidCommand(ctx, *ref.refPtr)
+			if err != nil && !fleet.IsNotFound(err) {
+				return nil, ctxerr.Wrapf(ctx, err, "get android %s reference", ref.label)
+			}
+			if fleet.IsNotFound(err) {
+				ds.logger.ErrorContext(ctx, "orphan android command reference", "ref", ref.label, "host_id", host.ID, "command_uuid", *ref.refPtr)
+			}
+			*ref.cmdOut = cmd
+			*ref.resOut = cmdRes
+		}
+
 	case "windows", "linux":
 		// lock and unlock references are scripts
 		if mdmActions.LockRef != nil {
@@ -1601,6 +1680,7 @@ func (ds *Datastore) GetHostsLockWipeStatusBatch(ctx context.Context, hosts []*f
 			wipe_ref,
 			unlock_ref,
 			unlock_pin,
+			clear_passcode_ref,
 			fleet_platform
 		FROM
 			host_mdm_actions
@@ -1631,6 +1711,7 @@ func (ds *Datastore) GetHostsLockWipeStatusBatch(ctx context.Context, hosts []*f
 
 	appleCommandRefs := make([]refKey, 0)
 	windowsCommandRefs := make([]refKey, 0)
+	androidCommandRefs := make([]refKey, 0)
 	scriptRefs := make([]refKey, 0)
 
 	// Build initial status map with platform info
@@ -1639,11 +1720,12 @@ func (ds *Datastore) GetHostsLockWipeStatusBatch(ctx context.Context, hosts []*f
 
 	for _, row := range mdmActionsRows {
 		mdmActionsMap[row.HostID] = &hostMDMActions{
-			LockRef:       row.LockRef,
-			WipeRef:       row.WipeRef,
-			UnlockRef:     row.UnlockRef,
-			UnlockPIN:     row.UnlockPIN,
-			FleetPlatform: row.FleetPlatform,
+			LockRef:          row.LockRef,
+			WipeRef:          row.WipeRef,
+			UnlockRef:        row.UnlockRef,
+			UnlockPIN:        row.UnlockPIN,
+			ClearPasscodeRef: row.ClearPasscodeRef,
+			FleetPlatform:    row.FleetPlatform,
 		}
 	}
 
@@ -1731,6 +1813,33 @@ func (ds *Datastore) GetHostsLockWipeStatusBatch(ctx context.Context, hosts []*f
 					hostUUID: host.UUID,
 					hostID:   host.ID,
 					refType:  "wipe",
+				})
+			}
+
+		case "android":
+			// Android lock/wipe/clear-passcode are AMAPI commands in mdm_android_commands (no unlock_ref).
+			if mdmActions.LockRef != nil {
+				androidCommandRefs = append(androidCommandRefs, refKey{
+					uuid:     *mdmActions.LockRef,
+					hostUUID: host.UUID,
+					hostID:   host.ID,
+					refType:  "lock",
+				})
+			}
+			if mdmActions.WipeRef != nil {
+				androidCommandRefs = append(androidCommandRefs, refKey{
+					uuid:     *mdmActions.WipeRef,
+					hostUUID: host.UUID,
+					hostID:   host.ID,
+					refType:  "wipe",
+				})
+			}
+			if mdmActions.ClearPasscodeRef != nil {
+				androidCommandRefs = append(androidCommandRefs, refKey{
+					uuid:     *mdmActions.ClearPasscodeRef,
+					hostUUID: host.UUID,
+					hostID:   host.ID,
+					refType:  "clear_passcode",
 				})
 			}
 
@@ -1944,6 +2053,71 @@ func (ds *Datastore) GetHostsLockWipeStatusBatch(ctx context.Context, hosts []*f
 		}
 	}
 
+	// Batch query Android MDM commands (lock/wipe via AMAPI). Pending rows leave the result nil
+	// so HostLockWipeStatus.IsPendingLock/IsPendingWipe report "pending"; acknowledged/error
+	// rows populate the result with the Android status string ("acknowledged" or "error").
+	if len(androidCommandRefs) > 0 {
+		cmdUUIDs := make([]string, 0, len(androidCommandRefs))
+		cmdUUIDMap := make(map[string][]refKey)
+		for _, ref := range androidCommandRefs {
+			if _, exists := cmdUUIDMap[ref.uuid]; !exists {
+				cmdUUIDs = append(cmdUUIDs, ref.uuid)
+			}
+			cmdUUIDMap[ref.uuid] = append(cmdUUIDMap[ref.uuid], ref)
+		}
+
+		cmdStmt := `SELECT command_uuid, host_uuid, command_type, status FROM mdm_android_commands WHERE command_uuid IN (?)`
+		cmdQuery, cmdArgs, err := sqlx.In(cmdStmt, cmdUUIDs)
+		if err != nil {
+			return nil, ctxerr.Wrap(ctx, err, "build IN query for android commands")
+		}
+
+		var rows []struct {
+			CommandUUID string `db:"command_uuid"`
+			HostUUID    string `db:"host_uuid"`
+			CommandType string `db:"command_type"`
+			Status      string `db:"status"`
+		}
+		if err := sqlx.SelectContext(ctx, ds.reader(ctx), &rows, cmdQuery, cmdArgs...); err != nil {
+			return nil, ctxerr.Wrap(ctx, err, "select android mdm commands batch")
+		}
+
+		commandMap := make(map[string]*fleet.MDMCommand, len(rows))
+		resultMap := make(map[string]*fleet.MDMCommandResult, len(rows))
+		for _, r := range rows {
+			commandMap[r.CommandUUID] = &fleet.MDMCommand{
+				CommandUUID: r.CommandUUID,
+				RequestType: r.CommandType,
+			}
+			if r.Status != string(android.MDMAndroidCommandStatusPending) {
+				resultMap[r.CommandUUID] = &fleet.MDMCommandResult{
+					CommandUUID: r.CommandUUID,
+					HostUUID:    r.HostUUID,
+					Status:      r.Status,
+				}
+			}
+		}
+
+		for cmdUUID, refs := range cmdUUIDMap {
+			cmd := commandMap[cmdUUID]
+			cmdRes := resultMap[cmdUUID]
+			for _, ref := range refs {
+				status := statusMap[ref.hostID]
+				switch ref.refType {
+				case "lock":
+					status.LockMDMCommand = cmd
+					status.LockMDMCommandResult = cmdRes
+				case "wipe":
+					status.WipeMDMCommand = cmd
+					status.WipeMDMCommandResult = cmdRes
+				case "clear_passcode":
+					status.ClearPasscodeMDMCommand = cmd
+					status.ClearPasscodeMDMCommandResult = cmdRes
+				}
+			}
+		}
+	}
+
 	// Batch query script results
 	if len(scriptRefs) > 0 {
 		execIDs := make([]string, 0, len(scriptRefs))
@@ -2004,6 +2178,34 @@ func (ds *Datastore) GetHostsLockWipeStatusBatch(ctx context.Context, hosts []*f
 	}
 
 	return statusMap, nil
+}
+
+// getHostMDMAndroidCommand returns the Fleet-shaped MDMCommand + MDMCommandResult for a host_mdm_actions ref pointing
+// at mdm_android_commands.command_uuid. Mirrors getHostMDMAppleCommand / getHostMDMWindowsCommand so the
+// GetHostLockWipeStatus consumer can stay platform-agnostic. While the command is still pending (no Pub/Sub ack yet),
+// result is nil, matching how a pending Apple command leaves LockMDMCommandResult nil.
+func (ds *Datastore) getHostMDMAndroidCommand(ctx context.Context, cmdUUID string) (*fleet.MDMCommand, *fleet.MDMCommandResult, error) {
+	cmd, err := ds.GetMDMAndroidCommandByUUID(ctx, cmdUUID)
+	if err != nil {
+		return nil, nil, ctxerr.Wrap(ctx, err, "get android mdm command")
+	}
+
+	mdmCmd := &fleet.MDMCommand{
+		CommandUUID: cmd.CommandUUID,
+		RequestType: cmd.CommandType,
+	}
+
+	// Pending status means no Pub/Sub COMMAND notification has arrived yet; leave result nil so
+	// IsPendingLock/IsPendingWipe report "pending" and IsLocked/IsWiped report false.
+	if cmd.Status == string(android.MDMAndroidCommandStatusPending) {
+		return mdmCmd, nil, nil
+	}
+
+	return mdmCmd, &fleet.MDMCommandResult{
+		CommandUUID: cmd.CommandUUID,
+		HostUUID:    cmd.HostUUID,
+		Status:      cmd.Status,
+	}, nil
 }
 
 func (ds *Datastore) getHostMDMWindowsCommand(ctx context.Context, cmdUUID, hostUUID string) (*fleet.MDMCommand, *fleet.MDMCommandResult, error) {
@@ -2220,6 +2422,8 @@ func (ds *Datastore) WipeHostViaScript(ctx context.Context, request *fleet.HostS
 	})
 }
 
+// UnlockHostManually records a manual unlock request for the given host.
+// ts must be in UTC to ensure consistency with the STR_TO_DATE comparison in CleanAppleMDMLock.
 func (ds *Datastore) UnlockHostManually(ctx context.Context, hostID uint, hostFleetPlatform string, ts time.Time) error {
 	const stmt = `
 	INSERT INTO host_mdm_actions
@@ -2241,7 +2445,7 @@ func (ds *Datastore) UnlockHostManually(ctx context.Context, hostID uint, hostFl
 	// from then on, the host is marked as "pending unlock" until the device is
 	// actually unlocked with the PIN. The actual unlocking happens when the
 	// device sends an Idle MDM request.
-	unlockRef := ts.Format(time.DateTime)
+	unlockRef := ts.UTC().Format(time.DateTime)
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, hostID, unlockRef, hostFleetPlatform)
 	return ctxerr.Wrap(ctx, err, "record manual unlock host request")
 }
@@ -2268,7 +2472,8 @@ func buildHostLockWipeStatusUpdateStmt(refCol string, succeeded bool, joinPart s
 				// Currently only used for Apple MDM devices.
 				// We set the unlock_ref to current time since the device can be unlocked any time after the lock.
 				// Apple MDM does not have a concept of unlock pending.
-				stmt += fmt.Sprintf("%sunlock_ref = '%s', %[1]swipe_ref = NULL", alias, time.Now().Format(time.DateTime))
+				// UTC_TIMESTAMP() is used to ensure timezone consistency with the comparison in CleanAppleMDMLock.
+				stmt += fmt.Sprintf("%sunlock_ref = UTC_TIMESTAMP(), %[1]swipe_ref = NULL", alias)
 			}
 		case "unlock_ref":
 			// a successful unlock clears itself as well as the lock ref, because
@@ -2305,16 +2510,143 @@ func (ds *Datastore) UpdateHostLockWipeStatusFromAppleMDMResult(ctx context.Cont
 	default:
 		return nil
 	}
-	return updateHostLockWipeStatusFromResultAndHostUUID(ctx, ds.writer(ctx), hostUUID, refCol, cmdUUID, succeeded, setUnlockRef)
+	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
+		// A device can acknowledge a lock/wipe that was canceled after it
+		// already fetched the command (Apple's protocol has no retract). The
+		// device really is locked/wiped then, so restore the canceled state
+		// first and let the normal update below run as if the cancel never
+		// happened. An Error result means the command didn't run — no restore.
+		if succeeded && refCol != "unlock_ref" {
+			if err := ds.restoreCanceledLockWipeRef(ctx, tx, hostUUID, cmdUUID, requestType); err != nil {
+				return err
+			}
+		}
+		_, err := updateHostLockWipeStatusFromResultAndHostUUID(ctx, tx, hostUUID, refCol, cmdUUID, succeeded, setUnlockRef)
+		return err
+	})
+}
+
+// restoreCanceledLockWipeRef makes an acknowledged-but-canceled lock/wipe
+// command whole again: canceling deactivated its queue row and cleared its
+// host_mdm_actions ref, so without a restore the ack would update nothing and
+// the host would report unlocked while it is really locked/wiped, with the
+// unlock PIN unretrievable. Re-activating the row and restoring the ref (PIN
+// recovered from the stored command plist) reproduces the exact state a
+// never-canceled acknowledgment leaves. The command cannot be re-delivered to
+// the device: commands are only served while they have no result row.
+//
+// Queue rows deactivated by other paths (re-enrollment queue clearing, SCEP
+// renewal sweeps) take this same path when the device acknowledged the
+// command anyway, which is deliberate — those today strand the host in a
+// state Fleet misreports.
+func (ds *Datastore) restoreCanceledLockWipeRef(ctx context.Context, tx sqlx.ExtContext, hostUUID, cmdUUID, requestType string) error {
+	var active bool
+	err := sqlx.GetContext(ctx, tx, &active,
+		`SELECT active FROM nano_enrollment_queue WHERE id = ? AND command_uuid = ?`, hostUUID, cmdUUID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return ctxerr.Wrap(ctx, err, "check queue row for canceled lock/wipe restore")
+	case active:
+		// storing a result never deactivates the queue row, so an active row
+		// means the command was never canceled — nothing to restore
+		return nil
+	}
+
+	var host struct {
+		ID       uint   `db:"id"`
+		Platform string `db:"platform"`
+	}
+	// hosts.uuid is not unique (cloned VMs, re-enrollment); the highest id is
+	// the live enrollment
+	err = sqlx.GetContext(ctx, tx, &host,
+		`SELECT id, platform FROM hosts WHERE uuid = ? ORDER BY id DESC LIMIT 1`, hostUUID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return ctxerr.Wrap(ctx, err, "load host for canceled lock/wipe restore")
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE nano_enrollment_queue SET active = 1 WHERE id = ? AND command_uuid = ?`, hostUUID, cmdUUID); err != nil {
+		return ctxerr.Wrap(ctx, err, "reactivate canceled lock/wipe command")
+	}
+
+	// The IF(... IS NULL ...) guards ensure a non-NULL ref is never clobbered:
+	// if a newer lock/wipe was issued after the cancel, that command's
+	// lifecycle resolves the host's true state and this late ack must not
+	// overwrite its pending ref (or PIN).
+	if requestType == "EraseDevice" {
+		_, err = tx.ExecContext(ctx, `
+INSERT INTO host_mdm_actions (host_id, wipe_ref, fleet_platform)
+VALUES (?, ?, ?)
+ON DUPLICATE KEY UPDATE
+	wipe_ref = IF(wipe_ref IS NULL, VALUES(wipe_ref), wipe_ref)`,
+			host.ID, cmdUUID, fleet.PlatformFromHost(host.Platform))
+		return ctxerr.Wrap(ctx, err, "restore wipe_ref for canceled wipe")
+	}
+
+	// EnableLostMode commands carry no PIN and store "" at enqueue time
+	var pin string
+	if requestType == "DeviceLock" {
+		var raw []byte
+		if err := sqlx.GetContext(ctx, tx, &raw,
+			`SELECT command FROM nano_commands WHERE command_uuid = ?`, cmdUUID); err != nil {
+			return ctxerr.Wrap(ctx, err, "load command plist for canceled lock restore")
+		}
+		var payload struct {
+			Command struct {
+				PIN string
+			}
+		}
+		if err := plist.Unmarshal(raw, &payload); err != nil {
+			// erroring would abort the ack processing and poison every
+			// re-delivery of the device's report, so skip the restore instead
+			ds.logger.WarnContext(ctx, "canceled lock restore: cannot parse stored command plist, skipping restore",
+				"command_uuid", cmdUUID, "err", err)
+			return nil
+		}
+		if payload.Command.PIN == "" {
+			// a raw DeviceLock sent via POST /commands/run may carry no PIN;
+			// restoring lock_ref without one would leave a lock the admin
+			// cannot unlock and CleanAppleMDMLock cannot clear, and erroring
+			// here would poison every re-delivery of the device's report —
+			// skip the restore, matching the no-bookkeeping behavior raw
+			// commands have always had (Fleet-issued locks always embed a PIN)
+			return nil
+		}
+		pin = payload.Command.PIN
+	}
+
+	// unlock_pin must be assigned before lock_ref: MySQL evaluates the
+	// assignments left to right using already-updated values, so once lock_ref
+	// is set its guard turns false.
+	_, err = tx.ExecContext(ctx, `
+INSERT INTO host_mdm_actions (host_id, lock_ref, unlock_pin, fleet_platform)
+VALUES (?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+	unlock_pin = IF(lock_ref IS NULL AND wipe_ref IS NULL, VALUES(unlock_pin), unlock_pin),
+	lock_ref   = IF(lock_ref IS NULL AND wipe_ref IS NULL, VALUES(lock_ref), lock_ref)`,
+		host.ID, cmdUUID, pin, fleet.PlatformFromHost(host.Platform))
+	return ctxerr.Wrap(ctx, err, "restore lock_ref for canceled lock")
 }
 
 func updateHostLockWipeStatusFromResultAndHostUUID(
 	ctx context.Context, tx sqlx.ExtContext, hostUUID, refCol, cmdUUID string, succeeded bool, setUnlockRef bool,
-) error {
+) (int64, error) {
 	stmt := buildHostLockWipeStatusUpdateStmt(refCol, succeeded, `JOIN hosts h ON hma.host_id = h.id`, setUnlockRef)
 	stmt += ` WHERE h.uuid = ? AND hma.` + refCol + ` = ?`
-	_, err := tx.ExecContext(ctx, stmt, hostUUID, cmdUUID)
-	return ctxerr.Wrap(ctx, err, "update host lock/wipe status from result via host uuid")
+	res, err := tx.ExecContext(ctx, stmt, hostUUID, cmdUUID)
+	if err != nil {
+		return 0, ctxerr.Wrap(ctx, err, "update host lock/wipe status from result via host uuid")
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, ctxerr.Wrap(ctx, err, "get rows affected for host lock/wipe status update")
+	}
+	return n, nil
 }
 
 func updateHostLockWipeStatusFromResult(ctx context.Context, tx sqlx.ExtContext, hostID uint, refCol string, succeeded bool) error {
@@ -2423,6 +2755,16 @@ func (ds *Datastore) batchExecuteScript(ctx context.Context, userID *uint, scrip
 				executions = append(executions, fleet.BatchExecutionHost{
 					HostID: host.ID,
 					Error:  &fleet.BatchExecuteInvalidHost,
+				})
+				continue
+			}
+
+			// The host may have moved to a different team since the batch was
+			// scheduled, so re-check it still matches the script's team before running.
+			if !teamIDEq(host.TeamID, script.TeamID) {
+				executions = append(executions, fleet.BatchExecutionHost{
+					HostID: host.ID,
+					Error:  &fleet.BatchExecuteIncompatibleTeam,
 				})
 				continue
 			}
@@ -2672,7 +3014,7 @@ WHERE
 			}
 
 			for _, host := range toCancel {
-				if _, err := ds.cancelHostUpcomingActivity(ctx, tx, host.HostID, host.HostExecutionID); err != nil {
+				if _, err := ds.cancelHostUpcomingActivity(ctx, tx, host.HostID, host.HostExecutionID, true); err != nil {
 					return ctxerr.Wrap(ctx, err, "canceling upcoming activity")
 				}
 			}
@@ -2838,6 +3180,9 @@ WHERE
 	}
 	// Fill out the execution details
 	if err := sqlx.GetContext(ctx, ds.reader(ctx), &temp_summary, stmtExecutions, executionID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, notFound("batch execution").WithName(executionID)
+		}
 		return nil, ctxerr.Wrap(ctx, err, "selecting execution information for bulk execution summary")
 	}
 
@@ -2854,6 +3199,10 @@ WHERE
 
 	// Fill out the script details
 	if err := sqlx.GetContext(ctx, ds.reader(ctx), &summary, stmtScriptDetails, executionID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, notFound("batch execution").WithName(executionID)
+		}
+
 		return nil, ctxerr.Wrap(ctx, err, "selecting script information for bulk execution summary")
 	}
 
@@ -2981,6 +3330,14 @@ LIMIT %d OFFSET %d
 	var summary []fleet.BatchActivity
 	if err := sqlx.SelectContext(ctx, ds.reader(ctx), &summary, stmtExecutions, args...); err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "selecting execution information for bulk execution summary")
+	}
+
+	if filter.ExecutionID != nil && len(summary) == 0 {
+		nfErr := notFound("batch execution")
+		if filter.ExecutionID != nil {
+			nfErr = nfErr.WithName(*filter.ExecutionID)
+		}
+		return nil, nfErr
 	}
 
 	return summary, nil

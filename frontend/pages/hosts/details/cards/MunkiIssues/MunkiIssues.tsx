@@ -3,13 +3,12 @@ import React from "react";
 import { IMunkiIssue } from "interfaces/host";
 
 import TableContainer from "components/TableContainer";
-import EmptyTable from "components/EmptyTable";
-import Card from "components/Card";
+import EmptyState from "components/EmptyState";
 import CardHeader from "components/CardHeader";
 
 import { munkiIssuesTableHeaders } from "./MunkiIssuesTableConfig";
 
-const baseClass = "munki-issues-card";
+const baseClass = "munki-issues-section";
 
 interface IMunkiIssuesTableProps {
   isLoading: boolean;
@@ -22,39 +21,29 @@ const MunkiIssuesTable = ({
   munkiIssues,
   deviceType,
 }: IMunkiIssuesTableProps): JSX.Element => {
-  const tableMunkiIssues = munkiIssues;
-  const tableHeaders = munkiIssuesTableHeaders;
-
   return (
-    <Card className={baseClass} borderRadiusSize="xxlarge" paddingSize="xlarge">
+    <div className={baseClass}>
       <CardHeader header="Munki issues" />
-      {munkiIssues?.length ? (
-        <div className={deviceType || ""}>
-          <TableContainer
-            columnConfigs={tableHeaders}
-            data={tableMunkiIssues || []}
-            isLoading={isLoading}
-            defaultSortHeader="name"
-            defaultSortDirection="asc"
-            resultsTitle="issue"
-            emptyComponent={() => (
-              <EmptyTable
-                header="No Munki issues detected"
-                info="The last time Munki ran on this host, no issues were reported."
-              />
-            )}
-            showMarkAllPages={false}
-            isAllPagesSelected={false}
-            isClientSidePagination
-          />
-        </div>
-      ) : (
-        <EmptyTable
-          header="No Munki issues detected"
-          info="The last time Munki ran on this host, no issues were reported."
+      <div className={deviceType || ""}>
+        <TableContainer
+          columnConfigs={munkiIssuesTableHeaders}
+          data={munkiIssues || []}
+          isLoading={isLoading}
+          defaultSortHeader="name"
+          defaultSortDirection="asc"
+          resultsTitle="issue"
+          emptyComponent={() => (
+            <EmptyState
+              header="No Munki issues detected"
+              info="The last time Munki ran on this host, no issues were reported."
+            />
+          )}
+          showMarkAllPages={false}
+          isAllPagesSelected={false}
+          isClientSidePagination
         />
-      )}
-    </Card>
+      </div>
+    </div>
   );
 };
 export default MunkiIssuesTable;

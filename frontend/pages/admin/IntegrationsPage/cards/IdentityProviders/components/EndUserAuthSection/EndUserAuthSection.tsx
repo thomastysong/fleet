@@ -8,21 +8,22 @@ import { AxiosResponse } from "axios";
 
 import { expandErrorReasonRequired } from "interfaces/errors";
 import configAPI from "services/entities/config";
-import { NotificationContext } from "context/notification";
 import { AppContext } from "context/app";
 
-// @ts-ignore
 import InputField from "components/forms/fields/InputField";
 import Button from "components/buttons/Button/Button";
 import TooltipWrapper from "components/TooltipWrapper";
 import GitOpsModeTooltipWrapper from "components/GitOpsModeTooltipWrapper";
 import PremiumFeatureMessage from "components/PremiumFeatureMessage";
+import CustomLink from "components/CustomLink";
+import { notify } from "components/ToastNotification";
 
 import {
   IFormDataIdp,
   IFormErrorsIdp,
   isEmptyFormData,
   isMissingAnyRequiredField,
+  trimFormDataIdp,
   validateFormDataIdp,
 } from "./helpers";
 
@@ -48,7 +49,6 @@ const EndUserAuthSection = ({
   const { config, isPremiumTier } = useContext(AppContext);
   const gitOpsModeEnabled = config?.gitops.gitops_mode_enabled;
 
-  const { renderFlash } = useContext(NotificationContext);
   const [formErrors, setFormErrors] = useState<IFormErrorsIdp | null>(null);
 
   const isFormCleared =
@@ -59,7 +59,7 @@ const EndUserAuthSection = ({
 
   const onInputChange = useCallback(
     ({ name, value }: { name: keyof IFormDataIdp; value: string }) => {
-      const newData = { ...formData, [name]: value?.trim() || "" };
+      const newData = { ...formData, [name]: value };
       setFormData(newData);
       setDirty(true);
 
@@ -81,13 +81,18 @@ const EndUserAuthSection = ({
   );
 
   const onBlur = useCallback(() => {
-    setFormErrors(validateFormDataIdp(formData));
-  }, [formData]);
+    const trimmed = trimFormDataIdp(formData);
+    setFormData(trimmed);
+    setFormErrors(validateFormDataIdp(trimmed));
+  }, [formData, setFormData]);
 
   const onSubmit = useCallback(
     async (e: React.FormEvent<SubmitEvent>) => {
       e.preventDefault();
-      const newErrors = validateFormDataIdp(formData);
+      const trimmed = trimFormDataIdp(formData);
+      setFormData(trimmed);
+
+      const newErrors = validateFormDataIdp(trimmed);
       if (newErrors) {
         setFormErrors(newErrors);
         return;
@@ -97,11 +102,11 @@ const EndUserAuthSection = ({
         await configAPI.update({
           mdm: {
             end_user_authentication: {
-              ...formData,
+              ...trimmed,
             },
           },
         });
-        renderFlash("success", "Successfully updated end user authentication.");
+        notify.success("Successfully updated end user authentication.");
         originalFormData.current = { ...formData };
         setDirty(false);
         // Notify parent component of changes, since we're calling our own API
@@ -110,16 +115,15 @@ const EndUserAuthSection = ({
       } catch (err) {
         const ae = (typeof err === "object" ? err : {}) as AxiosResponse;
         if (ae.status === 422) {
-          renderFlash(
-            "error",
-            `Couldn't update: ${expandErrorReasonRequired(err)}.`
-          );
+          notify.error(`Couldn't update: ${expandErrorReasonRequired(err)}.`, {
+            response: err,
+          });
           return;
         }
-        renderFlash("error", "Couldn't update. Please try again.");
+        notify.error("Couldn't update. Please try again.", { response: err });
       }
     },
-    [formData, renderFlash, setDirty]
+    [formData, setFormData, setDirty]
   );
 
   const renderContent = () => {
@@ -130,12 +134,16 @@ const EndUserAuthSection = ({
     return (
       <form>
         <p>
-          If enabled in{" "}
+          After configuring, head to{" "}
           <strong>
             Controls &gt; Setup experience &gt; End user authentication
-          </strong>
-          , end users will be required to authenticate when they first set up
-          their host.
+          </strong>{" "}
+          to require end users to authenticate.{" "}
+          <CustomLink
+            text="Learn more"
+            url="https://fleetdm.com/learn-more-about/end-user-authentication"
+            newTab
+          />
         </p>
         <div
           className={`form ${
@@ -160,7 +168,7 @@ const EndUserAuthSection = ({
             value={formData.entity_id}
             parseTarget
             error={formErrors?.entity_id}
-            tooltip="The required entity ID is a URI that you use to identify Fleet when configuring the identity provider."
+            tooltip="The Entity ID is a required URI that you use to identify Fleet when configuring the identity provider. Okta calls this Audience Restriction."
           />
           <InputField
             label="Metadata URL"
@@ -190,7 +198,6 @@ const EndUserAuthSection = ({
           />
         </div>
         <GitOpsModeTooltipWrapper
-          tipOffset={-8}
           renderChildren={(disableChildren) => (
             <TooltipWrapper
               tipContent="Complete all required fields to save end user authentication."

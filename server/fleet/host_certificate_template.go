@@ -5,6 +5,27 @@ import "time"
 // AndroidCertificateTemplateProfileID Used by the front-end for determining the displaying logic.
 const AndroidCertificateTemplateProfileID = "fleet-host-certificate-template"
 
+// ONCProfileWithheldDetailPrefix is the prefix used in the detail field of withheld Android
+// profiles that are waiting for a certificate to be installed before they can be applied.
+const ONCProfileWithheldDetailPrefix = "Waiting for certificate"
+
+// MaxCertificateInstallRetries is the maximum number of automatic retries after the initial attempt
+// when the Android agent reports a certificate install failure. Manual resend via the UI sets
+// retry_count to this value so the resend gets exactly one attempt with no automatic retry.
+//
+// Retries use exponential backoff, the approximate schedule (AMAPI delivery latency may extend these intervals):
+// updated_at + 2^(retry_count-1) * 30 seconds
+//
+//	Initial delivery: picked up on next cron cycle 0 - 30s
+//	Retry 1: backoff  30s,  cumulative ~1 min
+//	Retry 2: backoff  1min, cumulative ~2 min
+//	Retry 3: backoff  2min, cumulative ~4 min
+//	Retry 4: backoff  4min, cumulative ~8 min
+//	Retry 5: backoff  8min, cumulative ~16 min
+//	Retry 6: backoff 16min, cumulative ~32 min
+//	Retry 7: backoff 32min, cumulative ~64 min (terminal failure)
+const MaxCertificateInstallRetries uint = 7
+
 type HostCertificateTemplate struct {
 	ID                    uint                      `db:"id"`
 	Name                  string                    `db:"name"`
@@ -20,6 +41,7 @@ type HostCertificateTemplate struct {
 	NotValidBefore        *time.Time                `db:"not_valid_before"`
 	NotValidAfter         *time.Time                `db:"not_valid_after"`
 	Serial                *string                   `db:"serial"` // for future use
+	RetryCount            uint                      `db:"retry_count"`
 }
 
 // ToHostMDMProfile maps a HostCertificateTemplate to a HostMDMProfile, suitable for use in the MDM API
@@ -29,13 +51,15 @@ func (p *HostCertificateTemplate) ToHostMDMProfile() HostMDMProfile {
 	}
 
 	status := string(p.Status)
+	certTemplateID := p.CertificateTemplateID
 	profile := HostMDMProfile{
-		HostUUID:      p.HostUUID,
-		Name:          p.Name,
-		Platform:      "android",
-		Status:        &status,
-		OperationType: p.OperationType,
-		ProfileUUID:   AndroidCertificateTemplateProfileID,
+		HostUUID:              p.HostUUID,
+		Name:                  p.Name,
+		Platform:              "android",
+		Status:                &status,
+		OperationType:         p.OperationType,
+		ProfileUUID:           AndroidCertificateTemplateProfileID,
+		CertificateTemplateID: &certTemplateID,
 	}
 	if p.Detail != nil {
 		profile.Detail = *p.Detail

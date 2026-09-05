@@ -5,6 +5,8 @@ import classnames from "classnames";
 
 import "ace-builds/src-noconflict/mode-yaml";
 
+import "utilities/ace_theme";
+
 const baseClass = "yaml-ace";
 
 class YamlAce extends Component {
@@ -64,7 +66,6 @@ class YamlAce extends Component {
 
     const wrapperClass = classnames(wrapperClassName, "form-field", {
       [`${baseClass}__wrapper--error`]: error,
-      [`${baseClass}__wrapper--disabled`]: disabled,
     });
 
     return (
@@ -72,6 +73,7 @@ class YamlAce extends Component {
         {renderLabel()}
         <AceEditor
           readOnly={disabled}
+          showGutter={!disabled}
           className={baseClass}
           mode="yaml"
           theme="fleet"

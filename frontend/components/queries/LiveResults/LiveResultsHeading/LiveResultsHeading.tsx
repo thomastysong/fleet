@@ -13,22 +13,22 @@ const pluralizeHost = (count: number) => {
 const baseClass = "live-results-heading";
 
 interface IFinishButtonsProps {
-  onClickDone: (evt: React.MouseEvent<HTMLButtonElement>) => void;
+  onClickClose: (evt: React.MouseEvent<HTMLButtonElement>) => void;
   onClickRunAgain: (evt: React.MouseEvent<HTMLButtonElement>) => void;
 }
 
 const FinishedButtons = ({
-  onClickDone,
+  onClickClose,
   onClickRunAgain,
 }: IFinishButtonsProps) => (
   <div className={`${baseClass}__btn-wrapper`}>
-    <Button className={`${baseClass}__done-btn`} onClick={onClickDone}>
-      Done
+    <Button className={`${baseClass}__done-btn`} onClick={onClickClose}>
+      Close
     </Button>
     <Button
       className={`${baseClass}__run-btn`}
       onClick={onClickRunAgain}
-      variant="brand-inverse-icon"
+      variant="secondary"
     >
       Run again
     </Button>
@@ -58,7 +58,7 @@ interface ILiveResultsHeadingProps {
   numHostsRespondedNoErrorsAndNoResults: number;
   numHostsRespondedErrors: number;
   isFinished: boolean;
-  onClickDone: (evt: React.MouseEvent<HTMLButtonElement>) => void;
+  onClickClose: (evt: React.MouseEvent<HTMLButtonElement>) => void;
   onClickRunAgain: (evt: React.MouseEvent<HTMLButtonElement>) => void;
   onClickStop: (evt: React.MouseEvent<HTMLButtonElement>) => void;
   /** Whether this is a live run of a policy or a report */
@@ -72,7 +72,7 @@ const LiveResultsHeading = ({
   numHostsRespondedNoErrorsAndNoResults,
   numHostsRespondedErrors,
   isFinished,
-  onClickDone,
+  onClickClose,
   onClickRunAgain,
   onClickStop,
   resultsType = "report",
@@ -107,23 +107,23 @@ const LiveResultsHeading = ({
               tipContent={
                 isFinished ? (
                   <>
-                    Results:{" "}
-                    <b>
+                    Results from{" "}
+                    <strong>
                       {numHostsRespondedResults}{" "}
                       {pluralizeHost(numHostsRespondedResults)}
-                    </b>
+                    </strong>
                     <br />
-                    No results:{" "}
-                    <b>
+                    No results from{" "}
+                    <strong>
                       {numHostsRespondedNoErrorsAndNoResults}{" "}
                       {pluralizeHost(numHostsRespondedNoErrorsAndNoResults)}
-                    </b>
+                    </strong>
                     <br />
-                    Errors:{" "}
-                    <b>
+                    Errors from{" "}
+                    <strong>
                       {numHostsRespondedErrors}{" "}
                       {pluralizeHost(numHostsRespondedErrors)}
-                    </b>
+                    </strong>
                   </>
                 ) : (
                   <>
@@ -142,7 +142,6 @@ const LiveResultsHeading = ({
             <Spinner
               size="x-small"
               centered={false}
-              includeContainer={false}
               className={`${baseClass}__responding-spinner`}
             />
           )}
@@ -152,8 +151,8 @@ const LiveResultsHeading = ({
             <TooltipWrapper
               tipContent={
                 <>
-                  The hosts&apos; distributed interval can <br />
-                  impact live report response times.
+                  The hosts&apos; distributed interval can impact live report
+                  response times.
                 </>
               }
             >
@@ -164,7 +163,7 @@ const LiveResultsHeading = ({
       </div>
       {isFinished ? (
         <FinishedButtons
-          onClickDone={onClickDone}
+          onClickClose={onClickClose}
           onClickRunAgain={onClickRunAgain}
         />
       ) : (

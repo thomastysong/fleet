@@ -3,17 +3,19 @@ import { useQuery } from "react-query";
 
 import classnames from "classnames";
 
-import { NotificationContext } from "context/notification";
+import { notify } from "components/ToastNotification";
 import { AppContext } from "context/app";
 import RunScriptHelpText from "pages/hosts/components/ScriptDetailsModal/RunScriptHelpText";
 import scriptAPI from "services/entities/scripts";
+import useGitOpsMode from "hooks/useGitOpsMode";
 
 import Button from "components/buttons/Button";
 import DataError from "components/DataError";
-import Editor from "components/Editor";
+import Editor, { EditorMode } from "components/Editor";
 import Modal from "components/Modal";
 import ModalFooter from "components/ModalFooter";
 import Spinner from "components/Spinner";
+import GitOpsModeTooltipWrapper from "components/GitOpsModeTooltipWrapper";
 
 import { ScriptContent } from "interfaces/script";
 import { DEFAULT_USE_QUERY_OPTIONS } from "utilities/constants";
@@ -57,7 +59,7 @@ const WarningModal = ({
         >
           Save
         </Button>
-        <Button onClick={onExit} variant="inverse">
+        <Button onClick={onExit} variant="secondary">
           Cancel
         </Button>
       </div>
@@ -83,7 +85,6 @@ const EditScriptModal = ({
   scriptName,
   onExit,
 }: IEditScriptModal) => {
-  const { renderFlash } = useContext(NotificationContext);
   const {
     currentTeam,
     isGlobalAdmin,
@@ -93,6 +94,7 @@ const EditScriptModal = ({
     isTeamTechnician,
     isGlobalTechnician,
   } = useContext(AppContext);
+  const { gitOpsModeEnabled } = useGitOpsMode();
 
   const isTechnician = !!isTeamTechnician || !!isGlobalTechnician;
 
@@ -152,10 +154,10 @@ const EditScriptModal = ({
     try {
       setIsSubmitting(true);
       await scriptAPI.updateScript(scriptId, scriptFormData, scriptName);
-      renderFlash("success", "Successfully saved script.");
+      notify.success("Successfully saved script.");
       onExit();
     } catch (e) {
-      renderFlash("error", getErrorMessage(e));
+      notify.error(getErrorMessage(e), { response: e });
     } finally {
       setIsSubmitting(false);
       setShowConfirmChanges(false);
@@ -177,7 +179,12 @@ const EditScriptModal = ({
     }
 
     // Set editing mode based on the file extension.
-    const mode = scriptName.match(/\.sh$/) ? "sh" : "powershell";
+    let mode: EditorMode = "sh";
+    if (scriptName.match(/\.ps1$/)) {
+      mode = "powershell";
+    } else if (scriptName.match(/\.py$/)) {
+      mode = "python";
+    }
 
     return (
       <>
@@ -189,6 +196,7 @@ const EditScriptModal = ({
             onBlur={onBlur}
             onChange={onChange}
             value={scriptFormData}
+            readOnly={gitOpsModeEnabled}
           />
           <RunScriptHelpText
             className="form-field__help-text"
@@ -201,16 +209,22 @@ const EditScriptModal = ({
           <ModalFooter
             primaryButtons={
               <>
-                <Button onClick={onExit} variant="inverse">
+                <Button onClick={onExit} variant="secondary">
                   Cancel
                 </Button>
-                <Button
-                  onClick={onSave}
-                  isLoading={isSubmitting}
-                  disabled={!!formError}
-                >
-                  Save
-                </Button>
+                <GitOpsModeTooltipWrapper
+                  renderChildren={(gitopsEnabled) => {
+                    return (
+                      <Button
+                        onClick={onSave}
+                        isLoading={isSubmitting}
+                        disabled={!!formError || gitopsEnabled}
+                      >
+                        Save
+                      </Button>
+                    );
+                  }}
+                />
               </>
             }
           />

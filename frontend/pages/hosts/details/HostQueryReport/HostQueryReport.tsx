@@ -1,6 +1,6 @@
 import React, { useCallback, useContext, useState } from "react";
 import { useQuery } from "react-query";
-import { browserHistory, InjectedRouter, Link } from "react-router";
+import { browserHistory, InjectedRouter } from "react-router";
 import { Params } from "react-router/lib/Router";
 import PATHS from "router/paths";
 import { AppContext } from "context/app";
@@ -16,7 +16,6 @@ import {
 
 import Button from "components/buttons/Button";
 import BackButton from "components/BackButton";
-import Icon from "components/Icon";
 import MainContent from "components/MainContent";
 import ShowQueryModal from "components/modals/ShowQueryModal";
 import Spinner from "components/Spinner";
@@ -125,16 +124,11 @@ const HostQueryReport = ({
         <div className={`${baseClass}__header__row2`}>
           {!hqrError && <h1 className="host-name">{hostName}</h1>}
           <Button
-            variant="brand-inverse-icon"
             onClick={() => {
               browserHistory.push(fullReportPath);
             }}
-            iconStroke
           >
-            <>
-              View data for all hosts
-              <Icon name="chevron-right" color="core-fleet-green" />
-            </>
+            View report for all hosts
           </Button>
         </div>
       </div>

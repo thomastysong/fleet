@@ -88,8 +88,17 @@ export const LOGGING_TYPE_OPTIONS = [
 
 export const MAX_OSQUERY_SCHEDULED_QUERY_INTERVAL = 604800;
 
+// Max character length for most user-supplied free-text fields (name, title,
+// description) — matches the varchar(255) column shared across policies,
+// reports, teams (fleets), labels, software categories, custom variables,
+// certificate authorities, etc. Use on any `InputField` bound to such a
+// column: `inputOptions={{ maxLength: MAX_ENTITY_CHAR_LENGTH }}`.
+export const MAX_ENTITY_CHAR_LENGTH = 255;
+
 export const MIN_OSQUERY_VERSION_OPTIONS = [
   { label: "All", value: "" },
+  { label: "5.23.1 +", value: "5.23.1" },
+  { label: "5.23.0 +", value: "5.23.0" },
   { label: "5.22.1 +", value: "5.22.1" },
   { label: "5.21.0 +", value: "5.21.0" },
   { label: "5.20.0 +", value: "5.20.0" },
@@ -337,13 +346,23 @@ export const SCHEDULE_PLATFORM_DROPDOWN_OPTIONS = [
 ] as const;
 
 export const HOSTS_SEARCH_BOX_PLACEHOLDER =
-  "Search name, user email, hostname, UUID, serial number, or private IP address";
+  "Search name, user email, hostname, UUID, serial number, or IP address";
 
-export const HOSTS_SEARCH_BOX_TOOLTIP =
-  "Search hosts by name, user email, hostname, UUID, serial number, or private IP address";
+export const HOSTS_SEARCH_BOX_TOOLTIP = (
+  <>
+    Search hosts by name, user email, hostname,
+    <br />
+    UUID, serial number, or IP address.
+  </>
+);
 
-export const VULNERABILITIES_SEARCH_BOX_TOOLTIP =
-  'To search for an exact CVE, surround the string in double quotes (e.g. "CVE-2024-1234")';
+export const VULNERABILITIES_SEARCH_BOX_TOOLTIP = (
+  <>
+    To search for an exact CVE, surround the string
+    <br />
+    in double quotes (e.g. &quot;CVE-2024-1234&quot;).
+  </>
+);
 
 // Keys from API
 export const MDM_STATUS_TOOLTIP: Record<
@@ -352,26 +371,29 @@ export const MDM_STATUS_TOOLTIP: Record<
 > = {
   "On (automatic)": (
     <span>
-      MDM was turned on automatically. IT admins can block end users from
-      turning MDM off.
+      MDM was turned on automatically (Apple ADE, Windows Autopilot, or
+      fully-managed Android). IT admins can block end users from turning MDM
+      off.
     </span>
   ),
   "On (manual)": (
-    <span>MDM was turned on manually. End users can turn MDM off.</span>
-  ),
-  "On (personal)": (
     <span>
-      MDM was turned on by signing in with Managed Apple Account on iPhone/iPad,
-      or by creating a work profile on Android. End users can turn MDM off.
+      Enrolled with a manual enrollment profile as a company-owned device. IT
+      admins can wipe this device and enforce all MDM restrictions.
+    </span>
+  ),
+  "On (manual - personal)": (
+    <span>
+      Enrolled with a manual enrollment profile as a personal (BYOD) device. IT
+      admins cannot wipe this device or lock the end user out.
     </span>
   ),
   "On (company-owned)": null,
   Off: undefined, // no tooltip specified
   Pending: (
     <span>
-      Hosts ordered via Apple Business Manager <br /> (ABM). These will
-      automatically enroll to Fleet <br /> and turn on MDM when they&apos;re
-      unboxed.
+      Hosts ordered via Apple Business (AB). These will automatically enroll to
+      Fleet and turn on MDM when they&apos;re unboxed.
     </span>
   ),
 };
@@ -414,10 +436,13 @@ export const HOST_SUMMARY_DATA: (keyof IHost)[] = [
   "issues",
   "platform",
   "detail_updated_at",
+  "policy_updated_at",
   "team_name",
   "display_name", // Not rendered on my device page
   "maintenance_window", // Not rendered on my device page
   "os_version",
+  "mdm",
+  "last_mdm_checked_in_at",
 ];
 
 export const HOST_VITALS_DATA = [
@@ -425,6 +450,7 @@ export const HOST_VITALS_DATA = [
   "uptime",
   "last_enrolled_at",
   "hardware_model",
+  "hardware_marketing_name",
   "hardware_serial",
   "primary_ip",
   "public_ip",
@@ -446,6 +472,24 @@ export const HOST_VITALS_DATA = [
   "cpu_type",
   "os_version",
   "timezone",
+  "mdm_enrollment_hardware_attested",
+  "primary_mac",
+  // Android-only vitals. Absent for every other platform, so they're simply
+  // dropped by the pick rather than needing a platform check here.
+  "adb_enabled",
+  "passcode_protected",
+  "play_protect_enabled",
+  "encryption_type",
+  "manufacturer",
+  "security_update_version",
+  "device_kernel_version",
+  "bootloader_version",
+  "system_update_status",
+  "security_posture",
+  "imei",
+  "meid",
+  "api_level",
+  "telephony_infos",
 ];
 
 export const HOST_OSQUERY_DATA = [

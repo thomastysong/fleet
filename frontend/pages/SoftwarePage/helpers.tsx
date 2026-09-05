@@ -15,6 +15,9 @@ import {
   ISoftwarePackage,
   IAppStoreApp,
   ISoftwareTitle,
+  ISoftwareInstallPolicyUI,
+  ISoftwareInstallPolicy,
+  SoftwareInstallPolicyTypeSet,
 } from "interfaces/software";
 import { IDropdownOption } from "interfaces/dropdownOption";
 
@@ -75,11 +78,12 @@ export const getInstallType = (
 
 // Used in EditSoftwareModal and PackageForm
 export const getTargetType = (
-  softwareInstaller: ISoftwarePackage | IAppStoreApp
+  softwareInstaller?: ISoftwarePackage | IAppStoreApp
 ) => {
   if (!softwareInstaller) return "All hosts";
 
   return !softwareInstaller.labels_include_any &&
+    !softwareInstaller.labels_include_all &&
     !softwareInstaller.labels_exclude_any
     ? "All hosts"
     : "Custom";
@@ -87,30 +91,39 @@ export const getTargetType = (
 
 // Used in EditSoftwareModal and PackageForm
 export const getCustomTarget = (
-  softwareInstaller: ISoftwarePackage | IAppStoreApp
+  softwareInstaller?: ISoftwarePackage | IAppStoreApp
 ) => {
   if (!softwareInstaller) return "labelsIncludeAny";
 
-  return softwareInstaller.labels_include_any
-    ? "labelsIncludeAny"
-    : "labelsExcludeAny";
+  if (softwareInstaller.labels_include_any) return "labelsIncludeAny";
+  if (softwareInstaller.labels_include_all) return "labelsIncludeAll";
+  return "labelsExcludeAny";
 };
 
 // Used in EditSoftwareModal and PackageForm
 export const generateSelectedLabels = (
-  softwareInstaller: ISoftwarePackage | IAppStoreApp
+  softwareInstaller?: ISoftwarePackage | IAppStoreApp
 ) => {
   if (
     !softwareInstaller ||
     (!softwareInstaller.labels_include_any &&
+      !softwareInstaller.labels_include_all &&
       !softwareInstaller.labels_exclude_any)
   ) {
     return {};
   }
 
-  const customTypeKey = softwareInstaller.labels_include_any
-    ? "labels_include_any"
-    : "labels_exclude_any";
+  let customTypeKey:
+    | "labels_include_any"
+    | "labels_include_all"
+    | "labels_exclude_any";
+  if (softwareInstaller.labels_include_any) {
+    customTypeKey = "labels_include_any";
+  } else if (softwareInstaller.labels_include_all) {
+    customTypeKey = "labels_include_all";
+  } else {
+    customTypeKey = "labels_exclude_any";
+  }
 
   return (
     softwareInstaller[customTypeKey]?.reduce<Record<string, boolean>>(
@@ -142,7 +155,21 @@ export const generateHelpText = (
     );
   }
 
-  // this is the case for labelsExcludeAny
+  if (customTarget === "labelsIncludeAll") {
+    return !automaticInstall ? (
+      <>
+        Software will only be available for install on hosts that{" "}
+        <b>have all</b> of these labels:
+      </>
+    ) : (
+      <>
+        Software will only be installed on hosts that <b>have all</b> of these
+        labels:
+      </>
+    );
+  }
+
+  // labelsExcludeAny
   return !automaticInstall ? (
     <>
       Software will only be available for install on hosts that{" "}
@@ -161,11 +188,34 @@ export const CUSTOM_TARGET_OPTIONS: IDropdownOption[] = [
   {
     value: "labelsIncludeAny",
     label: "Include any",
+    helpText: (
+      <>
+        Software will only be available for install on hosts that{" "}
+        <strong>have any</strong> of these labels.
+      </>
+    ),
+    disabled: false,
+  },
+  {
+    value: "labelsIncludeAll",
+    label: "Include all",
+    helpText: (
+      <>
+        Software will only be available for install on hosts that{" "}
+        <strong>have all</strong> of these labels.
+      </>
+    ),
     disabled: false,
   },
   {
     value: "labelsExcludeAny",
     label: "Exclude any",
+    helpText: (
+      <>
+        Software will only be available for install on hosts that{" "}
+        <strong>don&apos;t have any</strong> of these labels.
+      </>
+    ),
     disabled: false,
   },
 ];
@@ -185,11 +235,11 @@ export const getSelfServiceTooltip = (
   if (isIosOrIpadosApp)
     return (
       <>
-        End users can install from self-service.
+        End users can install from self service.
         <br />
         <CustomLink
           newTab
-          text="Learn how to deploy self-service"
+          text="Learn how to deploy self service"
           variant="tooltip-link"
           url={`${LEARN_MORE_ABOUT_BASE_LINK}/deploy-self-service-to-ios`}
         />
@@ -199,7 +249,7 @@ export const getSelfServiceTooltip = (
   return (
     <>
       End users can install from <br />
-      <strong>Fleet Desktop</strong> &gt; <strong>Self-service</strong>. <br />
+      <strong>Fleet Desktop</strong> &gt; <strong>Self service</strong>. <br />
       <CustomLink
         newTab
         text="Learn more"
@@ -272,12 +322,13 @@ export const getDisplayedSoftwareName = (
   name?: string | null,
   display_name?: string | null
 ): string => {
-  // 1. End-user custom name always wins.
-  if (display_name) {
+  // 1. End-user custom name always wins. Treat whitespace-only as absent so
+  // an inadvertent " " from the backend doesn't render a blank label.
+  if (display_name?.trim()) {
     return display_name;
   }
 
-  if (name) {
+  if (name?.trim()) {
     // 2. Normalize known titles only from the raw name.
     const key = name.toLowerCase();
     if (WELL_KNOWN_SOFTWARE_TITLES[key]) {
@@ -293,3 +344,40 @@ export const getDisplayedSoftwareName = (
 export const isAndroidWebApp = (androidPlayStoreId?: string) =>
   !!androidPlayStoreId &&
   androidPlayStoreId.startsWith("com.google.enterprise.webapp");
+export interface MergePoliciesParams {
+  automaticInstallPolicies:
+    | ISoftwarePackage["automatic_install_policies"]
+    | null
+    | undefined;
+  patchPolicy: ISoftwarePackage["patch_policy"] | null | undefined;
+}
+
+export const mergePolicies = ({
+  automaticInstallPolicies,
+  patchPolicy,
+}: MergePoliciesParams): ISoftwareInstallPolicyUI[] => {
+  // Each entry's `type` Set is rebuilt rather than mutated, so two calls on the
+  // same input return independent results — safe to memoize or freeze.
+  const byId = new Map<number, ISoftwareInstallPolicyUI>();
+
+  (automaticInstallPolicies ?? []).forEach((installPolicy) => {
+    byId.set(installPolicy.id, {
+      ...installPolicy,
+      type: new Set(["dynamic"]),
+    });
+  });
+
+  if (patchPolicy) {
+    const existing = byId.get(patchPolicy.id);
+    const typeSet: SoftwareInstallPolicyTypeSet = existing
+      ? new Set([...existing.type, "patch"])
+      : new Set(["patch"]);
+    byId.set(patchPolicy.id, {
+      id: patchPolicy.id,
+      name: patchPolicy.name,
+      type: typeSet,
+    });
+  }
+
+  return Array.from(byId.values());
+};

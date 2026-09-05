@@ -19,11 +19,14 @@ interface IPlatformTabsProps {
   currentTeamId: number;
   defaultMacOSVersion: string;
   defaultMacOSDeadline: string;
+  defaultMacOSDeadlineDays: string;
   defaultMacOSUpdateNewHosts: boolean;
   defaultIOSVersion: string;
   defaultIOSDeadline: string;
+  defaultIOSDeadlineDays: string;
   defaultIPadOSVersion: string;
   defaultIPadOSDeadline: string;
+  defaultIPadOSDeadlineDays: string;
   defaultWindowsDeadlineDays: string;
   defaultWindowsGracePeriodDays: string;
   selectedPlatform: OSUpdatesTargetPlatform;
@@ -37,11 +40,14 @@ interface IPlatformTabsProps {
 const PlatformTabs = ({
   currentTeamId,
   defaultMacOSDeadline,
+  defaultMacOSDeadlineDays,
   defaultMacOSVersion,
   defaultMacOSUpdateNewHosts,
   defaultIOSDeadline,
+  defaultIOSDeadlineDays,
   defaultIOSVersion,
   defaultIPadOSDeadline,
+  defaultIPadOSDeadlineDays,
   defaultIPadOSVersion,
   defaultWindowsDeadlineDays,
   defaultWindowsGracePeriodDays,
@@ -67,6 +73,13 @@ const PlatformTabs = ({
     onSelectPlatform(platformByIndex[index]);
   };
 
+  // A platform is considered "configured" when it has a minimum version
+  // (Apple) or deadline days (Windows) set.
+  const isMacOSConfigured = !!defaultMacOSVersion;
+  const isWindowsConfigured = !!defaultWindowsDeadlineDays;
+  const isIOSConfigured = !!defaultIOSVersion;
+  const isIPadOSConfigured = !!defaultIPadOSVersion;
+
   return (
     <div className={baseClass}>
       <TabNav secondary>
@@ -76,18 +89,18 @@ const PlatformTabs = ({
         >
           <TabList>
             <Tab key="macOS" data-text="macOS">
-              <TabText>macOS</TabText>
+              <TabText showCheck={isMacOSConfigured}>macOS</TabText>
             </Tab>
             {isWindowsMdmEnabled && (
               <Tab key="Windows" data-text="Windows">
-                <TabText>Windows</TabText>
+                <TabText showCheck={isWindowsConfigured}>Windows</TabText>
               </Tab>
             )}
             <Tab key="iOS" data-text="iOS">
-              <TabText>iOS</TabText>
+              <TabText showCheck={isIOSConfigured}>iOS</TabText>
             </Tab>
             <Tab key="iPadOS" data-text="iPadOS">
-              <TabText>iPadOS</TabText>
+              <TabText showCheck={isIPadOSConfigured}>iPadOS</TabText>
             </Tab>
             {isAndroidMdmEnabled && (
               <Tab key="Android" data-text="Android">
@@ -101,6 +114,7 @@ const PlatformTabs = ({
               applePlatform="darwin"
               defaultMinOsVersion={defaultMacOSVersion}
               defaultDeadline={defaultMacOSDeadline}
+              defaultDeadlineDays={defaultMacOSDeadlineDays}
               defaultUpdateNewHosts={defaultMacOSUpdateNewHosts}
               key={currentTeamId}
               refetchAppConfig={refetchAppConfig}
@@ -135,6 +149,7 @@ const PlatformTabs = ({
               applePlatform="ios"
               defaultMinOsVersion={defaultIOSVersion}
               defaultDeadline={defaultIOSDeadline}
+              defaultDeadlineDays={defaultIOSDeadlineDays}
               key={currentTeamId}
               refetchAppConfig={refetchAppConfig}
               refetchTeamConfig={refetchTeamConfig}
@@ -151,6 +166,7 @@ const PlatformTabs = ({
               applePlatform="ipados"
               defaultMinOsVersion={defaultIPadOSVersion}
               defaultDeadline={defaultIPadOSDeadline}
+              defaultDeadlineDays={defaultIPadOSDeadlineDays}
               key={currentTeamId}
               refetchAppConfig={refetchAppConfig}
               refetchTeamConfig={refetchTeamConfig}

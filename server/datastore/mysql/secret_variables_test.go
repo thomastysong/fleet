@@ -1,13 +1,23 @@
 package mysql
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/fleetdm/fleet/v4/pkg/optjson"
 	"github.com/fleetdm/fleet/v4/server/fleet"
+	"github.com/fleetdm/fleet/v4/server/mdm/apple/psso/regtoken"
 	"github.com/fleetdm/fleet/v4/server/ptr"
+	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -39,11 +49,13 @@ func TestSecretVariables(t *testing.T) {
 func testUpsertSecretVariables(t *testing.T, ds *Datastore) {
 	ctx := t.Context()
 
-	err := ds.UpsertSecretVariables(ctx, nil)
-	assert.NoError(t, err)
+	createdNames, updatedNames, err := ds.UpsertSecretVariables(ctx, nil)
+	require.NoError(t, err)
+	require.Empty(t, createdNames)
+	require.Empty(t, updatedNames)
 	results, err := ds.GetSecretVariables(ctx, nil)
-	assert.NoError(t, err)
-	assert.Empty(t, results)
+	require.NoError(t, err)
+	require.Empty(t, results)
 
 	secretMap := map[string]string{
 		"test1": "testValue1",
@@ -58,43 +70,50 @@ func testUpsertSecretVariables(t *testing.T, ds *Datastore) {
 		return secrets
 	}
 	secrets := createExpectedSecrets()
-	err = ds.UpsertSecretVariables(ctx, secrets)
-	assert.NoError(t, err)
+	createdNames, updatedNames, err = ds.UpsertSecretVariables(ctx, secrets)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"test1", "test2", "test3"}, createdNames)
+	require.Empty(t, updatedNames)
 
 	results, err = ds.GetSecretVariables(ctx, []string{"test1", "test2", "test3"})
-	assert.NoError(t, err)
-	assert.Len(t, results, 3)
+	require.NoError(t, err)
+	require.Len(t, results, 3)
 	for _, result := range results {
-		assert.Equal(t, secretMap[result.Name], result.Value)
+		require.Equal(t, secretMap[result.Name], result.Value)
 	}
 
 	// Update a secret and insert a new one
 	secretMap["test2"] = "newTestValue2"
 	secretMap["test4"] = "testValue4"
-	err = ds.UpsertSecretVariables(ctx, []fleet.SecretVariable{
+	createdNames, updatedNames, err = ds.UpsertSecretVariables(ctx, []fleet.SecretVariable{
 		{Name: "test2", Value: secretMap["test2"]},
 		{Name: "test4", Value: secretMap["test4"]},
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"test4"}, createdNames)
+	require.ElementsMatch(t, []string{"test2"}, updatedNames)
 	results, err = ds.GetSecretVariables(ctx, []string{"test2", "test4"})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	require.Len(t, results, 2)
 	for _, result := range results {
-		assert.Equal(t, secretMap[result.Name], result.Value)
+		require.Equal(t, secretMap[result.Name], result.Value)
 	}
 
-	// Make sure updated_at timestamp does not change when we update a secret with the same value
+	// Make sure updated_at timestamp does not change when we update a secret with the same value,
+	// and that an unchanged value produces neither a created nor an updated result.
 	original, err := ds.GetSecretVariables(ctx, []string{"test1"})
 	require.NoError(t, err)
 	require.Len(t, original, 1)
-	err = ds.UpsertSecretVariables(ctx, []fleet.SecretVariable{
+	createdNames, updatedNames, err = ds.UpsertSecretVariables(ctx, []fleet.SecretVariable{
 		{Name: "test1", Value: secretMap["test1"]},
 	})
 	require.NoError(t, err)
+	require.Empty(t, createdNames)
+	require.Empty(t, updatedNames)
 	updated, err := ds.GetSecretVariables(ctx, []string{"test1"})
 	require.NoError(t, err)
-	require.Len(t, original, 1)
-	assert.Equal(t, original[0], updated[0])
+	require.Len(t, updated, 1)
+	require.Equal(t, original[0], updated[0])
 }
 
 func testValidateEmbeddedSecrets(t *testing.T, ds *Datastore) {
@@ -124,7 +143,7 @@ Hello doc${FLEET_SECRET_INVALID}. $FLEET_SECRET_ALSO_INVALID
 		secrets = append(secrets, fleet.SecretVariable{Name: name, Value: value})
 	}
 
-	err := ds.UpsertSecretVariables(ctx, secrets)
+	_, _, err := ds.UpsertSecretVariables(ctx, secrets)
 	require.NoError(t, err)
 
 	err = ds.ValidateEmbeddedSecrets(ctx, []string{noSecrets})
@@ -165,7 +184,9 @@ This document contains a secret not stored in the database.
 Hello doc${FLEET_SECRET_INVALID}. $FLEET_SECRET_ALSO_INVALID
 `
 
-	xmlValidSecret := `<?xml>${FLEET_SECRET_VALID_XML}</xml>` //nolint:gosec // G101: test fixture, not a credential
+	xmlValidSecret := `<?xml>${FLEET_SECRET_VALID_XML}</xml>`                  //nolint:gosec // G101: test fixture, not a credential
+	jsonValidSecret := `{"pwd":"${FLEET_SECRET_VALID_JSON}"}`                  //nolint:gosec // G101: test fixture, not a credential
+	jsonValidSecretWhitespace := "\n  " + `{"pwd":"$FLEET_SECRET_VALID_JSON"}` //nolint:gosec // G101: test fixture, not a credential
 
 	ctx := t.Context()
 
@@ -173,6 +194,7 @@ Hello doc${FLEET_SECRET_INVALID}. $FLEET_SECRET_ALSO_INVALID
 		"VALID":      "testValue1",
 		"ALSO_VALID": "testValue2",
 		"VALID_XML":  "<tag>value & more</tag>",
+		"VALID_JSON": `p"<&'\d`,
 	}
 
 	secrets := make([]fleet.SecretVariable, 0, len(secretMap))
@@ -180,7 +202,7 @@ Hello doc${FLEET_SECRET_INVALID}. $FLEET_SECRET_ALSO_INVALID
 		secrets = append(secrets, fleet.SecretVariable{Name: name, Value: value})
 	}
 
-	err := ds.UpsertSecretVariables(ctx, secrets)
+	_, _, err := ds.UpsertSecretVariables(ctx, secrets)
 	require.NoError(t, err)
 
 	expanded, err := ds.ExpandEmbeddedSecrets(ctx, noSecrets)
@@ -207,6 +229,19 @@ Hello doc${FLEET_SECRET_INVALID}. $FLEET_SECRET_ALSO_INVALID
 	require.NoError(t, err)
 	expectedXMLExpansion := `<?xml>&lt;tag&gt;value &amp; more&lt;/tag&gt;</xml>`
 	require.Equal(t, expectedXMLExpansion, expanded)
+
+	// JSON documents get JSON-escaped secret values so the result remains valid JSON.
+	expanded, err = ds.ExpandEmbeddedSecrets(ctx, jsonValidSecret)
+	require.NoError(t, err)
+	var parsed map[string]string
+	require.NoError(t, json.Unmarshal([]byte(expanded), &parsed))
+	require.Equal(t, `p"<&'\d`, parsed["pwd"])
+
+	// Leading whitespace before the opening brace should still be detected as JSON.
+	expanded, err = ds.ExpandEmbeddedSecrets(ctx, jsonValidSecretWhitespace)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(expanded)), &parsed))
+	require.Equal(t, `p"<&'\d`, parsed["pwd"])
 }
 
 func testExpandHostSecrets(t *testing.T, ds *Datastore) {
@@ -240,7 +275,7 @@ func testExpandHostSecrets(t *testing.T, ds *Datastore) {
 	})
 
 	t.Run("expand recovery lock password", func(t *testing.T) {
-		doc := `<dict><key>NewPassword</key><string>$FLEET_HOST_SECRET_RECOVERY_LOCK_PASSWORD</string></dict>`
+		doc := `<dict><key>NewPassword</key><string>$FLEET_HOST_SECRET_RECOVERY_LOCK_PENDING_PASSWORD</string></dict>`
 		expected := `<dict><key>NewPassword</key><string>TEST-PASS-1234</string></dict>`
 		expanded, err := ds.ExpandHostSecrets(ctx, doc, host.UUID)
 		require.NoError(t, err)
@@ -248,7 +283,7 @@ func testExpandHostSecrets(t *testing.T, ds *Datastore) {
 	})
 
 	t.Run("expand with braces syntax", func(t *testing.T) {
-		doc := `Password: ${FLEET_HOST_SECRET_RECOVERY_LOCK_PASSWORD}`
+		doc := `Password: ${FLEET_HOST_SECRET_RECOVERY_LOCK_PENDING_PASSWORD}`
 		expected := `Password: TEST-PASS-1234`
 		expanded, err := ds.ExpandHostSecrets(ctx, doc, host.UUID)
 		require.NoError(t, err)
@@ -310,17 +345,90 @@ func testExpandHostSecrets(t *testing.T, ds *Datastore) {
 		require.NoError(t, err)
 
 		// When expanded in an XML document, special characters should be escaped
-		doc := `<dict><key>NewPassword</key><string>$FLEET_HOST_SECRET_RECOVERY_LOCK_PASSWORD</string></dict>`
+		doc := `<dict><key>NewPassword</key><string>$FLEET_HOST_SECRET_RECOVERY_LOCK_PENDING_PASSWORD</string></dict>`
 		expected := `<dict><key>NewPassword</key><string>Pass&amp;word&lt;with&gt;special&#34;chars&#39;</string></dict>`
 		expanded, err := ds.ExpandHostSecrets(ctx, doc, hostXML.UUID)
 		require.NoError(t, err)
 		assert.Equal(t, expected, expanded)
 
 		// Non-XML documents should not escape the characters
-		docNonXML := `Password: $FLEET_HOST_SECRET_RECOVERY_LOCK_PASSWORD`
+		docNonXML := `Password: $FLEET_HOST_SECRET_RECOVERY_LOCK_PENDING_PASSWORD`
 		expandedNonXML, err := ds.ExpandHostSecrets(ctx, docNonXML, hostXML.UUID)
 		require.NoError(t, err)
 		assert.Equal(t, `Password: Pass&word<with>special"chars'`, expandedNonXML)
+	})
+
+	t.Run("mdm unlock token expansion", func(t *testing.T) {
+		// Create a host with an MDM unlock token
+		hostMDM, err := ds.NewHost(ctx, &fleet.Host{
+			DetailUpdatedAt: time.Now(),
+			LabelUpdatedAt:  time.Now(),
+			PolicyUpdatedAt: time.Now(),
+			SeenTime:        time.Now(),
+			OsqueryHostID:   ptr.String("host-mdm-unlock-token-test"),
+			NodeKey:         ptr.String("host-mdm-unlock-token-test-key"),
+			UUID:            "host-mdm-unlock-token-test-uuid",
+			Hostname:        "host-mdm-unlock-token-test-hostname",
+			Platform:        "ios",
+		})
+		require.NoError(t, err)
+
+		unlockToken := "TEST-MDM-UNLOCK-TOKEN" // nolint:gosec // G101: this is a constant identifier, not a credential
+		ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
+			_, err := q.ExecContext(ctx, `INSERT INTO nano_devices (id, unlock_token, authenticate, platform) VALUES (?, ?, 'fake-auth', 'ios')`, hostMDM.UUID, unlockToken)
+			require.NoError(t, err)
+			_, err = q.ExecContext(ctx, `INSERT INTO nano_enrollments (id, device_id, type, topic, push_magic, token_hex, last_seen_at) VALUES (?, ?, 'Device', 'fake-topic', 'fake-push-magic', 'fake-token-hex', NOW())`, hostMDM.UUID, hostMDM.UUID)
+			return err
+		})
+
+		b64Encoded := base64.StdEncoding.EncodeToString([]byte(unlockToken))
+		doc := `<string>$FLEET_HOST_SECRET_MDM_UNLOCK_TOKEN</string>`
+		expected := `<string>` + b64Encoded + `</string>`
+		expanded, err := ds.ExpandHostSecrets(ctx, doc, hostMDM.UUID)
+		require.NoError(t, err)
+		assert.Equal(t, expected, expanded)
+	})
+
+	t.Run("psso device registration token minting", func(t *testing.T) {
+		hostPSSO, err := ds.NewHost(ctx, &fleet.Host{
+			DetailUpdatedAt: time.Now(),
+			LabelUpdatedAt:  time.Now(),
+			PolicyUpdatedAt: time.Now(),
+			SeenTime:        time.Now(),
+			OsqueryHostID:   new("host-psso-regtoken-test"),
+			NodeKey:         new("host-psso-regtoken-test-key"),
+			UUID:            "host-psso-regtoken-test-uuid",
+			Hostname:        "host-psso-regtoken-test-hostname",
+			Platform:        "darwin",
+		})
+		require.NoError(t, err)
+
+		doc := `<string>$FLEET_HOST_SECRET_PSSO_DEVICE_REGISTRATION_TOKEN</string>`
+
+		// Without the PSSO signing key asset configured, minting must fail rather
+		// than emit an empty/garbage token.
+		_, err = ds.ExpandHostSecrets(ctx, doc, hostPSSO.UUID)
+		require.Error(t, err)
+
+		signingKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		require.NoError(t, err)
+		der, err := x509.MarshalECPrivateKey(signingKey)
+		require.NoError(t, err)
+		keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+		err = ds.InsertMDMConfigAssets(ctx, []fleet.MDMConfigAsset{
+			{Name: fleet.MDMAssetPSSOSigningKey, Value: keyPEM},
+		}, nil)
+		require.NoError(t, err)
+
+		expanded, err := ds.ExpandHostSecrets(ctx, doc, hostPSSO.UUID)
+		require.NoError(t, err)
+		require.NotContains(t, expanded, "FLEET_HOST_SECRET")
+
+		// The expanded value is a Fleet-signed JWT bound to this host's UUID.
+		token := strings.TrimSuffix(strings.TrimPrefix(expanded, "<string>"), "</string>")
+		sub, err := regtoken.Validate(token, &signingKey.PublicKey, time.Now())
+		require.NoError(t, err)
+		require.Equal(t, hostPSSO.UUID, sub)
 	})
 }
 
@@ -385,9 +493,11 @@ func testListSecretVariables(t *testing.T, ds *Datastore) {
 		})
 		require.Equal(t, id1, secrets[0].ID)
 		require.Equal(t, name1, secrets[0].Name)
+		require.NotEmpty(t, secrets[0].CreatedAt)
 		require.NotZero(t, secrets[0].UpdatedAt)
 		require.Equal(t, id2, secrets[1].ID)
 		require.Equal(t, name2, secrets[1].Name)
+		require.NotEmpty(t, secrets[1].CreatedAt)
 		require.NotZero(t, secrets[1].UpdatedAt)
 
 		_, err = ds.DeleteSecretVariable(ctx, id1)
@@ -585,7 +695,7 @@ func testDeleteUsedSecretVariable(t *testing.T, ds *Datastore) {
 			Identifier: "decl-1",
 			Name:       "decl-1",
 			RawJSON:    json.RawMessage(`{"Identifier": "${FLEET_SECRET_FOOBAR}"}`),
-		})
+		}, nil)
 		require.NoError(t, err)
 
 		// Attempt to delete the variable, should fail.
@@ -607,7 +717,7 @@ func testDeleteUsedSecretVariable(t *testing.T, ds *Datastore) {
 			Name:       "decl-1",
 			RawJSON:    json.RawMessage(`{"Identifier": "${FLEET_SECRET_FOOBAR}"}`),
 			TeamID:     &foobarTeam.ID,
-		})
+		}, nil)
 		require.NoError(t, err)
 
 		// Attempt to delete the variable, should fail.
@@ -709,6 +819,46 @@ func testDeleteUsedSecretVariable(t *testing.T, ds *Datastore) {
 
 		err = ds.DeleteScript(ctx, script.ID)
 		require.NoError(t, err)
+	})
+
+	t.Run("host name templates", func(t *testing.T) {
+		// Set a team host name template that uses the variable.
+		foobarTeam.Config.MDM.HostNameTemplate = "iPad $FLEET_SECRET_FOOBAR"
+		_, err := ds.SaveTeam(ctx, foobarTeam)
+		require.NoError(t, err)
+
+		// Attempt to delete the variable, should fail.
+		_, err = ds.DeleteSecretVariable(ctx, id)
+		require.Error(t, err)
+		s := &fleet.SecretUsedError{}
+		require.ErrorAs(t, err, &s)
+		require.Equal(t, "FOOBAR", s.SecretName)
+		require.Equal(t, "host_name_template", s.Entity.Type)
+		require.Equal(t, "Foobar", s.Entity.TeamName)
+
+		// Clear the team template.
+		foobarTeam.Config.MDM.HostNameTemplate = ""
+		_, err = ds.SaveTeam(ctx, foobarTeam)
+		require.NoError(t, err)
+
+		// Set an "Unassigned" (global) host name template that uses the variable.
+		ac, err := ds.AppConfig(ctx)
+		require.NoError(t, err)
+		ac.MDM.HostNameTemplate = optjson.SetString("iPad ${FLEET_SECRET_FOOBAR}")
+		require.NoError(t, ds.SaveAppConfig(ctx, ac))
+
+		// Attempt to delete the variable, should fail.
+		_, err = ds.DeleteSecretVariable(ctx, id)
+		require.Error(t, err)
+		s = &fleet.SecretUsedError{}
+		require.ErrorAs(t, err, &s)
+		require.Equal(t, "FOOBAR", s.SecretName)
+		require.Equal(t, "host_name_template", s.Entity.Type)
+		require.Equal(t, "Unassigned", s.Entity.TeamName)
+
+		// Clear the "Unassigned" template.
+		ac.MDM.HostNameTemplate = optjson.SetString("")
+		require.NoError(t, ds.SaveAppConfig(ctx, ac))
 	})
 
 	// Finally attempt to delete the secret again now that no entity is using it.

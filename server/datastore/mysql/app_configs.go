@@ -59,6 +59,24 @@ func appConfigDB(ctx context.Context, q sqlx.QueryerContext) (*fleet.AppConfig, 
 	return info, nil
 }
 
+func (ds *Datastore) AppConfigUrls(ctx context.Context) (*fleet.AppConfigUrls, error) {
+	info := &fleet.AppConfigUrls{}
+	var bytes []byte
+	err := sqlx.GetContext(ctx, ds.reader(ctx), &bytes, `SELECT json_value FROM app_config_json LIMIT 1`)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, ctxerr.Wrap(ctx, err, "selecting app config urls")
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return &fleet.AppConfigUrls{}, nil
+	}
+
+	err = json.Unmarshal(bytes, info)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "unmarshaling config urls")
+	}
+	return info, nil
+}
+
 func (ds *Datastore) SaveAppConfig(ctx context.Context, info *fleet.AppConfig) error {
 	return ds.withTx(ctx, func(tx sqlx.ExtContext) error {
 		configBytes, err := json.Marshal(info)
@@ -117,6 +135,10 @@ func (ds *Datastore) SetAndroidEnabledAndConfigured(ctx context.Context, configu
 }
 
 func (ds *Datastore) VerifyEnrollSecret(ctx context.Context, secret string) (*fleet.EnrollSecret, error) {
+	if strings.TrimSpace(secret) == "" {
+		return nil, ctxerr.Wrap(ctx, notFound("EnrollSecret"), "no matching secret found")
+	}
+
 	var s fleet.EnrollSecret
 	err := sqlx.GetContext(ctx, ds.reader(ctx), &s, "SELECT team_id FROM enroll_secrets WHERE secret = ?", secret)
 	if err != nil {
@@ -290,19 +312,13 @@ func (ds *Datastore) GetConfigEnableDiskEncryption(ctx context.Context, teamID *
 		if err != nil {
 			return fleet.DiskEncryptionConfig{}, err
 		}
-		return fleet.DiskEncryptionConfig{
-			Enabled:              tc.EnableDiskEncryption,
-			BitLockerPINRequired: tc.RequireBitLockerPIN,
-		}, nil
+		return tc.DiskEncryptionConfig(), nil
 	}
 	ac, err := ds.AppConfig(ctx)
 	if err != nil {
 		return fleet.DiskEncryptionConfig{}, err
 	}
-	return fleet.DiskEncryptionConfig{
-		Enabled:              ac.MDM.EnableDiskEncryption.Value,
-		BitLockerPINRequired: ac.MDM.RequireBitLockerPIN.Value,
-	}, nil
+	return ac.MDM.DiskEncryptionConfig(), nil
 }
 
 func (ds *Datastore) ApplyYaraRules(ctx context.Context, rules []fleet.YaraRule) error {

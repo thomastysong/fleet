@@ -110,6 +110,26 @@ describe("compareVersions", () => {
     expect(compareVersions("1.2.3 (Build 5)", "1.2.3")).toBe(0);
     expect(compareVersions("1.2.3 (build foo-bar)", "1.2.3")).toBe(0);
   });
+
+  // https://github.com/fleetdm/fleet/issues/42673
+  it('strips leading "Build " prefix (Sublime Text/Merge)', () => {
+    expect(compareVersions("Build 4200", "4200")).toBe(0);
+    expect(compareVersions("Build 2123", "2123")).toBe(0);
+    expect(compareVersions("Build 4200", "4199")).toBe(1);
+    expect(compareVersions("Build 4200", "4201")).toBe(-1);
+  });
+
+  it('strips trailing ".CE" edition suffix (MySQL Workbench)', () => {
+    expect(compareVersions("8.0.46.CE", "8.0.46")).toBe(0);
+    expect(compareVersions("8.0.46", "8.0.46.CE")).toBe(0);
+    expect(compareVersions("8.0.46.CE", "8.0.45")).toBe(1);
+  });
+
+  it('strips trailing "-latest" channel tag (Lens)', () => {
+    expect(compareVersions("2026.3.251250-latest", "2026.3.251250")).toBe(0);
+    expect(compareVersions("2026.3.251250", "2026.3.251250-latest")).toBe(0);
+    expect(compareVersions("2026.3.251250-latest", "2026.3.251249")).toBe(1);
+  });
 });
 
 describe("getUiStatus", () => {
@@ -461,10 +481,10 @@ describe("getUiStatus", () => {
 });
 
 describe("getSoftwareSubheader", () => {
-  test("iOS device, MDM status 'On (personal)', my device page", () => {
+  test("iOS device, MDM status 'On (manual - personal)', my device page", () => {
     const result = getSoftwareSubheader({
       platform: "ios",
-      hostMdmEnrollmentStatus: "On (personal)",
+      hostMdmEnrollmentStatus: "On (manual - personal)",
       isMyDevicePage: true,
     });
     expect(result).toBe(
@@ -472,10 +492,10 @@ describe("getSoftwareSubheader", () => {
     );
   });
 
-  test("iOS device, MDM status 'On (personal)', NOT my device page", () => {
+  test("iOS device, MDM status 'On (manual - personal)', NOT my device page", () => {
     const result = getSoftwareSubheader({
       platform: "ios",
-      hostMdmEnrollmentStatus: "On (personal)",
+      hostMdmEnrollmentStatus: "On (manual - personal)",
       isMyDevicePage: false,
     });
     expect(result).toBe(

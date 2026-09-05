@@ -5,7 +5,7 @@ import { getPathWithQueryParams } from "utilities/url";
 
 import { PaginationParams } from "./common";
 
-export interface IGetCommandsRequest extends PaginationParams {
+export interface IGetCommandsApiParams extends PaginationParams {
   order_key?: string;
   order_direction?: "asc" | "desc";
   host_identifier?: string;
@@ -41,7 +41,7 @@ export interface IGetHostCommandResultsQueryKey
 
 export default {
   getCommands: (
-    requestParams: IGetCommandsRequest
+    requestParams: IGetCommandsApiParams
   ): Promise<IGetCommandsResponse> => {
     const { COMMANDS } = endpoints;
     const url = getPathWithQueryParams(COMMANDS, requestParams);
@@ -64,5 +64,10 @@ export default {
     const { COMMANDS_RESULTS } = endpoints;
     const url = `${COMMANDS_RESULTS}?command_uuid=${command_uuid}&host_identifier=${host_identifier}`;
     return sendRequest("GET", url);
+  },
+
+  cancelHostCommand: (hostId: number, commandUUID: string): Promise<void> => {
+    const { HOST_CANCEL_MDM_COMMAND } = endpoints;
+    return sendRequest("DELETE", HOST_CANCEL_MDM_COMMAND(hostId, commandUUID));
   },
 };

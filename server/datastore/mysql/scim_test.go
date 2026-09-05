@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -27,8 +28,10 @@ func TestScim(t *testing.T) {
 		{"ScimUserCreateValidation", testScimUserCreateValidation},
 		{"ScimUserByID", testScimUserByID},
 		{"ScimUserByUserName", testScimUserByUserName},
+		{"ScimUserFleetUserIDLink", testScimUserFleetUserIDLink},
 		{"ScimUserByUserNameOrEmail", testScimUserByUserNameOrEmail},
 		{"ScimUserByHostID", testScimUserByHostID},
+		{"ScimUserCreateAssociatesAllMatchingHosts", testScimUserCreateAssociatesAllMatchingHosts},
 		{"ReplaceScimUser", testReplaceScimUser},
 		{"ReplaceScimUserEmails", testReplaceScimUserEmails},
 		{"ReplaceScimUserValidation", testScimUserReplaceValidation},
@@ -39,13 +42,18 @@ func TestScim(t *testing.T) {
 		{"ScimGroupByID", testScimGroupByID},
 		{"ScimGroupByDisplayName", testScimGroupByDisplayName},
 		{"ReplaceScimGroup", testReplaceScimGroup},
+		{"ApplyScimGroupPatch", testApplyScimGroupPatch},
+		{"ApplyScimGroupPatchResendOnRenameWithRemovals", testApplyScimGroupPatchResendOnRenameWithRemovals},
+		{"ApplyScimGroupPatchResendSkipsNoOps", testApplyScimGroupPatchResendSkipsNoOps},
 		{"ReplaceScimGroupValidation", testScimGroupReplaceValidation},
 		{"DeleteScimGroup", testDeleteScimGroup},
 		{"ListScimGroups", testListScimGroups},
 		{"ScimLastRequest", testScimLastRequest},
 		{"ScimUsersExist", testScimUsersExist},
+		{"ScimNestedGroups", testScimNestedGroups},
 		{"TriggerResendIdPProfiles", testTriggerResendIdPProfiles},
 		{"TriggerResendIdPProfilesOnTeam", testTriggerResendIdPProfilesOnTeam},
+		{"TriggerResendCertTemplatesAndAppConfigs", testTriggerResendCertTemplatesAndAppConfigs},
 		{"SetOrUpdateHostSCIMUserMapping", testSetOrUpdateHostSCIMUserMapping},
 	}
 	for _, c := range cases {
@@ -131,6 +139,139 @@ func testScimUserCreate(t *testing.T, ds *Datastore) {
 			assert.Equal(t, u.ID, verify.Emails[i].ScimUserID)
 		}
 	}
+}
+
+// testScimNestedGroups verifies that nested SCIM group membership (as provisioned
+// by Entra ID via group-type members) is stored and expanded transitively: a user
+// who is a direct member of a child group is an effective member of every ancestor
+// group.
+func testScimNestedGroups(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+
+	// Create a user who will be a direct member of the leaf/child group.
+	user := fleet.ScimUser{UserName: "nested-user", Emails: []fleet.ScimUserEmail{}}
+	userID, err := ds.CreateScimUser(ctx, &user)
+	require.NoError(t, err)
+
+	// child group directly contains the user.
+	child := &fleet.ScimGroup{DisplayName: "Frontend B", ScimUsers: []uint{userID}}
+	childID, err := ds.CreateScimGroup(ctx, child)
+	require.NoError(t, err)
+
+	// parent group contains the child group as a nested (group-type) member.
+	parent := &fleet.ScimGroup{DisplayName: "Engineering B", ChildGroups: []uint{childID}}
+	parentID, err := ds.CreateScimGroup(ctx, parent)
+	require.NoError(t, err)
+
+	// ScimGroupByID round-trips the nested child edge and does not confuse it with
+	// a user member.
+	gotParent, err := ds.ScimGroupByID(ctx, parentID, false)
+	require.NoError(t, err)
+	require.Empty(t, gotParent.ScimUsers)
+	require.Equal(t, []uint{childID}, gotParent.ChildGroups)
+
+	// The user is an effective member of BOTH the child and the parent group.
+	gotUser, err := ds.ScimUserByID(ctx, userID)
+	require.NoError(t, err)
+	groupIDs := make([]uint, 0, len(gotUser.Groups))
+	for _, g := range gotUser.Groups {
+		groupIDs = append(groupIDs, g.ID)
+	}
+	require.ElementsMatch(t, []uint{childID, parentID}, groupIDs)
+
+	// Add a third level: grandparent contains parent. The user should now be an
+	// effective member of all three.
+	grandparent := &fleet.ScimGroup{DisplayName: "Company B", ChildGroups: []uint{parentID}}
+	grandparentID, err := ds.CreateScimGroup(ctx, grandparent)
+	require.NoError(t, err)
+
+	gotUser, err = ds.ScimUserByID(ctx, userID)
+	require.NoError(t, err)
+	groupIDs = groupIDs[:0]
+	for _, g := range gotUser.Groups {
+		groupIDs = append(groupIDs, g.ID)
+	}
+	require.ElementsMatch(t, []uint{childID, parentID, grandparentID}, groupIDs)
+
+	// Removing the parent -> child edge via ReplaceScimGroup drops the user's
+	// effective membership in parent and grandparent, but keeps the child.
+	parent.ChildGroups = []uint{}
+	require.NoError(t, ds.ReplaceScimGroup(ctx, parent))
+
+	gotUser, err = ds.ScimUserByID(ctx, userID)
+	require.NoError(t, err)
+	groupIDs = groupIDs[:0]
+	for _, g := range gotUser.Groups {
+		groupIDs = append(groupIDs, g.ID)
+	}
+	require.ElementsMatch(t, []uint{childID}, groupIDs)
+}
+
+func testScimUserFleetUserIDLink(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+
+	role := fleet.RoleObserver
+	fleetUser, err := ds.NewUser(ctx, &fleet.User{
+		Password:   []byte("p4ssw0rd.123"),
+		Salt:       "salt",
+		Name:       "SCIM Linked",
+		Email:      "linked@example.com",
+		GlobalRole: &role,
+		SSOEnabled: true,
+	})
+	require.NoError(t, err)
+
+	otherRole := fleet.RoleObserver
+	otherFleetUser, err := ds.NewUser(ctx, &fleet.User{
+		Password:   []byte("p4ssw0rd.123"),
+		Salt:       "salt",
+		Name:       "SCIM Other",
+		Email:      "other@example.com",
+		GlobalRole: &otherRole,
+		SSOEnabled: true,
+	})
+	require.NoError(t, err)
+
+	scimID, err := ds.CreateScimUser(ctx, &fleet.ScimUser{UserName: "linked@example.com"})
+	require.NoError(t, err)
+
+	// Newly created SCIM user is unlinked.
+	got, err := ds.ScimUserByID(ctx, scimID)
+	require.NoError(t, err)
+	require.Nil(t, got.FleetUserID)
+
+	// Set the link; both accessors load it.
+	require.NoError(t, ds.SetScimUserFleetUserID(ctx, scimID, fleetUser.ID))
+
+	got, err = ds.ScimUserByID(ctx, scimID)
+	require.NoError(t, err)
+	require.NotNil(t, got.FleetUserID)
+	require.Equal(t, fleetUser.ID, *got.FleetUserID)
+
+	byName, err := ds.ScimUserByUserName(ctx, "linked@example.com")
+	require.NoError(t, err)
+	require.NotNil(t, byName.FleetUserID)
+	require.Equal(t, fleetUser.ID, *byName.FleetUserID)
+
+	// Set-once: an established link cannot be re-pointed.
+	require.NoError(t, ds.SetScimUserFleetUserID(ctx, scimID, otherFleetUser.ID))
+	got, err = ds.ScimUserByID(ctx, scimID)
+	require.NoError(t, err)
+	require.NotNil(t, got.FleetUserID)
+	require.Equal(t, fleetUser.ID, *got.FleetUserID, "an established link must not be re-pointed")
+
+	// FK ON DELETE SET NULL: deleting the Fleet user clears the link, after
+	// which a new link can be established.
+	require.NoError(t, ds.DeleteUser(ctx, fleetUser.ID))
+	got, err = ds.ScimUserByID(ctx, scimID)
+	require.NoError(t, err)
+	require.Nil(t, got.FleetUserID, "FK ON DELETE SET NULL should clear the link")
+
+	require.NoError(t, ds.SetScimUserFleetUserID(ctx, scimID, otherFleetUser.ID))
+	got, err = ds.ScimUserByID(ctx, scimID)
+	require.NoError(t, err)
+	require.NotNil(t, got.FleetUserID)
+	require.Equal(t, otherFleetUser.ID, *got.FleetUserID)
 }
 
 func testScimUserByID(t *testing.T, ds *Datastore) {
@@ -384,7 +525,7 @@ func testReplaceScimUser(t *testing.T, ds *Datastore) {
 	}
 
 	// Replace the user
-	err = ds.ReplaceScimUser(t.Context(), &updatedUser)
+	_, err = ds.ReplaceScimUser(t.Context(), &updatedUser)
 	require.Nil(t, err)
 
 	// Verify the user was updated correctly
@@ -431,7 +572,7 @@ func testReplaceScimUser(t *testing.T, ds *Datastore) {
 		Active:     ptr.Bool(true),
 	}
 
-	err = ds.ReplaceScimUser(t.Context(), &nonExistentUser)
+	_, err = ds.ReplaceScimUser(t.Context(), &nonExistentUser)
 	assert.True(t, fleet.IsNotFound(err))
 }
 
@@ -473,7 +614,7 @@ func testReplaceScimUserEmails(t *testing.T, ds *Datastore) {
 	}
 
 	// Replace the user
-	err = ds.ReplaceScimUser(t.Context(), &sameEmailsUser)
+	_, err = ds.ReplaceScimUser(t.Context(), &sameEmailsUser)
 	require.NoError(t, err)
 
 	// Verify the user was updated correctly but emails remain the same
@@ -516,7 +657,7 @@ func testReplaceScimUserEmails(t *testing.T, ds *Datastore) {
 	}
 
 	// This should fail with a validation error
-	err = ds.ReplaceScimUser(t.Context(), &multiPrimaryUser)
+	_, err = ds.ReplaceScimUser(t.Context(), &multiPrimaryUser)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "only one email can be marked as primary")
 
@@ -538,7 +679,7 @@ func testReplaceScimUserEmails(t *testing.T, ds *Datastore) {
 		},
 	}
 
-	err = ds.ReplaceScimUser(t.Context(), &userWithAllFields)
+	_, err = ds.ReplaceScimUser(t.Context(), &userWithAllFields)
 	require.NoError(t, err)
 
 	// Now create a user with the same email but with nil Primary field
@@ -559,7 +700,7 @@ func testReplaceScimUserEmails(t *testing.T, ds *Datastore) {
 	}
 
 	// This should update the emails since the Primary field changed
-	err = ds.ReplaceScimUser(t.Context(), &userWithNilPrimary)
+	_, err = ds.ReplaceScimUser(t.Context(), &userWithNilPrimary)
 	require.NoError(t, err)
 
 	// Verify the email was updated
@@ -588,7 +729,7 @@ func testReplaceScimUserEmails(t *testing.T, ds *Datastore) {
 	}
 
 	// This should update the emails since the Type field changed
-	err = ds.ReplaceScimUser(t.Context(), &userWithNilType)
+	_, err = ds.ReplaceScimUser(t.Context(), &userWithNilType)
 	require.NoError(t, err)
 
 	// Verify the email was updated
@@ -627,7 +768,7 @@ func testDeleteScimUser(t *testing.T, ds *Datastore) {
 	assert.Equal(t, user.UserName, createdUser.UserName)
 
 	// Delete the user
-	err = ds.DeleteScimUser(t.Context(), user.ID)
+	_, err = ds.DeleteScimUser(t.Context(), user.ID)
 	require.NoError(t, err)
 
 	// Verify the user was deleted
@@ -635,7 +776,7 @@ func testDeleteScimUser(t *testing.T, ds *Datastore) {
 	assert.True(t, fleet.IsNotFound(err))
 
 	// Test deleting a non-existent user
-	err = ds.DeleteScimUser(t.Context(), 99999) // Non-existent ID
+	_, err = ds.DeleteScimUser(t.Context(), 99999) // Non-existent ID
 	assert.True(t, fleet.IsNotFound(err))
 }
 
@@ -1115,6 +1256,205 @@ func testReplaceScimGroup(t *testing.T, ds *Datastore) {
 	assert.True(t, fleet.IsNotFound(err))
 }
 
+func testApplyScimGroupPatch(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+
+	users := createTestScimUsers(t, ds)
+	require.Len(t, users, 2)
+	keptUserID, removedUserID := users[0].ID, users[1].ID
+
+	addedUser := fleet.ScimUser{UserName: "patch-added-user", Emails: []fleet.ScimUserEmail{}}
+	addedUserID, err := ds.CreateScimUser(ctx, &addedUser)
+	require.NoError(t, err)
+
+	newChildGroup := func(name string) uint {
+		id, err := ds.CreateScimGroup(ctx, &fleet.ScimGroup{DisplayName: name})
+		require.NoError(t, err)
+		return id
+	}
+	keptChildID, removedChildID, addedChildID := newChildGroup("Kept Child"), newChildGroup("Removed Child"), newChildGroup("Added Child")
+
+	group := &fleet.ScimGroup{
+		DisplayName: "Patch Test Group",
+		ExternalID:  new("ext-patch-group-123"),
+		ScimUsers:   []uint{keptUserID, removedUserID},
+		ChildGroups: []uint{keptChildID, removedChildID},
+	}
+	group.ID, err = ds.CreateScimGroup(ctx, group)
+	require.NoError(t, err)
+
+	const wantExternalID = "ext-patch-group-456"
+
+	// The steps apply in order, each to the state the one before it left behind.
+	// Member slices on the group are left empty on purpose: the deltas drive the
+	// membership write.
+	steps := []struct {
+		name        string
+		displayName string
+		deltas      fleet.ScimGroupMemberDeltas
+	}{
+		{
+			name:        "deltas touch only the members they name",
+			displayName: "Patched Test Group",
+			deltas: fleet.ScimGroupMemberDeltas{
+				AddUsers:          []uint{addedUserID},
+				RemoveUsers:       []uint{removedUserID},
+				AddChildGroups:    []uint{addedChildID},
+				RemoveChildGroups: []uint{removedChildID},
+			},
+		},
+		{
+			name:        "empty deltas update the scalars and leave membership alone",
+			displayName: "Renamed Test Group",
+		},
+		{
+			name:        "re-adding a member and removing a non-member are no-ops",
+			displayName: "Renamed Test Group",
+			deltas: fleet.ScimGroupMemberDeltas{
+				AddUsers:          []uint{keptUserID},
+				RemoveUsers:       []uint{removedUserID},
+				AddChildGroups:    []uint{keptChildID},
+				RemoveChildGroups: []uint{removedChildID},
+			},
+		},
+	}
+
+	// Whatever the step asks for, the membership it leaves behind is the same.
+	wantUsers := []uint{keptUserID, addedUserID}
+	wantChildren := []uint{keptChildID, addedChildID}
+
+	for _, step := range steps {
+		t.Run(step.name, func(t *testing.T) {
+			require.NoError(t, ds.ApplyScimGroupPatch(ctx, &fleet.ScimGroup{
+				ID:          group.ID,
+				DisplayName: step.displayName,
+				ExternalID:  new(wantExternalID),
+			}, step.deltas))
+
+			got, err := ds.ScimGroupByID(ctx, group.ID, false)
+			require.NoError(t, err)
+			require.Equal(t, step.displayName, got.DisplayName)
+			require.Equal(t, new(wantExternalID), got.ExternalID)
+			require.ElementsMatch(t, wantUsers, got.ScimUsers)
+			require.ElementsMatch(t, wantChildren, got.ChildGroups)
+		})
+	}
+
+	t.Run("a group that does not exist is not found", func(t *testing.T) {
+		err := ds.ApplyScimGroupPatch(ctx,
+			&fleet.ScimGroup{ID: 99999, DisplayName: "Non-existent"}, fleet.ScimGroupMemberDeltas{})
+		require.True(t, fleet.IsNotFound(err))
+	})
+
+	t.Run("an over-long display name is rejected", func(t *testing.T) {
+		err := ds.ApplyScimGroupPatch(ctx, &fleet.ScimGroup{
+			ID:          group.ID,
+			DisplayName: strings.Repeat("a", fleet.SCIMMaxFieldLength+1),
+		}, fleet.ScimGroupMemberDeltas{})
+		validationErr := &fleet.SCIMValidationError{}
+		require.ErrorAs(t, err, &validationErr)
+		require.Equal(t, "display_name", validationErr.Field)
+	})
+}
+
+func testApplyScimGroupPatchResendOnRenameWithRemovals(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+
+	host1 := test.NewHost(t, ds, "patch-resend-h1", "192.168.1.201", "patch-resend-k1", "patch-resend-uuid1", time.Now())
+	host2 := test.NewHost(t, ds, "patch-resend-h2", "192.168.1.202", "patch-resend-k2", "patch-resend-uuid2", time.Now())
+
+	prof, err := ds.NewMDMAppleConfigProfile(ctx, *generateAppleCP("patch-resend", "patch-resend", 0),
+		[]fleet.FleetVarName{fleet.FleetVarHostEndUserIDPGroups})
+	require.NoError(t, err)
+
+	user1, err := ds.CreateScimUser(ctx, &fleet.ScimUser{UserName: "patch-resend-1@example.com"})
+	require.NoError(t, err)
+	user2, err := ds.CreateScimUser(ctx, &fleet.ScimUser{UserName: "patch-resend-2@example.com"})
+	require.NoError(t, err)
+	require.NoError(t, ds.associateHostWithScimUser(ctx, host1.ID, user1))
+	require.NoError(t, ds.associateHostWithScimUser(ctx, host2.ID, user2))
+
+	childID, err := ds.CreateScimGroup(ctx, &fleet.ScimGroup{DisplayName: "patch-resend-child", ScimUsers: []uint{user2}})
+	require.NoError(t, err)
+	groupID, err := ds.CreateScimGroup(ctx, &fleet.ScimGroup{
+		DisplayName: "patch-resend-group", ScimUsers: []uint{user1}, ChildGroups: []uint{childID},
+	})
+	require.NoError(t, err)
+
+	forceSetAppleHostProfileStatus(t, ds, host1.UUID, prof, fleet.MDMOperationTypeInstall, fleet.MDMDeliveryVerifying)
+	forceSetAppleHostProfileStatus(t, ds, host2.UUID, prof, fleet.MDMOperationTypeInstall, fleet.MDMDeliveryVerifying)
+
+	// A single call that renames the group and removes both the direct member and
+	// the child group must resend to the removed members' hosts: their group
+	// lists changed even though they are no longer part of the renamed group.
+	require.NoError(t, ds.ApplyScimGroupPatch(ctx,
+		&fleet.ScimGroup{ID: groupID, DisplayName: "patch-resend-renamed"},
+		fleet.ScimGroupMemberDeltas{RemoveUsers: []uint{user1}, RemoveChildGroups: []uint{childID}},
+	))
+	assertHostProfileStatus(t, ds, host1.UUID, hostProfileStatus{prof.ProfileUUID, fleet.MDMDeliveryPending})
+	assertHostProfileStatus(t, ds, host2.UUID, hostProfileStatus{prof.ProfileUUID, fleet.MDMDeliveryPending})
+}
+
+func testApplyScimGroupPatchResendSkipsNoOps(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+
+	prof, err := ds.NewMDMAppleConfigProfile(ctx, *generateAppleCP("noop-resend", "noop-resend", 0),
+		[]fleet.FleetVarName{fleet.FleetVarHostEndUserIDPGroups})
+	require.NoError(t, err)
+
+	// Three users: a direct member, a nested-child member, and a stranger.
+	hosts := make(map[string]*fleet.Host, 3)
+	users := make(map[string]uint, 3)
+	for i, key := range []string{"direct", "child", "stranger"} {
+		host := test.NewHost(t, ds, "noop-resend-"+key, fmt.Sprintf("192.168.8.%d", i+1),
+			"noop-resend-k-"+key, "noop-resend-uuid-"+key, time.Now())
+		userID, err := ds.CreateScimUser(ctx, &fleet.ScimUser{UserName: fmt.Sprintf("noop-resend-%s@example.com", key)})
+		require.NoError(t, err)
+		require.NoError(t, ds.associateHostWithScimUser(ctx, host.ID, userID))
+		hosts[key], users[key] = host, userID
+	}
+
+	childID, err := ds.CreateScimGroup(ctx, &fleet.ScimGroup{DisplayName: "noop-resend-child", ScimUsers: []uint{users["child"]}})
+	require.NoError(t, err)
+	strangerGroupID, err := ds.CreateScimGroup(ctx, &fleet.ScimGroup{DisplayName: "noop-resend-stranger", ScimUsers: []uint{users["stranger"]}})
+	require.NoError(t, err)
+	groupID, err := ds.CreateScimGroup(ctx, &fleet.ScimGroup{
+		DisplayName: "noop-resend-group", ScimUsers: []uint{users["direct"]}, ChildGroups: []uint{childID},
+	})
+	require.NoError(t, err)
+
+	settle := func() {
+		for _, host := range hosts {
+			forceSetAppleHostProfileStatus(t, ds, host.UUID, prof, fleet.MDMOperationTypeInstall, fleet.MDMDeliveryVerifying)
+		}
+	}
+
+	// Every delta is a no-op, so no host's group list changes and nothing resends.
+	settle()
+	require.NoError(t, ds.ApplyScimGroupPatch(ctx,
+		&fleet.ScimGroup{ID: groupID, DisplayName: "noop-resend-group"},
+		fleet.ScimGroupMemberDeltas{
+			AddUsers:          []uint{users["direct"]},
+			RemoveUsers:       []uint{users["stranger"]},
+			AddChildGroups:    []uint{childID},
+			RemoveChildGroups: []uint{strangerGroupID},
+		}))
+	for _, host := range hosts {
+		assertHostProfileStatus(t, ds, host.UUID, hostProfileStatus{prof.ProfileUUID, fleet.MDMDeliveryVerifying})
+	}
+
+	// Sanity check that the fixture detects resends: a real change still triggers one.
+	settle()
+	require.NoError(t, ds.ApplyScimGroupPatch(ctx,
+		&fleet.ScimGroup{ID: groupID, DisplayName: "noop-resend-group"},
+		fleet.ScimGroupMemberDeltas{AddUsers: []uint{users["stranger"]}}))
+	strangerHost, directHost := hosts["stranger"], hosts["direct"]
+	require.NotNil(t, strangerHost)
+	require.NotNil(t, directHost)
+	assertHostProfileStatus(t, ds, strangerHost.UUID, hostProfileStatus{prof.ProfileUUID, fleet.MDMDeliveryPending})
+	assertHostProfileStatus(t, ds, directHost.UUID, hostProfileStatus{prof.ProfileUUID, fleet.MDMDeliveryVerifying})
+}
+
 func testScimGroupReplaceValidation(t *testing.T, ds *Datastore) {
 	// Create a valid group first
 	group := fleet.ScimGroup{
@@ -1502,6 +1842,44 @@ func testScimUserByHostID(t *testing.T, ds *Datastore) {
 	assert.True(t, fleet.IsNotFound(err))
 }
 
+// testScimUserCreateAssociatesAllMatchingHosts verifies that creating a SCIM user
+// (as the IdP directory sync does) links every host whose MDM IdP account matches
+// the user.
+func testScimUserCreateAssociatesAllMatchingHosts(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+
+	// Two hosts belonging to the same person, both carrying the same MDM IdP account.
+	host1 := test.NewHost(t, ds, "multi-host-1", "1", "mh1key", "mh1uuid", time.Now())
+	host2 := test.NewHost(t, ds, "multi-host-2", "2", "mh2key", "mh2uuid", time.Now())
+
+	const idpUUID = "multi-idp-uuid"
+	const idpUserName = "multi.user@example.com"
+	_, err := ds.writer(ctx).ExecContext(ctx,
+		`INSERT INTO mdm_idp_accounts (uuid, username, fullname, email) VALUES (?, ?, ?, ?)`,
+		idpUUID, idpUserName, "Multi User", idpUserName)
+	require.NoError(t, err)
+	_, err = ds.writer(ctx).ExecContext(ctx,
+		`INSERT INTO host_mdm_idp_accounts (host_uuid, account_uuid) VALUES (?, ?), (?, ?)`,
+		host1.UUID, idpUUID, host2.UUID, idpUUID)
+	require.NoError(t, err)
+
+	user := fleet.ScimUser{
+		UserName:   idpUserName,
+		ExternalID: new("ext-multi"),
+		Active:     new(true),
+	}
+	user.ID, err = ds.CreateScimUser(ctx, &user)
+	require.NoError(t, err)
+
+	// Both hosts must resolve to the newly-created SCIM user.
+	for _, h := range []*fleet.Host{host1, host2} {
+		got, err := ds.ScimUserByHostID(ctx, h.ID)
+		require.NoError(t, err, "host %d should be linked to the scim user", h.ID)
+		require.NotNil(t, got)
+		assert.Equal(t, user.ID, got.ID, "host %d linked to the wrong scim user", h.ID)
+	}
+}
+
 func testScimUserByUserNameOrEmail(t *testing.T, ds *Datastore) {
 	// Create test users with different attributes and emails
 	users := []fleet.ScimUser{
@@ -1650,7 +2028,7 @@ func testScimUserReplaceValidation(t *testing.T, ds *Datastore) {
 		Active:     ptr.Bool(true),
 		Department: ptr.String("Customer support"),
 	}
-	err = ds.ReplaceScimUser(t.Context(), &userWithLongExternalID)
+	_, err = ds.ReplaceScimUser(t.Context(), &userWithLongExternalID)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "external_id exceeds maximum length")
 
@@ -1664,7 +2042,7 @@ func testScimUserReplaceValidation(t *testing.T, ds *Datastore) {
 		Active:     ptr.Bool(true),
 		Department: ptr.String("Customer support"),
 	}
-	err = ds.ReplaceScimUser(t.Context(), &userWithLongUserName)
+	_, err = ds.ReplaceScimUser(t.Context(), &userWithLongUserName)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "user_name exceeds maximum length")
 
@@ -1678,7 +2056,7 @@ func testScimUserReplaceValidation(t *testing.T, ds *Datastore) {
 		Active:     ptr.Bool(true),
 		Department: ptr.String("Customer support"),
 	}
-	err = ds.ReplaceScimUser(t.Context(), &userWithLongGivenName)
+	_, err = ds.ReplaceScimUser(t.Context(), &userWithLongGivenName)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "given_name exceeds maximum length")
 
@@ -1692,7 +2070,7 @@ func testScimUserReplaceValidation(t *testing.T, ds *Datastore) {
 		Active:     ptr.Bool(true),
 		Department: ptr.String("Customer support"),
 	}
-	err = ds.ReplaceScimUser(t.Context(), &userWithLongFamilyName)
+	_, err = ds.ReplaceScimUser(t.Context(), &userWithLongFamilyName)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "family_name exceeds maximum length")
 
@@ -1706,7 +2084,7 @@ func testScimUserReplaceValidation(t *testing.T, ds *Datastore) {
 		Active:     ptr.Bool(true),
 		Department: ptr.String(longString),
 	}
-	err = ds.ReplaceScimUser(t.Context(), &userWithLongDepartment)
+	_, err = ds.ReplaceScimUser(t.Context(), &userWithLongDepartment)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "department exceeds maximum length")
 
@@ -1720,7 +2098,7 @@ func testScimUserReplaceValidation(t *testing.T, ds *Datastore) {
 		Active:     ptr.Bool(true),
 		Department: ptr.String("Customer support updated"),
 	}
-	err = ds.ReplaceScimUser(t.Context(), &validUser)
+	_, err = ds.ReplaceScimUser(t.Context(), &validUser)
 	assert.NoError(t, err)
 
 	updated, err := ds.ScimUserByID(t.Context(), user.ID)
@@ -1922,7 +2300,7 @@ func testTriggerResendIdPProfiles(t *testing.T, ds *Datastore) {
 	forceSetWindowsHostProfileStatus(t, ds, hostW3.UUID, profWAll, fleet.MDMOperationTypeInstall, fleet.MDMDeliveryVerifying)
 
 	// change username of scim user 1
-	err = ds.ReplaceScimUser(ctx, &fleet.ScimUser{ID: scimUser1, UserName: "A@example.com"})
+	_, err = ds.ReplaceScimUser(ctx, &fleet.ScimUser{ID: scimUser1, UserName: "A@example.com"})
 	require.NoError(t, err)
 
 	// this triggered a resend of profUsername and profAll on host1 and hostW1
@@ -2013,7 +2391,7 @@ func testTriggerResendIdPProfiles(t *testing.T, ds *Datastore) {
 	// user1, does not trigger anything
 	group2, err := ds.CreateScimGroup(ctx, &fleet.ScimGroup{DisplayName: "g2"})
 	require.NoError(t, err)
-	err = ds.ReplaceScimUser(ctx, &fleet.ScimUser{ID: scimUser1, UserName: "A@example.com", ExternalID: ptr.String("A")})
+	_, err = ds.ReplaceScimUser(ctx, &fleet.ScimUser{ID: scimUser1, UserName: "A@example.com", ExternalID: new("A")})
 	require.NoError(t, err)
 
 	assertHostProfileStatus(t, ds, host1.UUID,
@@ -2221,7 +2599,7 @@ func testTriggerResendIdPProfiles(t *testing.T, ds *Datastore) {
 		hostProfileStatus{profWAll.ProfileUUID, fleet.MDMDeliveryVerifying})
 
 	// delete user3, affects only host3 (not the official IdP user for host1)
-	err = ds.DeleteScimUser(ctx, scimUser3)
+	_, err = ds.DeleteScimUser(ctx, scimUser3)
 	require.NoError(t, err)
 
 	assertHostProfileStatus(t, ds, host1.UUID,
@@ -2264,7 +2642,7 @@ func testTriggerResendIdPProfiles(t *testing.T, ds *Datastore) {
 	forceSetWindowsHostProfileStatus(t, ds, hostW3.UUID, profWAll, fleet.MDMOperationTypeInstall, fleet.MDMDeliveryVerifying)
 
 	// delete user1
-	err = ds.DeleteScimUser(ctx, scimUser1)
+	_, err = ds.DeleteScimUser(ctx, scimUser1)
 	require.NoError(t, err)
 	// add user2 as new user for host1
 	err = ds.associateHostWithScimUser(ctx, host1.ID, scimUser2)
@@ -2313,7 +2691,7 @@ func testTriggerResendIdPProfiles(t *testing.T, ds *Datastore) {
 
 	// update name of user2, will affect host1 and host2, but NOT the
 	// profUsername of host1 because it is not installed (it is removed)
-	err = ds.ReplaceScimUser(ctx, &fleet.ScimUser{ID: scimUser2, UserName: "B@example.com", GivenName: ptr.String("B")})
+	_, err = ds.ReplaceScimUser(ctx, &fleet.ScimUser{ID: scimUser2, UserName: "B@example.com", GivenName: new("B")})
 	require.NoError(t, err)
 
 	assertHostProfileStatus(t, ds, host1.UUID,
@@ -2640,7 +3018,7 @@ func testSetOrUpdateHostSCIMUserMapping(t *testing.T, ds *Datastore) {
 	hostID2 := uint(2)
 
 	// Create new host-SCIM user mapping
-	err = ds.SetOrUpdateHostSCIMUserMapping(ctx, hostID1, user1.ID)
+	_, err = ds.SetOrUpdateHostSCIMUserMapping(ctx, hostID1, user1.ID)
 	require.NoError(t, err)
 
 	// Verify the mapping was created
@@ -2652,7 +3030,7 @@ func testSetOrUpdateHostSCIMUserMapping(t *testing.T, ds *Datastore) {
 	assert.Equal(t, user1.ID, scimUserID)
 
 	// Test 2: Update existing host-SCIM user mapping
-	err = ds.SetOrUpdateHostSCIMUserMapping(ctx, hostID1, user2.ID)
+	_, err = ds.SetOrUpdateHostSCIMUserMapping(ctx, hostID1, user2.ID)
 	require.NoError(t, err)
 
 	// Verify the mapping was updated (should now point to user2)
@@ -2671,7 +3049,7 @@ func testSetOrUpdateHostSCIMUserMapping(t *testing.T, ds *Datastore) {
 	assert.Equal(t, 1, count)
 
 	// Test 3: Create mapping for a different host
-	err = ds.SetOrUpdateHostSCIMUserMapping(ctx, hostID2, user1.ID)
+	_, err = ds.SetOrUpdateHostSCIMUserMapping(ctx, hostID2, user1.ID)
 	require.NoError(t, err)
 
 	// Verify both hosts have mappings
@@ -2689,7 +3067,7 @@ func testSetOrUpdateHostSCIMUserMapping(t *testing.T, ds *Datastore) {
 	assert.Equal(t, 2, count)
 
 	// Update mapping back to original user for hostID1
-	err = ds.SetOrUpdateHostSCIMUserMapping(ctx, hostID1, user1.ID)
+	_, err = ds.SetOrUpdateHostSCIMUserMapping(ctx, hostID1, user1.ID)
 	require.NoError(t, err)
 
 	// Verify hostID1 now maps to user1
@@ -2701,7 +3079,7 @@ func testSetOrUpdateHostSCIMUserMapping(t *testing.T, ds *Datastore) {
 
 	// Error case - non-existent SCIM user
 	nonExistentUserID := uint(999999)
-	err = ds.SetOrUpdateHostSCIMUserMapping(ctx, hostID1, nonExistentUserID)
+	_, err = ds.SetOrUpdateHostSCIMUserMapping(ctx, hostID1, nonExistentUserID)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "foreign key constraint")
 
@@ -2722,4 +3100,148 @@ func testSetOrUpdateHostSCIMUserMapping(t *testing.T, ds *Datastore) {
 	require.NoError(t, err)
 	assert.Equal(t, user1.ID, result.ID)
 	assert.Equal(t, "mapping-test-user1", result.UserName)
+}
+
+func testTriggerResendCertTemplatesAndAppConfigs(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+
+	// Create a host.
+	host := test.NewHost(t, ds, "android-host", "10", "akey", "androiduuid", time.Now(), test.WithPlatform("android"))
+
+	// --- Certificate template resend ---
+
+	// Create a certificate authority and template.
+	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
+		_, err := q.ExecContext(ctx, `INSERT INTO certificate_authorities (name, type, url) VALUES ('scim_test_ca', 'custom_scep_proxy', 'https://ca.example.com')`)
+		return err
+	})
+	var caID uint
+	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
+		return sqlx.GetContext(ctx, q, &caID, `SELECT id FROM certificate_authorities WHERE name = 'scim_test_ca'`)
+	})
+
+	// Create the cert template.
+	certResp, err := ds.CreateCertificateTemplate(ctx, &fleet.CertificateTemplate{
+		Name:                   "wifi-cert",
+		TeamID:                 0,
+		CertificateAuthorityID: caID,
+		SubjectName:            "CN=$FLEET_VAR_HOST_END_USER_IDP_USERNAME",
+	})
+	require.NoError(t, err)
+
+	// Track the variable association.
+	err = ds.SetCertificateTemplateVariables(ctx, certResp.ID, []fleet.FleetVarName{fleet.FleetVarHostEndUserIDPUsername})
+	require.NoError(t, err)
+
+	// Create a host_certificate_template row in "delivered" status.
+	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
+		_, err := q.ExecContext(ctx,
+			`INSERT INTO host_certificate_templates (host_uuid, certificate_template_id, status, operation_type, name) VALUES (?, ?, 'delivered', 'install', 'wifi-cert')`,
+			host.UUID, certResp.ID)
+		return err
+	})
+
+	// --- Android configuration profile resend ---
+
+	// Create an Android config profile with a variable.
+	androidProfile, err := ds.NewMDMAndroidConfigProfile(ctx, fleet.MDMAndroidConfigProfile{
+		TeamID:  new(uint), // team 0
+		Name:    "android-var-profile",
+		RawJSON: []byte(`{"screenCaptureDisabled": true, "shortSupportMessage": {"defaultMessage": "User $FLEET_VAR_HOST_END_USER_IDP_USERNAME"}}`),
+	}, []fleet.FleetVarName{fleet.FleetVarHostEndUserIDPUsername})
+	require.NoError(t, err)
+
+	// Create a host_mdm_android_profiles row in "verified" status.
+	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
+		_, err := q.ExecContext(ctx,
+			`INSERT INTO host_mdm_android_profiles (host_uuid, profile_uuid, profile_name, status, operation_type, checksum) VALUES (?, ?, 'android-var-profile', 'verified', 'install', 'abc123')`,
+			host.UUID, androidProfile.ProfileUUID)
+		return err
+	})
+
+	// --- Managed app config resend ---
+
+	// Create an android enterprise (required for job queuing).
+	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
+		_, err := q.ExecContext(ctx, `INSERT INTO android_enterprises (signup_name, enterprise_id) VALUES ('test', 'LC0test123')`)
+		return err
+	})
+
+	// Insert a VPP app and app config with a variable.
+	appID := "com.example.varapp"
+	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
+		_, err := q.ExecContext(ctx, `INSERT INTO vpp_apps (adam_id, platform) VALUES (?, 'android')`, appID)
+		return err
+	})
+	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
+		_, err := q.ExecContext(ctx, `INSERT INTO vpp_apps_teams (adam_id, platform, global_or_team_id) VALUES (?, 'android', 0)`, appID)
+		return err
+	})
+
+	config := []byte(`{"managedConfiguration":{"user":"$FLEET_VAR_HOST_END_USER_IDP_USERNAME"}}`)
+	err = ds.updateAndroidAppConfigurationTx(ctx, ds.writer(ctx), 0, appID, config)
+	require.NoError(t, err)
+
+	// Assign a SCIM user to the host.
+	scimUser, err := ds.CreateScimUser(ctx, &fleet.ScimUser{UserName: "cert-user@example.com"})
+	require.NoError(t, err)
+	err = ds.associateHostWithScimUser(ctx, host.ID, scimUser)
+	require.NoError(t, err)
+
+	// Clear any jobs that may have been queued during setup.
+	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
+		_, err := q.ExecContext(ctx, `DELETE FROM jobs`)
+		return err
+	})
+
+	// Change the SCIM user's username — this should trigger resends.
+	activities, err := ds.ReplaceScimUser(ctx, &fleet.ScimUser{ID: scimUser, UserName: "new-user@example.com"})
+	require.NoError(t, err)
+
+	// Assert that resent_certificate activities were returned.
+	require.Len(t, activities, 1)
+	assert.Equal(t, host.ID, activities[0].HostID)
+	assert.Equal(t, certResp.ID, activities[0].CertificateTemplateID)
+	assert.Equal(t, "wifi-cert", activities[0].CertificateName)
+	assert.NotEmpty(t, activities[0].HostDisplayName)
+
+	// (1) Assert certificate template was reset to pending.
+	var certStatus string
+	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
+		return sqlx.GetContext(ctx, q,
+			&certStatus,
+			`SELECT status FROM host_certificate_templates WHERE host_uuid = ? AND certificate_template_id = ?`,
+			host.UUID, certResp.ID)
+	})
+	assert.Equal(t, string(fleet.CertificateTemplatePending), certStatus, "cert template should be reset to pending")
+
+	// (2) Assert android config profile was reset to pending (status = NULL).
+	var androidProfileStatus *string
+	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
+		return sqlx.GetContext(ctx, q,
+			&androidProfileStatus,
+			`SELECT status FROM host_mdm_android_profiles WHERE host_uuid = ? AND profile_uuid = ?`,
+			host.UUID, androidProfile.ProfileUUID)
+	})
+	assert.Nil(t, androidProfileStatus, "android profile status should be reset to NULL (pending)")
+
+	// (3) Assert a software_worker job was queued for the managed app config.
+	type jobRow struct {
+		Name string          `db:"name"`
+		Args json.RawMessage `db:"args"`
+	}
+	var jobs []jobRow
+	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
+		return sqlx.SelectContext(ctx, q, &jobs,
+			`SELECT name, args FROM jobs WHERE name = 'software_worker' AND state = 'queued'`)
+	})
+	require.Len(t, jobs, 1, "expected one software_worker job to be queued")
+
+	var jobArgs map[string]any
+	err = json.Unmarshal(jobs[0].Args, &jobArgs)
+	require.NoError(t, err)
+	assert.Equal(t, "make_android_app_available", jobArgs["task"])
+	assert.Equal(t, appID, jobArgs["application_id"])
+	assert.Equal(t, true, jobArgs["app_config_changed"])
+	assert.Contains(t, jobArgs["enterprise_name"], "LC0test123")
 }

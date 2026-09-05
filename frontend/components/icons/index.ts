@@ -1,5 +1,6 @@
 import Arrow from "./Arrow";
 import ArrowInternalLink from "./ArrowInternalLink";
+import ArrowLeft from "./ArrowLeft";
 import Calendar from "./Calendar";
 import CalendarCheck from "./CalendarCheck";
 import Check from "./Check";
@@ -29,6 +30,7 @@ import Search from "./Search";
 import LowDiskSpaceHosts from "./LowDiskSpaceHosts";
 import MissingHosts from "./MissingHosts";
 import TotalHosts from "./TotalHosts";
+import ABMIssueHosts from "./ABMIssueHosts";
 import Lightbulb from "./Lightbulb";
 
 import Apple from "./Apple";
@@ -71,11 +73,14 @@ import User from "./User";
 import InfoOutline from "./InfoOutline";
 import GitOpsMode from "./GitOpsMode";
 import Android from "./Android";
+import Pin from "./Pin";
+import Tag from "./Tag";
 
 // a mapping of the usable names of icons to the icon source.
 export const ICON_MAP = {
   arrow: Arrow,
   "arrow-internal-link": ArrowInternalLink,
+  "arrow-left": ArrowLeft,
   calendar: Calendar,
   "calendar-check": CalendarCheck,
   "chevron-left": ChevronLeft,
@@ -97,6 +102,7 @@ export const ICON_MAP = {
   "low-disk-space-hosts": LowDiskSpaceHosts,
   "missing-hosts": MissingHosts,
   "total-hosts": TotalHosts,
+  "abm-issue-hosts": ABMIssueHosts,
   lightbulb: Lightbulb,
   info: Info,
   "info-outline": InfoOutline,
@@ -148,6 +154,8 @@ export const ICON_MAP = {
   "automatic-self-service": AutomaticSelfService,
   user: User,
   "gitops-mode": GitOpsMode,
+  pin: Pin,
+  tag: Tag,
 };
 
 export type IconNames = keyof typeof ICON_MAP;

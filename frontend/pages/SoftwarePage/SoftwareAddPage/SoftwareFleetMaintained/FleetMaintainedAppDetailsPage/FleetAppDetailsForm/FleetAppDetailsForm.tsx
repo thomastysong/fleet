@@ -1,25 +1,37 @@
-import React, { useContext, useState } from "react";
-import { AppContext } from "context/app";
+/** FleetAppDetailsForm is a separate component remnant of when we had advanced options on add <4.83 */
 
-import { ILabelSummary } from "interfaces/label";
+import React, { useState } from "react";
+import { useQuery } from "react-query";
+
+import useGitOpsMode from "hooks/useGitOpsMode";
+
 import { SoftwareCategory } from "interfaces/software";
+import { ILabelSummary } from "interfaces/label";
 
+import { getPathWithQueryParams } from "utilities/url";
+import {
+  DEFAULT_USE_QUERY_OPTIONS,
+  LEARN_MORE_ABOUT_BASE_LINK,
+} from "utilities/constants";
+import paths from "router/paths";
+import labelsAPI, { getCustomLabels } from "services/entities/labels";
+
+import Button from "components/buttons/Button";
+import TooltipWrapper from "components/TooltipWrapper";
+import CustomLink from "components/CustomLink";
+import GitOpsModeTooltipWrapper from "components/GitOpsModeTooltipWrapper";
+import RevealButton from "components/buttons/RevealButton";
+import { DropdownTargetLabelSelector } from "components/TargetLabelSelector";
+import SoftwareOptionsSelector from "pages/SoftwarePage/components/forms/SoftwareOptionsSelector";
+import AdvancedOptionsFields from "pages/SoftwarePage/components/forms/AdvancedOptionsFields";
+import {
+  PatchOption,
+  SoftwareDeploySelector,
+} from "pages/SoftwarePage/components/forms/SoftwareDeploySelector";
 import {
   CUSTOM_TARGET_OPTIONS,
   generateHelpText,
 } from "pages/SoftwarePage/helpers";
-import { getPathWithQueryParams } from "utilities/url";
-import paths from "router/paths";
-
-import RevealButton from "components/buttons/RevealButton";
-import Button from "components/buttons/Button";
-import Card from "components/Card";
-import SoftwareOptionsSelector from "pages/SoftwarePage/components/forms/SoftwareOptionsSelector";
-import TargetLabelSelector from "components/TargetLabelSelector";
-import TooltipWrapper from "components/TooltipWrapper";
-import CustomLink from "components/CustomLink";
-import AdvancedOptionsFields from "pages/SoftwarePage/components/forms/AdvancedOptionsFields";
-import GitOpsModeTooltipWrapper from "components/GitOpsModeTooltipWrapper";
 
 import { generateFormValidation } from "./helpers";
 
@@ -51,7 +63,9 @@ export const softwareAlreadyAddedTipContent = (
 };
 export interface IFleetMaintainedAppFormData {
   selfService: boolean;
-  automaticInstall: boolean;
+  forceInstall: boolean;
+  patch: boolean;
+  patchOption: PatchOption;
   installScript: string;
   preInstallQuery?: string;
   postInstallScript?: string;
@@ -69,44 +83,31 @@ export interface IFormValidation {
 }
 
 interface IFleetAppDetailsFormProps {
-  labels: ILabelSummary[] | null;
   categories?: SoftwareCategory[] | null;
-  name: string;
   defaultInstallScript: string;
   defaultPostInstallScript: string;
   defaultUninstallScript: string;
   teamId?: string;
-  showSchemaButton: boolean;
-  onClickShowSchema: () => void;
-  onClickPreviewEndUserExperience: () => void;
   onCancel: () => void;
   onSubmit: (formData: IFleetMaintainedAppFormData) => void;
   softwareTitleId?: number;
 }
 
 const FleetAppDetailsForm = ({
-  labels,
   categories,
-  name: appName,
   defaultInstallScript,
   defaultPostInstallScript,
   defaultUninstallScript,
   teamId,
-  showSchemaButton,
-  onClickShowSchema,
-  onClickPreviewEndUserExperience,
   onCancel,
   onSubmit,
   softwareTitleId,
 }: IFleetAppDetailsFormProps) => {
-  const gitOpsModeEnabled = useContext(AppContext).config?.gitops
-    .gitops_mode_enabled;
-
-  const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
-
   const [formData, setFormData] = useState<IFleetMaintainedAppFormData>({
     selfService: false,
-    automaticInstall: false,
+    forceInstall: false,
+    patch: false,
+    patchOption: "closed",
     preInstallQuery: "",
     installScript: defaultInstallScript,
     postInstallScript: defaultPostInstallScript,
@@ -116,47 +117,33 @@ const FleetAppDetailsForm = ({
     labelTargets: {},
     categories: categories || [],
   });
+
   const [formValidation, setFormValidation] = useState<IFormValidation>({
     isValid: true,
-    preInstallQuery: { isValid: false },
   });
 
-  const onChangePreInstallQuery = (value?: string) => {
-    const newData = { ...formData, preInstallQuery: value };
-    setFormData(newData);
-    setFormValidation(generateFormValidation(newData));
-  };
+  // Fetch labels for DropdownTargetLabelSelector
+  const {
+    data: labels,
+    isLoading: isLoadingLabels,
+    isError: isErrorLabels,
+  } = useQuery<ILabelSummary[], Error>(
+    ["custom_labels", teamId],
+    () =>
+      labelsAPI
+        .summary(teamId ? parseInt(teamId, 10) : null)
+        .then((res) => getCustomLabels(res.labels)),
+    { ...DEFAULT_USE_QUERY_OPTIONS }
+  );
 
-  const onChangeInstallScript = (value: string) => {
-    const newData = { ...formData, installScript: value };
-    setFormData(newData);
-    setFormValidation(generateFormValidation(newData));
-  };
-
-  const onChangePostInstallScript = (value?: string) => {
-    const newData = { ...formData, postInstallScript: value };
-    setFormData(newData);
-    setFormValidation(generateFormValidation(newData));
-  };
-
-  const onChangeUninstallScript = (value?: string) => {
-    const newData = { ...formData, uninstallScript: value };
-    setFormData(newData);
-    setFormValidation(generateFormValidation(newData));
-  };
+  const { gitOpsModeEnabled } = useGitOpsMode("software");
+  const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
 
   const onToggleSelfService = () => {
-    const newData = { ...formData, selfService: !formData.selfService };
-    setFormData(newData);
-    setFormValidation(generateFormValidation(newData));
-  };
-
-  const onToggleAutomaticInstall = () => {
-    const newData = {
-      ...formData,
-      automaticInstall: !formData.automaticInstall,
-    };
-    setFormData(newData);
+    setFormData((prevData: IFleetMaintainedAppFormData) => ({
+      ...prevData,
+      selfService: !prevData.selfService,
+    }));
   };
 
   const onSelectTargetType = (value: string) => {
@@ -165,9 +152,10 @@ const FleetAppDetailsForm = ({
     setFormValidation(generateFormValidation(newData));
   };
 
-  const onSelectCustomTargetOption = (value: string) => {
+  const onSelectCustomTarget = (value: string) => {
     const newData = { ...formData, customTarget: value };
     setFormData(newData);
+    setFormValidation(generateFormValidation(newData));
   };
 
   const onSelectLabel = ({ name, value }: { name: string; value: boolean }) => {
@@ -179,32 +167,22 @@ const FleetAppDetailsForm = ({
     setFormValidation(generateFormValidation(newData));
   };
 
-  const onSelectCategory = ({
-    name,
-    value,
-  }: {
-    name: string;
-    value: boolean;
-  }) => {
-    let newCategories: string[];
+  const onChangeInstallScript = (value: string) => {
+    setFormData((prevData) => ({ ...prevData, installScript: value }));
+  };
 
-    if (value) {
-      // Add the name if not already present
-      newCategories = formData.categories.includes(name)
-        ? formData.categories
-        : [...formData.categories, name];
-    } else {
-      // Remove the name if present
-      newCategories = formData.categories.filter((cat) => cat !== name);
-    }
-
-    const newData = {
-      ...formData,
-      categories: newCategories,
-    };
-
+  const onChangePreInstallQuery = (value?: string) => {
+    const newData = { ...formData, preInstallQuery: value };
     setFormData(newData);
     setFormValidation(generateFormValidation(newData));
+  };
+
+  const onChangePostInstallScript = (value?: string) => {
+    setFormData((prevData) => ({ ...prevData, postInstallScript: value }));
+  };
+
+  const onChangeUninstallScript = (value?: string) => {
+    setFormData((prevData) => ({ ...prevData, uninstallScript: value }));
   };
 
   const onSubmitForm = (evt: React.FormEvent<HTMLFormElement>) => {
@@ -212,83 +190,115 @@ const FleetAppDetailsForm = ({
     onSubmit(formData);
   };
 
-  const gitOpsModeDisabledClass = gitOpsModeEnabled
-    ? "form-fields--disabled"
-    : "";
   const isSoftwareAlreadyAdded = !!softwareTitleId;
-  const isSubmitDisabled = isSoftwareAlreadyAdded; // Allows saving invalid SQL
-
-  // Define errors separately so AdvancedOptionsFields can memoize effectively
-  const errors = {
-    preInstallQuery: formValidation.preInstallQuery?.message,
-  };
+  const isSubmitDisabled = isSoftwareAlreadyAdded || !formValidation.isValid;
 
   return (
-    <form className={`${baseClass}`} onSubmit={onSubmitForm}>
-      <div className={`${baseClass}__form-frame ${gitOpsModeDisabledClass}`}>
-        <Card paddingSize="medium" borderRadiusSize="large">
-          <SoftwareOptionsSelector
-            formData={formData}
-            onToggleAutomaticInstall={onToggleAutomaticInstall}
-            onToggleSelfService={onToggleSelfService}
-            onSelectCategory={onSelectCategory}
-            disableOptions={isSoftwareAlreadyAdded}
-            onClickPreviewEndUserExperience={onClickPreviewEndUserExperience}
+    <form className={baseClass} onSubmit={onSubmitForm}>
+      <SoftwareOptionsSelector
+        formData={formData}
+        onToggleSelfService={onToggleSelfService}
+        onClickPreviewEndUserExperience={() => undefined}
+        onSelectCategory={() => undefined}
+      />
+      <GitOpsModeTooltipWrapper
+        entityType="software"
+        renderChildren={(disableChildren) => (
+          <SoftwareDeploySelector
+            forceInstall={formData.forceInstall}
+            patch={formData.patch}
+            patchOption={formData.patchOption}
+            onToggleForceInstall={(forceInstall) =>
+              setFormData((prevData) => ({ ...prevData, forceInstall }))
+            }
+            onTogglePatch={(patch) =>
+              setFormData((prevData) => ({ ...prevData, patch }))
+            }
+            onSelectPatchOption={(patchOption) =>
+              setFormData((prevData) => ({ ...prevData, patchOption }))
+            }
+            disabled={disableChildren}
           />
-        </Card>
-        <Card paddingSize="medium" borderRadiusSize="large">
-          <TargetLabelSelector
+        )}
+      />
+      <GitOpsModeTooltipWrapper
+        entityType="software"
+        renderChildren={(disableChildren) => (
+          <DropdownTargetLabelSelector
             selectedTargetType={formData.targetType}
             selectedCustomTarget={formData.customTarget}
             selectedLabels={formData.labelTargets}
             customTargetOptions={CUSTOM_TARGET_OPTIONS}
             className={`${baseClass}__target`}
-            dropdownHelpText={
-              formData.targetType === "Custom" &&
-              generateHelpText(formData.automaticInstall, formData.customTarget)
-            }
             onSelectTargetType={onSelectTargetType}
-            onSelectCustomTarget={onSelectCustomTargetOption}
+            onSelectCustomTarget={onSelectCustomTarget}
             onSelectLabel={onSelectLabel}
             labels={labels || []}
-            disableOptions={isSoftwareAlreadyAdded}
+            isLoadingLabels={isLoadingLabels}
+            isErrorLabels={isErrorLabels}
+            dropdownHelpText={generateHelpText(
+              formData.forceInstall,
+              formData.customTarget
+            )}
+            disableOptions={disableChildren}
           />
-        </Card>
-      </div>
-      <div
-        className={`${baseClass}__advanced-options-section ${gitOpsModeDisabledClass}`}
-      >
+        )}
+      />
+      <div className={`${baseClass}__advanced-options`}>
         <RevealButton
-          className={`${baseClass}__accordion-title`}
           isShowing={showAdvancedOptions}
           showText="Advanced options"
           hideText="Advanced options"
           caretPosition="after"
           onClick={() => setShowAdvancedOptions(!showAdvancedOptions)}
-          disabled={isSoftwareAlreadyAdded}
         />
         {showAdvancedOptions && (
           <AdvancedOptionsFields
-            className={`${baseClass}__advanced-options-fields`}
-            showSchemaButton={showSchemaButton}
-            installScriptHelpText="Use the $INSTALLER_PATH variable to point to the installer. Currently, shell scripts are supported."
-            postInstallScriptHelpText="Currently, shell scripts are supported."
-            uninstallScriptHelpText="Currently, shell scripts are supported."
-            errors={errors}
+            showSchemaButton={false}
+            installScriptHelpText={
+              <>
+                Use the $INSTALLER_PATH variable to point to the installer.{" "}
+                <CustomLink
+                  url={`${LEARN_MORE_ABOUT_BASE_LINK}/install-scripts`}
+                  text="Learn more about install scripts"
+                  newTab
+                />
+              </>
+            }
+            postInstallScriptHelpText=""
+            uninstallScriptHelpText={
+              <>
+                $PACKAGE_ID will be populated after the software is added.{" "}
+                <CustomLink
+                  url={`${LEARN_MORE_ABOUT_BASE_LINK}/uninstall-scripts`}
+                  text="Learn more about uninstall scripts"
+                  newTab
+                />
+              </>
+            }
+            errors={{
+              preInstallQuery: formValidation.preInstallQuery?.message,
+            }}
             preInstallQuery={formData.preInstallQuery}
             installScript={formData.installScript}
             postInstallScript={formData.postInstallScript}
             uninstallScript={formData.uninstallScript}
-            onClickShowSchema={onClickShowSchema}
+            onClickShowSchema={() => undefined}
             onChangePreInstallQuery={onChangePreInstallQuery}
             onChangeInstallScript={onChangeInstallScript}
             onChangePostInstallScript={onChangePostInstallScript}
             onChangeUninstallScript={onChangeUninstallScript}
+            gitopsCompatible
+            gitOpsModeEnabled={gitOpsModeEnabled}
+            patchWhenClosed={
+              formData.patch && formData.patchOption === "closed"
+            }
           />
         )}
       </div>
       <div className={`${baseClass}__action-buttons`}>
         <GitOpsModeTooltipWrapper
+          entityType="software"
           renderChildren={(disableChildren) => (
             <TooltipWrapper
               tipContent={softwareAlreadyAddedTipContent(
@@ -310,7 +320,7 @@ const FleetAppDetailsForm = ({
             </TooltipWrapper>
           )}
         />
-        <Button onClick={onCancel} variant="inverse">
+        <Button onClick={onCancel} variant="secondary">
           Cancel
         </Button>
       </div>

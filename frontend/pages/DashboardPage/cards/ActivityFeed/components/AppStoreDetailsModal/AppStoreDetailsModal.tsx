@@ -53,7 +53,7 @@ const AppStoreDetailsModal = ({
           value={details.app_store_id}
         />
         <DataSet
-          title="Self-Service"
+          title="Self service"
           value={details.self_service ? "Yes" : "No"}
         />
         <DataSet
@@ -72,7 +72,7 @@ const AppStoreDetailsModal = ({
         />
       </div>
       <div className="modal-cta-wrap">
-        <Button onClick={onCancel}>Done</Button>
+        <Button onClick={onCancel}>Close</Button>
       </div>
     </Modal>
   );

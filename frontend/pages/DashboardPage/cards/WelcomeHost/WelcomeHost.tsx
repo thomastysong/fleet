@@ -1,10 +1,9 @@
-import React, { useContext, useState } from "react";
+import React, { useState } from "react";
 import PATHS from "router/paths";
-import { Link } from "react-router";
 import { useQuery } from "react-query";
-import { formatDistanceToNow } from "date-fns";
+import { timeAgo } from "utilities/date_format";
 
-import { NotificationContext } from "context/notification";
+import { notify } from "components/ToastNotification";
 import { IHost, IHostResponse } from "interfaces/host";
 import { IHostPolicy } from "interfaces/policy";
 import hostAPI from "services/entities/hosts";
@@ -31,7 +30,6 @@ const WelcomeHost = ({
   totalsHostsCount,
   toggleAddHostsModal,
 }: IWelcomeHostCardProps): JSX.Element => {
-  const { renderFlash } = useContext(NotificationContext);
   const [refetchStartTime, setRefetchStartTime] = useState<number | null>(null);
   const [currentPolicyShown, setCurrentPolicyShown] = useState<IHostPolicy>();
   const [showPolicyModal, setShowPolicyModal] = useState(false);
@@ -78,16 +76,14 @@ const WelcomeHost = ({
                   fullyReloadHost();
                 }, 1000);
               } else {
-                renderFlash(
-                  "error",
+                notify.error(
                   `This host is offline. Please try refetching host vitals later.`
                 );
                 setShowRefetchLoadingSpinner(false);
               }
             } else {
-              renderFlash(
-                "error",
-                `We're having trouble fetching fresh vitals for this host. Please try again later.`
+              notify.error(
+                `Refetch sent but vitals are taking longer than expected to load. You’ll see an update when the host responds.`
               );
               setShowRefetchLoadingSpinner(false);
             }
@@ -111,7 +107,9 @@ const WelcomeHost = ({
         });
       } catch (error) {
         console.error(error);
-        renderFlash("error", `Host "${host.display_name}" refetch error`);
+        notify.error(`Host "${host.display_name}" refetch error`, {
+          response: error,
+        });
         setShowRefetchLoadingSpinner(false);
       }
     }
@@ -143,7 +141,7 @@ const WelcomeHost = ({
           <p>Add your personal device to assess the security of your device.</p>
           <p>
             In Fleet, laptops, workstations, and servers are referred to as
-            &quot;hosts.&quot;
+            &quot;hosts&quot;.
           </p>
           <Button
             onClick={toggleAddHostsModal}
@@ -276,7 +274,7 @@ const WelcomeHost = ({
           </Button>
           <span>
             Last updated{" "}
-            {formatDistanceToNow(new Date(host.detail_updated_at), {
+            {timeAgo(new Date(host.detail_updated_at), {
               addSuffix: true,
             })}
           </span>
@@ -296,7 +294,7 @@ const WelcomeHost = ({
                 </p>
               )}
               <div className="modal-cta-wrap">
-                <Button onClick={() => setShowPolicyModal(false)}>Done</Button>
+                <Button onClick={() => setShowPolicyModal(false)}>Close</Button>
               </div>
             </>
           </Modal>

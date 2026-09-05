@@ -13,29 +13,12 @@ const (
 	ConversionStatusDecryptionPaused     int32 = 5
 )
 
-// Free space wiping status.
-//
-// Values and their meanings were taken from:
-// https://learn.microsoft.com/en-us/windows/win32/secprov/getconversionstatus-win32-encryptablevolume
 const (
-	WipingStatusFreeSpaceNotWiped         int32 = 0
-	WipingStatusFreeSpaceWiped            int32 = 1
-	WipingStatusFreeSpaceWipingInProgress int32 = 2
-	WipingStatusFreeSpaceWipingPaused     int32 = 3
-)
-
-// Specifies whether the volume and the encryption key (if any) are secured.
-//
-// Values and their meanings were taken from:
-// https://learn.microsoft.com/en-us/windows/win32/secprov/getprotectionstatus-win32-encryptablevolume
-const (
-	ProtectionStatusUnprotected int32 = 0
-	ProtectionStatusProtected   int32 = 1
-	ProtectionStatusUnknown     int32 = 2
-)
-
-const (
-	// Error Codes
+	// Error codes from Win32_EncryptableVolume WMI methods. The Microsoft docs
+	// define these as uint32, but the COM VARIANT transport delivers them as
+	// VT_I4 (signed 32-bit), which go-ole surfaces as int32. The bit patterns
+	// are identical (e.g., 0x80310019 as uint32 == -2144272327 as int32).
+	ErrorCodeInvalidArg                 int32 = -2147024809 // E_INVALIDARG: encryption flags conflict with Group Policy
 	ErrorCodeIODevice                   int32 = -2147023779
 	ErrorCodeDriveIncompatibleVolume    int32 = -2144272206
 	ErrorCodeNoTPMWithPassphrase        int32 = -2144272212
@@ -91,4 +74,35 @@ type EncryptionStatus struct {
 type VolumeStatus struct {
 	DriveVolume string            // driveVolume is the identifier of the drive (e.g., "C:").
 	Status      *EncryptionStatus // status holds the encryption status of the volume.
+	// Err is set when the status for this volume could not be read. A volume whose status could not be read must never be treated as
+	// "not encrypted".
+	Err error
+}
+
+// Volume protection status, as returned by GetProtectionStatus.
+// https://learn.microsoft.com/en-us/windows/win32/secprov/getprotectionstatus-win32-encryptablevolume
+const (
+	ProtectionStatusOff int32 = 0
+	ProtectionStatusOn  int32 = 1
+)
+
+// Key protector types for GetKeyProtectors.
+// https://learn.microsoft.com/en-us/windows/win32/secprov/getkeyprotectors-win32-encryptablevolume
+const (
+	KeyProtectorTypeTPM                    int32 = 1
+	KeyProtectorTypeNumericalPassword      int32 = 3
+	KeyProtectorTypeTPMAndPIN              int32 = 4
+	KeyProtectorTypeTPMAndStartupKey       int32 = 5
+	KeyProtectorTypeTPMAndPINAndStartupKey int32 = 6
+)
+
+// TPMFamilyProtectorTypes are the key protector types that can release the volume master key at boot without a human
+// typing the 48-digit recovery password. The PIN variants prompt for a PIN, which is by design and is not a recovery
+// prompt.
+// https://learn.microsoft.com/en-us/windows/win32/secprov/getkeyprotectors-win32-encryptablevolume
+var TPMFamilyProtectorTypes = []int32{
+	KeyProtectorTypeTPM,
+	KeyProtectorTypeTPMAndPIN,
+	KeyProtectorTypeTPMAndStartupKey,
+	KeyProtectorTypeTPMAndPINAndStartupKey,
 }

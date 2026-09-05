@@ -1,10 +1,12 @@
-import React, { useContext } from "react";
+import React from "react";
 import { useQuery } from "react-query";
 
-import { AppContext } from "context/app";
 import { dateAgo } from "utilities/date_format";
 import { internationalTimeFormat } from "utilities/helpers";
-import { DEFAULT_USE_QUERY_OPTIONS } from "utilities/constants";
+import {
+  DEFAULT_USE_QUERY_OPTIONS,
+  LEARN_MORE_ABOUT_BASE_LINK,
+} from "utilities/constants";
 import idpAPI from "services/entities/idp";
 
 import SettingsSection from "pages/admin/components/SettingsSection";
@@ -12,8 +14,8 @@ import DataError from "components/DataError";
 import Spinner from "components/Spinner";
 import CustomLink from "components/CustomLink";
 import TooltipWrapper from "components/TooltipWrapper";
-import PremiumFeatureMessage from "components/PremiumFeatureMessage";
 import PageDescription from "components/PageDescription";
+import EmptyState from "components/EmptyState";
 
 import SectionCard from "../../../MdmSettings/components/SectionCard";
 
@@ -21,22 +23,16 @@ const baseClass = "identity-provider-section";
 
 const AddEndUserInfoCard = () => {
   return (
-    <SectionCard
-      header="Connect your IdP"
-      cta={
+    <EmptyState
+      header="No IdP connected"
+      info={
         <CustomLink
-          text="Learn more"
+          text="Learn how to connect your IdP"
           newTab
-          url="https://fleetdm.com/learn-more-about/connect-idp"
-          className={`${baseClass}__learn-more-link`}
+          url={`${LEARN_MORE_ABOUT_BASE_LINK}/connect-idp`}
         />
       }
-    >
-      <p className={`${baseClass}__section-card-content`}>
-        Fleet can be connected to Okta, Entra ID, or another Identity Provider
-        (IdP).
-      </p>
-    </SectionCard>
+    />
   );
 };
 
@@ -54,8 +50,7 @@ const ReceivedEndUserInfoCard = ({
         <CustomLink
           text="Learn more"
           newTab
-          url="https://fleetdm.com/learn-more-about/troubleshoot-idp-connection"
-          className={`${baseClass}__learn-more-link`}
+          url={`${LEARN_MORE_ABOUT_BASE_LINK}/troubleshoot-idp-connection`}
         />
       }
     >
@@ -92,8 +87,7 @@ const FailedEndUserInfoCard = ({
         <CustomLink
           text="Learn more"
           newTab
-          url="https://fleetdm.com/learn-more-about/troubleshoot-idp-connection"
-          className={`${baseClass}__learn-more-link`}
+          url={`${LEARN_MORE_ABOUT_BASE_LINK}/troubleshoot-idp-connection`}
         />
       }
     >
@@ -113,21 +107,16 @@ const FailedEndUserInfoCard = ({
 };
 
 const IdentityProviderSection = () => {
-  const { isPremiumTier } = useContext(AppContext);
-
+  // Premium gating is handled by the parent IdentityProviders component, so this
+  // section only renders for premium tiers.
   const { data: scimIdPDetails, isLoading, isError } = useQuery(
     ["scim_details"],
     () => idpAPI.getSCIMDetails(),
     {
       ...DEFAULT_USE_QUERY_OPTIONS,
-      enabled: isPremiumTier,
     }
   );
   const renderContent = () => {
-    if (!isPremiumTier) {
-      return <PremiumFeatureMessage />;
-    }
-
     if (isError) {
       return <DataError />;
     }
@@ -158,29 +147,16 @@ const IdentityProviderSection = () => {
     return null;
   };
   return (
-    <SettingsSection title="Identity provider (IdP)">
-      {isPremiumTier && (
-        <PageDescription
-          content={
-            <>
-              Configure and manage integrations between Fleet and your identity
-              provider (IdP). Connecting your IdP enables mapping end users to
-              hosts and deleting{" "}
-              <TooltipWrapper
-                tipContent={
-                  <>
-                    A <strong>Fleet user</strong> is considered an IT admin.
-                  </>
-                }
-              >
-                Fleet users
-              </TooltipWrapper>{" "}
-              when they are removed from your IdP.
-            </>
-          }
-          variant="right-panel"
-        />
-      )}
+    <SettingsSection title="User mapping">
+      <PageDescription
+        content={
+          <>
+            Connect Fleet to your IdP to sync end user information (e.g. groups)
+            to hosts.
+          </>
+        }
+        variant="right-panel"
+      />
       {renderContent()}
     </SettingsSection>
   );

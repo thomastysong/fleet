@@ -3,6 +3,11 @@ import React from "react";
 
 import { ActivityType, IActivity } from "interfaces/activity";
 import {
+  DATASET_LABEL,
+  HISTORICAL_DATA_CONFIG_KEYS,
+  HistoricalDataConfigKey,
+} from "interfaces/charts";
+import {
   AppleDisplayPlatform,
   isAndroid,
   isIPadOrIPhone,
@@ -10,8 +15,10 @@ import {
 } from "interfaces/platform";
 import {
   getInstallUninstallStatusPredicate,
+  getInstallUninstallStatusPredicatePassive,
   SCRIPT_PACKAGE_SOURCES,
 } from "interfaces/software";
+import { formatMdmCommandNameForActivityItem } from "utilities/activityHelpers";
 import {
   formatScriptNameForActivityItem,
   getPerformanceImpactDescription,
@@ -25,6 +32,7 @@ import { API_NO_TEAM_ID } from "interfaces/team";
 const baseClass = "global-activity-item";
 
 const ACTIVITIES_WITH_DETAILS = new Set([
+  ActivityType.RanCustomMdmCommand,
   ActivityType.RanScript,
   ActivityType.AddedSoftware,
   ActivityType.EditedSoftware,
@@ -40,6 +48,7 @@ const ACTIVITIES_WITH_DETAILS = new Set([
   ActivityType.InstalledAppStoreApp,
   ActivityType.RanScriptBatch,
   ActivityType.CanceledScriptBatch,
+  ActivityType.FailedEnrollmentProfileRenewal,
 ]);
 
 const getProfilesPlatformDisplayName = (
@@ -86,6 +95,47 @@ const getHostTeamAssignmentSuffix = (teamName?: string | null) => {
   ) : (
     <> that are unassigned</>
   );
+};
+
+const getEditedProfileMessage = (
+  activity: IActivity,
+  isPremiumTier: boolean,
+  platform: "apple" | "windows" | "android"
+) => {
+  const profileName = activity.details?.profile_name;
+  const suffix = getProfileMessageSuffix(
+    isPremiumTier,
+    platform,
+    activity.details?.team_name
+  );
+  // profile_name is set only when a single profile was edited in place;
+  // fleetctl/GitOps batch edits omit it
+  if (profileName) {
+    return (
+      <>
+        {" "}
+        edited the configuration profile <b>{profileName}</b> for {suffix}.
+      </>
+    );
+  }
+  return <> edited configuration profiles for {suffix} via fleetctl.</>;
+};
+
+// Returns the display label for a historical-dataset config key. Known keys
+// resolve via DATASET_LABEL; unknown keys fall back to a sentence-cased
+// version of the raw key so future datasets render reasonably even before
+// the frontend mapping ships.
+const getHistoricalDatasetLabel = (dataset?: string): string => {
+  if (!dataset) {
+    return "a dataset";
+  }
+  if ((HISTORICAL_DATA_CONFIG_KEYS as readonly string[]).includes(dataset)) {
+    return DATASET_LABEL[dataset as HistoricalDataConfigKey];
+  }
+  const spaced = dataset.replace(/[_-]+/g, " ").toLowerCase().trim();
+  return spaced.length === 0
+    ? dataset
+    : spaced.charAt(0).toUpperCase() + spaced.slice(1);
 };
 
 const getMacOSSetupAssistantMessage = (
@@ -212,6 +262,24 @@ const TAGGED_TEMPLATES = {
       </>
     );
   },
+  userMFARequested: (activity: IActivity) => {
+    const { email, public_ip } = activity.details || {};
+
+    const actor = email ? (
+      <>
+        Somebody using <b>{email}</b>
+      </>
+    ) : (
+      <>Somebody</>
+    );
+
+    return (
+      <>
+        {actor} submitted valid credentials for an MFA-enabled account and was
+        sent a verification email from public IP {public_ip}.
+      </>
+    );
+  },
   userCreated: (activity: IActivity) => {
     return activity.actor_id === activity.details?.user_id ? (
       <>activated their account.</>
@@ -239,8 +307,10 @@ const TAGGED_TEMPLATES = {
           <TooltipWrapper
             tipContent={
               <>
-                The host expiry window configured in <br />
-                <b>Settings &gt; Organization settings &gt; Advanced options</b>
+                The host expiry window configured in{" "}
+                <strong>
+                  Settings &gt; Organization settings &gt; Advanced options
+                </strong>
               </>
             }
           >
@@ -316,23 +386,56 @@ const TAGGED_TEMPLATES = {
     );
   },
   fleetEnrolled: (activity: IActivity) => {
-    const hostDisplayName = activity.details?.host_display_name ? (
-      <b>{activity.details.host_display_name}</b>
-    ) : (
-      "A host"
+    const { host_display_name, host_serial } = activity.details || {};
+    if (!host_display_name) {
+      return host_serial ? (
+        <>
+          A host with serial number <b>{host_serial}</b> enrolled in Fleet.
+        </>
+      ) : (
+        <>A host enrolled in Fleet.</>
+      );
+    }
+    // Skip the serial suffix if the display name already ends with " (serial)"
+    // (the "Model (Serial)" fallback format from fleet.HostDisplayName).
+    const showSerial =
+      !!host_serial && !host_display_name.endsWith(`(${host_serial})`);
+    return (
+      <>
+        <b>
+          {host_display_name}
+          {showSerial ? ` (${host_serial})` : ""}
+        </b>{" "}
+        enrolled in Fleet.
+      </>
     );
-    return <>{hostDisplayName} enrolled in Fleet.</>;
   },
 
   mdmEnrolled: (activity: IActivity) => {
     const { mdm_platform, platform = "", host_display_name, host_serial } =
       activity.details || {};
 
+    const enrollmentTypeText = activity.details?.installed_from_dep
+      ? "automatic"
+      : "manual";
+    // Skip the serial suffix if the display name already ends with " (serial)"
+    // (the "Model (Serial)" fallback format from fleet.HostDisplayName).
+    const showSerial =
+      !!host_display_name &&
+      !!host_serial &&
+      !host_display_name.endsWith(`(${host_serial})`);
+    const serialSuffix = showSerial ? ` (${host_serial})` : "";
+
     if (mdm_platform === "microsoft") {
       return (
         <>
           <b>{activity.actor_full_name} </b>Mobile device management (MDM) was
-          turned on for <b>{activity.details?.host_display_name} (manual)</b>.
+          turned on for{" "}
+          <b>
+            {host_display_name || host_serial || "a host"}
+            {serialSuffix} ({enrollmentTypeText})
+          </b>
+          .
         </>
       );
     }
@@ -347,13 +450,6 @@ const TAGGED_TEMPLATES = {
 
     // note: if mdm_platform is missing, we assume this is Apple MDM for backwards
     // compatibility
-    let enrollmentTypeText = "";
-    if (activity.details?.installed_from_dep) {
-      enrollmentTypeText = "automatic";
-    } else {
-      enrollmentTypeText = "manual";
-    }
-
     const hostDisplayText = host_display_name || host_serial;
     const hostDisplayPrefixText = host_display_name
       ? ""
@@ -364,7 +460,8 @@ const TAGGED_TEMPLATES = {
         <b>{activity.actor_full_name} </b>An end user turned on MDM features for{" "}
         {hostDisplayPrefixText}
         <b>
-          {hostDisplayText} ({enrollmentTypeText})
+          {hostDisplayText}
+          {serialSuffix} ({enrollmentTypeText})
         </b>
         .
       </>
@@ -428,6 +525,19 @@ const TAGGED_TEMPLATES = {
       <>unassigned</>
     );
 
+    // "latest" isn't a minimum -- the target floats with what Apple publishes --
+    // so the sentence drops "the minimum" rather than contradicting itself.
+    // There's no deadline to report either: it's derived from deadline_days,
+    // which the activity doesn't record.
+    if (activity.details?.minimum_version === "latest") {
+      return (
+        <>
+          {editedActivity} {applePlatform} version to <b>latest</b> on hosts
+          assigned to {teamSection}.
+        </>
+      );
+    }
+
     return (
       <>
         {editedActivity} the minimum {applePlatform} version {versionSection}{" "}
@@ -485,6 +595,15 @@ const TAGGED_TEMPLATES = {
       </>
     );
   },
+  retrievedHostMyDeviceURL: (activity: IActivity) => {
+    return (
+      <>
+        {" "}
+        retrieved the My device URL for{" "}
+        <b>{activity.details?.host_display_name}</b>.
+      </>
+    );
+  },
   viewedHostRecoveryLockPassword: (activity: IActivity) => {
     return (
       <>
@@ -507,7 +626,81 @@ const TAGGED_TEMPLATES = {
     return (
       <>
         {" "}
-        rotated the Recovery Lock password for{" "}
+        triggered rotation of the Recovery Lock password for{" "}
+        <b>{activity.details?.host_display_name}</b>.
+      </>
+    );
+  },
+  enabledManagedLocalAccount: (activity: IActivity) => {
+    // activities created before the platform detail existed omit it, which means macOS
+    const platformDisplay =
+      PLATFORM_DISPLAY_NAMES[activity.details?.platform ?? "darwin"];
+    return (
+      <>
+        {" "}
+        enabled managed local accounts for{" "}
+        {activity.details?.team_name ? (
+          <>
+            {platformDisplay} hosts assigned to the{" "}
+            <b>{activity.details.team_name}</b> fleet.
+          </>
+        ) : (
+          `unassigned ${platformDisplay} hosts.`
+        )}
+      </>
+    );
+  },
+  disabledManagedLocalAccount: (activity: IActivity) => {
+    // activities created before the platform detail existed omit it, which means macOS
+    const platformDisplay =
+      PLATFORM_DISPLAY_NAMES[activity.details?.platform ?? "darwin"];
+    return (
+      <>
+        {" "}
+        disabled managed local accounts for{" "}
+        {activity.details?.team_name ? (
+          <>
+            {platformDisplay} hosts assigned to the{" "}
+            <b>{activity.details.team_name}</b> fleet.
+          </>
+        ) : (
+          `unassigned ${platformDisplay} hosts.`
+        )}
+      </>
+    );
+  },
+  viewedManagedLocalAccount: (activity: IActivity) => {
+    return (
+      <>
+        {" "}
+        viewed the managed local account on{" "}
+        <b>{activity.details?.host_display_name}</b>.
+      </>
+    );
+  },
+  createdManagedLocalAccount: (activity: IActivity) => {
+    return (
+      <>
+        {" "}
+        created a managed local account for{" "}
+        <b>{activity.details?.host_display_name}</b>.
+      </>
+    );
+  },
+  rotatedManagedLocalAccountPassword: (activity: IActivity) => {
+    return (
+      <>
+        {" "}
+        triggered rotation of the managed local account password for{" "}
+        <b>{activity.details?.host_display_name}</b>.
+      </>
+    );
+  },
+  failedToRotateManagedLocalAccountPassword: (activity: IActivity) => {
+    return (
+      <>
+        {" "}
+        failed to rotate the managed local account password for{" "}
         <b>{activity.details?.host_display_name}</b>.
       </>
     );
@@ -559,18 +752,7 @@ const TAGGED_TEMPLATES = {
     );
   },
   editedAppleOSProfile: (activity: IActivity, isPremiumTier: boolean) => {
-    return (
-      <>
-        {" "}
-        edited configuration profiles for{" "}
-        {getProfileMessageSuffix(
-          isPremiumTier,
-          "apple",
-          activity.details?.team_name
-        )}{" "}
-        via fleetctl.
-      </>
-    );
+    return getEditedProfileMessage(activity, isPremiumTier, "apple");
   },
   createdAndroidProfile: (activity: IActivity, isPremiumTier: boolean) => {
     const profileName = activity.details?.profile_name;
@@ -619,18 +801,7 @@ const TAGGED_TEMPLATES = {
     );
   },
   editedAndroidProfile: (activity: IActivity, isPremiumTier: boolean) => {
-    return (
-      <>
-        {" "}
-        edited configuration profiles for{" "}
-        {getProfileMessageSuffix(
-          isPremiumTier,
-          "android",
-          activity.details?.team_name
-        )}{" "}
-        via fleetctl.
-      </>
-    );
+    return getEditedProfileMessage(activity, isPremiumTier, "android");
   },
   editedAndroidCertificate: (activity: IActivity, isPremiumTier: boolean) => {
     return (
@@ -643,6 +814,15 @@ const TAGGED_TEMPLATES = {
           activity.details?.team_name
         )}{" "}
         via fleetctl.
+      </>
+    );
+  },
+  resentCertificate: (activity: IActivity) => {
+    return (
+      <>
+        {" "}
+        resent {activity.details?.certificate_name} certificate for host{" "}
+        <b>{activity.details?.host_display_name}</b>.
       </>
     );
   },
@@ -723,18 +903,7 @@ const TAGGED_TEMPLATES = {
     );
   },
   editedWindowsProfile: (activity: IActivity, isPremiumTier: boolean) => {
-    return (
-      <>
-        {" "}
-        edited configuration profiles for{" "}
-        {getProfileMessageSuffix(
-          isPremiumTier,
-          "windows",
-          activity.details?.team_name
-        )}{" "}
-        via fleetctl.
-      </>
-    );
+    return getEditedProfileMessage(activity, isPremiumTier, "windows");
   },
   enabledDiskEncryption: (activity: IActivity) => {
     const suffix = getHostTeamAssignmentSuffix(activity.details?.team_name);
@@ -743,6 +912,27 @@ const TAGGED_TEMPLATES = {
   disabledEncryption: (activity: IActivity) => {
     const suffix = getHostTeamAssignmentSuffix(activity.details?.team_name);
     return <>removed disk encryption enforcement for hosts {suffix}.</>;
+  },
+  editedDiskEncryptionSettings: (activity: IActivity) => {
+    // this activity's platform detail is "macos" | "windows" | "linux" — the
+    // settings-key naming, not the osquery-style "darwin" of other activities
+    const platform = activity.details?.platform as string | undefined;
+    const displayNames: Record<string, string> = {
+      macos: "macOS",
+      windows: "Windows",
+      linux: "Linux",
+    };
+    // an unexpected value renders as-is and a missing one as "unknown", so
+    // either degrades visibly rather than leaving a gap in the sentence
+    const platformDisplay = platform
+      ? displayNames[platform] ?? platform
+      : "unknown";
+    const suffix = getHostTeamAssignmentSuffix(activity.details?.fleet_name);
+    return (
+      <>
+        edited disk encryption settings for {platformDisplay} hosts{suffix}.
+      </>
+    );
   },
   enabledRecoveryLockPasswords: (activity: IActivity) => {
     const suffix = getHostTeamAssignmentSuffix(activity.details?.team_name);
@@ -849,6 +1039,40 @@ const TAGGED_TEMPLATES = {
       </>
     );
   },
+  enabledHistoricalDataset: (activity: IActivity) => {
+    const datasetLabel = getHistoricalDatasetLabel(activity.details?.dataset);
+    const fleetName = activity.details?.fleet_name;
+    return (
+      <>
+        {" "}
+        enabled data collection for <b>{datasetLabel}</b>
+        {fleetName ? (
+          <>
+            {" "}
+            for the <b>{fleetName}</b> fleet
+          </>
+        ) : null}
+        .
+      </>
+    );
+  },
+  disabledHistoricalDataset: (activity: IActivity) => {
+    const datasetLabel = getHistoricalDatasetLabel(activity.details?.dataset);
+    const fleetName = activity.details?.fleet_name;
+    return (
+      <>
+        {" "}
+        disabled data collection for <b>{datasetLabel}</b>
+        {fleetName ? (
+          <>
+            {" "}
+            for the <b>{fleetName}</b> fleet
+          </>
+        ) : null}
+        .
+      </>
+    );
+  },
   disabledMacOSSetupEndUserAuth: (activity: IActivity) => {
     return (
       <>
@@ -901,6 +1125,25 @@ const TAGGED_TEMPLATES = {
   },
   enabledGitOpsMode: () => "enabled GitOps mode in the UI.",
   disabledGitOpsMode: () => "disabled GitOps mode in the UI.",
+  ssoFleetDesktop: (state: string) =>
+    `${state} single sign-on (SSO) for Fleet Desktop.`,
+  enabledGitOpsException: (activity: IActivity) => {
+    const exception = activity.details?.exception ?? "";
+    return `enabled the ${exception} exception for GitOps.`;
+  },
+  disabledGitOpsException: (activity: IActivity) => {
+    const exception = activity.details?.exception ?? "";
+    return `disabled the ${exception} exception for GitOps.`;
+  },
+  editedWindowsEnrollmentDefaultFleet: (activity: IActivity) => {
+    return (
+      <>
+        {" "}
+        edited the default fleet for Windows hosts to{" "}
+        <b>{activity.details?.fleet_name || "Unassigned"}</b>.
+      </>
+    );
+  },
   enabledWindowsMdmMigration: () => {
     return (
       <>
@@ -919,13 +1162,25 @@ const TAGGED_TEMPLATES = {
       </>
     );
   },
+  ranCustomMdmCommand: (activity: IActivity) => {
+    const { request_type, host_display_name } = activity.details || {};
+    return (
+      <>
+        {" "}
+        ran {formatMdmCommandNameForActivityItem(request_type)} on{" "}
+        <b>{host_display_name}</b>.
+      </>
+    );
+  },
   ranScript: (activity: IActivity) => {
-    const { script_name, host_display_name } = activity.details || {};
+    const { script_name, host_display_name, from_setup_experience } =
+      activity.details || {};
     return (
       <>
         {" "}
         ran {formatScriptNameForActivityItem(script_name)} on{" "}
-        <b>{host_display_name}</b>.
+        <b>{host_display_name}</b>
+        {from_setup_experience ? " during setup experience" : ""}.
       </>
     );
   },
@@ -1061,23 +1316,34 @@ const TAGGED_TEMPLATES = {
     );
   },
   editedWindowsUpdates: (activity: IActivity) => {
+    const deadlineDays = activity.details?.deadline_days;
+    const gracePeriodDays = activity.details?.grace_period_days;
+    const isCleared = deadlineDays === undefined || deadlineDays === null;
+    const teamText = activity.details?.team_name ? (
+      <>
+        the <b>{activity.details.team_name}</b> fleet
+      </>
+    ) : (
+      `unassigned`
+    );
+
+    if (isCleared) {
+      return (
+        <>
+          {" "}
+          removed the Windows OS update options on hosts assigned to {teamText}.
+        </>
+      );
+    }
+
     return (
       <>
         {" "}
         updated the Windows OS update options (
         <b>
-          Deadline: {activity.details?.deadline_days} days / Grace period:{" "}
-          {activity.details?.grace_period_days} days
+          Deadline: {deadlineDays} days / Grace period: {gracePeriodDays} days
         </b>
-        ) on hosts assigned to{" "}
-        {activity.details?.team_name ? (
-          <>
-            the <b>{activity.details.team_name}</b> fleet
-          </>
-        ) : (
-          `unassigned`
-        )}
-        .
+        ) on hosts assigned to {teamText}.
       </>
     );
   },
@@ -1136,6 +1402,13 @@ const TAGGED_TEMPLATES = {
       </>
     );
   },
+  failedWipe: (activity: IActivity) => {
+    return (
+      <>
+        Wipe failed on <b>{activity.details?.host_display_name}</b>.
+      </>
+    );
+  },
   createdDeclarationProfile: (activity: IActivity, isPremiumTier: boolean) => {
     return (
       <>
@@ -1169,29 +1442,32 @@ const TAGGED_TEMPLATES = {
     );
   },
   editedDeclarationProfile: (activity: IActivity, isPremiumTier: boolean) => {
-    return (
-      <>
-        {" "}
-        edited declaration (DDM) profiles{" "}
-        <b>{activity.details?.profile_name}</b> for{" "}
-        {getProfileMessageSuffix(
-          isPremiumTier,
-          "apple",
-          activity.details?.team_name
-        )}{" "}
-        via fleetctl.
-      </>
+    const profileName = activity.details?.profile_name;
+    const suffix = getProfileMessageSuffix(
+      isPremiumTier,
+      "apple",
+      activity.details?.team_name
     );
+    // profile_name is set only when a single declaration was edited in
+    // place; fleetctl/GitOps batch edits omit it
+    if (profileName) {
+      return (
+        <>
+          {" "}
+          edited the declaration (DDM) profile <b>{profileName}</b> for {suffix}
+          .
+        </>
+      );
+    }
+    return <> edited declaration (DDM) profiles for {suffix} via fleetctl.</>;
   },
 
   resentConfigProfile: (activity: IActivity) => {
-    const actor = activity.actor_full_name
-      ? activity.actor_full_name
-      : "An end user";
+    const actor = activity.actor_full_name ? activity.actor_full_name : "Fleet";
     return (
       <>
-        <b>{actor}</b> resent {activity.details?.profile_name} configuration
-        profile to {activity.details?.host_display_name}.
+        <b>{actor}</b> resent <b>{activity.details?.profile_name}</b> to{" "}
+        <b>{activity.details?.host_display_name}</b>.
       </>
     );
   },
@@ -1250,6 +1526,18 @@ const TAGGED_TEMPLATES = {
       </>
     );
   },
+  changedOrgLogo: (activity: IActivity) => {
+    const mode = activity.details?.mode;
+    const suffix =
+      mode === "all" ? "for all modes" : `for ${mode || "unknown"} mode`;
+    return <> updated organization logo {suffix}.</>;
+  },
+  deletedOrgLogo: (activity: IActivity) => {
+    const mode = activity.details?.mode;
+    const suffix =
+      mode === "all" ? "for all modes" : `for ${mode || "unknown"} mode`;
+    return <> deleted organization logo {suffix}.</>;
+  },
   installedSoftware: (activity: IActivity) => {
     const { details } = activity;
     if (!details) {
@@ -1261,19 +1549,53 @@ const TAGGED_TEMPLATES = {
       software_title: title,
       status,
       source,
+      self_service,
+      from_setup_experience,
+      skipped_install,
     } = details;
 
     const showSoftwarePackage =
       !!details.software_package &&
       activity.type === ActivityType.InstalledSoftware;
     const isScriptPackageSource = SCRIPT_PACKAGE_SOURCES.includes(source || "");
+
+    if (skipped_install) {
+      return (
+        <>
+          {" "}
+          skipped install of <b>{title}</b> on <b>{hostName}</b>.
+        </>
+      );
+    }
+
+    // Self-service actions: drop the actor and switch to passive voice so the
+    // sentence reads "<title> was installed on <host> (self-service)." without
+    // misattributing the action.
+    if (self_service) {
+      return (
+        <>
+          {" "}
+          <b>{title}</b>
+          {showSoftwarePackage && ` (${details.software_package})`}{" "}
+          {getInstallUninstallStatusPredicatePassive(
+            status,
+            isScriptPackageSource
+          )}{" "}
+          on <b>{hostName}</b>
+          {from_setup_experience ? " during setup experience" : ""} (self
+          service).
+        </>
+      );
+    }
+
     return (
       <>
         {" "}
         {getInstallUninstallStatusPredicate(status, isScriptPackageSource)}{" "}
         <b>{title}</b>
         {showSoftwarePackage && ` (${details.software_package})`} on{" "}
-        <b>{hostName}</b>.
+        <b>{hostName}</b>
+        {from_setup_experience ? " during setup experience" : ""}.
       </>
     );
   },
@@ -1283,7 +1605,11 @@ const TAGGED_TEMPLATES = {
       return TAGGED_TEMPLATES.defaultActivityTemplate(activity);
     }
 
-    const { host_display_name: hostName, software_title: title } = details;
+    const {
+      host_display_name: hostName,
+      software_title: title,
+      self_service,
+    } = details;
     const status =
       details.status === "failed" ? "failed_uninstall" : details.status;
 
@@ -1291,12 +1617,42 @@ const TAGGED_TEMPLATES = {
       !!details.software_package &&
       activity.type === ActivityType.InstalledSoftware;
 
+    if (self_service) {
+      return (
+        <>
+          {" "}
+          <b>{title}</b>
+          {showSoftwarePackage && ` (${details.software_package})`}{" "}
+          {getInstallUninstallStatusPredicatePassive(status)} on{" "}
+          <b>{hostName}</b> (self service).
+        </>
+      );
+    }
+
     return (
       <>
         {" "}
         {getInstallUninstallStatusPredicate(status)} software <b>{title}</b>
         {showSoftwarePackage && ` (${details.software_package})`} from{" "}
         <b>{hostName}</b>.
+      </>
+    );
+  },
+  installedAllSelfServiceSoftware: (activity: IActivity) => {
+    const categoryName = activity.details?.self_service_category_name;
+    if (categoryName) {
+      return (
+        <>
+          {" "}
+          <b>End user</b> selected the <b>Install all</b> option in the
+          self-service <b>{categoryName}</b> category.
+        </>
+      );
+    }
+    return (
+      <>
+        {" "}
+        <b>End user</b> installed all the software in self service.
       </>
     );
   },
@@ -1341,7 +1697,8 @@ const TAGGED_TEMPLATES = {
       <>
         {" "}
         added <b>{swTitle}</b>{" "}
-        {swPlatform ? `(${PLATFORM_DISPLAY_NAMES[swPlatform]}) ` : ""}to{" "}
+        {swPlatform ? `(${PLATFORM_DISPLAY_NAMES[swPlatform]}) ` : ""}
+        to{" "}
         {activity.details?.team_name ? (
           <>
             {" "}
@@ -1360,7 +1717,8 @@ const TAGGED_TEMPLATES = {
       <>
         {" "}
         edited <b>{swTitle}</b>{" "}
-        {swPlatform ? `(${PLATFORM_DISPLAY_NAMES[swPlatform]}) ` : ""}on{" "}
+        {swPlatform ? `(${PLATFORM_DISPLAY_NAMES[swPlatform]}) ` : ""}
+        on{" "}
         {activity.details?.team_name ? (
           <>
             {" "}
@@ -1379,7 +1737,8 @@ const TAGGED_TEMPLATES = {
       <>
         {" "}
         deleted <b>{swTitle}</b>{" "}
-        {swPlatform ? `(${PLATFORM_DISPLAY_NAMES[swPlatform]}) ` : ""}from{" "}
+        {swPlatform ? `(${PLATFORM_DISPLAY_NAMES[swPlatform]}) ` : ""}
+        from{" "}
         {activity.details?.team_name ? (
           <>
             {" "}
@@ -1406,6 +1765,9 @@ const TAGGED_TEMPLATES = {
   disabledAndroidMdm: () => {
     return <> turned off Android MDM.</>;
   },
+  editedAppleAccountProvisioning: () => (
+    <> edited account provisioning settings.</>
+  ),
   configuredMSEntraConditionalAccess: () => (
     <> configured Microsoft Entra conditional access.</>
   ),
@@ -1416,6 +1778,22 @@ const TAGGED_TEMPLATES = {
   deletedConditionalAccessOkta: () => (
     <> deleted Okta conditional access configuration.</>
   ),
+  googleWorkspaceIntegration: (verb: string) => (activity: IActivity) => {
+    const { domain } = activity.details ?? {};
+    return (
+      <>
+        {" "}
+        {verb} the Google Workspace integration
+        {domain ? (
+          <>
+            {" "}
+            for <strong>{domain}</strong>
+          </>
+        ) : null}
+        .
+      </>
+    );
+  },
   hostBypassedConditionalAccess: (activity: IActivity) => {
     const idpFullName = activity.details?.idp_full_name;
     const hostDisplayName = activity.details?.host_display_name;
@@ -1476,13 +1854,41 @@ const TAGGED_TEMPLATES = {
       </>
     );
   },
+  canceledMdmCommand: (activity: IActivity) => {
+    const { command_type: commandType, host_display_name: hostName } =
+      activity.details || {};
+    return (
+      <>
+        {" "}
+        canceled the pending <b>{commandType}</b> command on <b>{hostName}</b>.
+      </>
+    );
+  },
   canceledInstallSoftware: (activity: IActivity) => {
+    const {
+      software_title: title,
+      host_display_name: hostName,
+      from_setup_experience: fromSetupExperience,
+    } = activity.details || {};
+    return (
+      <>
+        {" "}
+        canceled <b>{title}</b> install on <b>{hostName}</b>
+        {fromSetupExperience
+          ? " during setup experience. End user was asked to restart"
+          : ""}
+        .
+      </>
+    );
+  },
+  canceledSetupExperience: (activity: IActivity) => {
     const { software_title: title, host_display_name: hostName } =
       activity.details || {};
     return (
       <>
         {" "}
-        canceled <b>{title}</b> install on <b>{hostName}</b>.
+        canceled setup experience on <b>{hostName}</b> because <b>{title}</b>{" "}
+        failed to install. End user was asked to restart.
       </>
     );
   },
@@ -1660,6 +2066,57 @@ const TAGGED_TEMPLATES = {
       </>
     );
   },
+  createdLabel: (activity: IActivity) => {
+    const fleetText = activity.details?.fleet_name ? (
+      <>
+        {" "}
+        on the <b>{activity.details.fleet_name}</b> fleet
+      </>
+    ) : (
+      ""
+    );
+    return (
+      <>
+        {" "}
+        created a label <b>{activity.details?.label_name}</b>
+        {fleetText}.
+      </>
+    );
+  },
+  editedLabel: (activity: IActivity) => {
+    const fleetText = activity.details?.fleet_name ? (
+      <>
+        {" "}
+        on the <b>{activity.details.fleet_name}</b> fleet
+      </>
+    ) : (
+      ""
+    );
+    return (
+      <>
+        {" "}
+        edited the label <b>{activity.details?.label_name}</b>
+        {fleetText}.
+      </>
+    );
+  },
+  deletedLabel: (activity: IActivity) => {
+    const fleetText = activity.details?.fleet_name ? (
+      <>
+        {" "}
+        on the <b>{activity.details.fleet_name}</b> fleet
+      </>
+    ) : (
+      ""
+    );
+    return (
+      <>
+        {" "}
+        deleted the label <b>{activity.details?.label_name}</b>
+        {fleetText}.
+      </>
+    );
+  },
 
   createdCustomVariable: (activity: IActivity) => {
     const { custom_variable_name } = activity.details || {};
@@ -1670,11 +2127,44 @@ const TAGGED_TEMPLATES = {
     );
   },
 
+  updatedCustomVariable: (activity: IActivity) => {
+    const { custom_variable_name } = activity.details || {};
+    return (
+      <>
+        updated custom variable <b>{custom_variable_name}</b>.
+      </>
+    );
+  },
+
   deletedCustomVariable: (activity: IActivity) => {
     const { custom_variable_name } = activity.details || {};
     return (
       <>
         deleted custom variable <b>{custom_variable_name}</b>.
+      </>
+    );
+  },
+  createdCustomHostVital: (activity: IActivity) => {
+    const { custom_host_vital_name } = activity.details || {};
+    return (
+      <>
+        created a custom host vital <b>{custom_host_vital_name}</b>.
+      </>
+    );
+  },
+  editedCustomHostVital: (activity: IActivity) => {
+    const { custom_host_vital_name } = activity.details || {};
+    return (
+      <>
+        edited custom host vital <b>{custom_host_vital_name}</b>.
+      </>
+    );
+  },
+  deletedCustomHostVital: (activity: IActivity) => {
+    const { custom_host_vital_name } = activity.details || {};
+    return (
+      <>
+        deleted custom host vital <b>{custom_host_vital_name}</b>.
       </>
     );
   },
@@ -1706,6 +2196,40 @@ const TAGGED_TEMPLATES = {
           <>
             the <b>{team_name}</b> fleet
           </>
+        )}
+        .
+      </>
+    );
+  },
+  createdSetupExperienceScript: (activity: IActivity) => {
+    const { script_name, fleet_name } = activity.details || {};
+    return (
+      <>
+        {" "}
+        added setup experience script <b>{script_name}</b> for{" "}
+        {fleet_name ? (
+          <>
+            the <b>{fleet_name}</b> fleet
+          </>
+        ) : (
+          `unassigned`
+        )}
+        .
+      </>
+    );
+  },
+  deletedSetupExperienceScript: (activity: IActivity) => {
+    const { script_name, fleet_name } = activity.details || {};
+    return (
+      <>
+        {" "}
+        deleted setup experience script <b>{script_name}</b> for{" "}
+        {fleet_name ? (
+          <>
+            the <b>{fleet_name}</b> fleet
+          </>
+        ) : (
+          `unassigned`
         )}
         .
       </>
@@ -1772,11 +2296,65 @@ const TAGGED_TEMPLATES = {
     return <>edited enroll secret{postFix}.</>;
   },
   addedMicrosoftEntraTenant: (activity: IActivity) => {
-    return <> added Microsoft Entra tenant ({activity.details?.tenant_id}).</>;
+    const tenantId = activity.details?.tenant_id;
+    return (
+      <> added Microsoft Entra tenant{tenantId ? ` (${tenantId})` : ""}.</>
+    );
   },
   deletedMicrosoftEntraTenant: (activity: IActivity) => {
+    const tenantId = activity.details?.tenant_id;
     return (
-      <> deleted Microsoft Entra tenant ({activity.details?.tenant_id}).</>
+      <> deleted Microsoft Entra tenant{tenantId ? ` (${tenantId})` : ""}.</>
+    );
+  },
+  addedMicrosoftGraphCredential: (activity: IActivity) => {
+    const tenantId = activity.details?.tenant_id;
+    const suffix = tenantId ? ` (${tenantId})` : "";
+    return <> added Microsoft Graph credential{suffix}.</>;
+  },
+  editedMicrosoftGraphCredential: (activity: IActivity) => {
+    const tenantId = activity.details?.tenant_id;
+    const suffix = tenantId ? ` (${tenantId})` : "";
+    return <> edited Microsoft Graph credential{suffix}.</>;
+  },
+  deletedMicrosoftGraphCredential: (activity: IActivity) => {
+    const tenantId = activity.details?.tenant_id;
+    const suffix = tenantId ? ` (${tenantId})` : "";
+    return <> deleted Microsoft Graph credential{suffix}.</>;
+  },
+  addedMicrosoftEntraClientId: (activity: IActivity) => {
+    const clientId = activity.details?.client_id;
+    return (
+      <> added Microsoft Entra client ID{clientId ? ` (${clientId})` : ""}.</>
+    );
+  },
+  deletedMicrosoftEntraClientId: (activity: IActivity) => {
+    const clientId = activity.details?.client_id;
+    return (
+      <> deleted Microsoft Entra client ID{clientId ? ` (${clientId})` : ""}.</>
+    );
+  },
+  clearedPasscode: (activity: IActivity) => {
+    return (
+      <>
+        cleared the passcode on <b>{activity.details?.host_display_name}</b>.
+      </>
+    );
+  },
+  failedEnrollmentRenewalProfile: (activity: IActivity) => {
+    return (
+      <>
+        enrollment profile renewal failed for{" "}
+        <b>{activity.details?.host_display_name}</b>.
+      </>
+    );
+  },
+  releasedDeviceFromAB: (activity: IActivity) => {
+    return (
+      <>
+        released <b>{activity.details?.host_display_name}</b> from Apple
+        Business.
+      </>
     );
   },
 };
@@ -1812,6 +2390,9 @@ const getDetail = (activity: IActivity, isPremiumTier: boolean) => {
     }
     case ActivityType.UserFailedLogin: {
       return TAGGED_TEMPLATES.userFailedLogin(activity);
+    }
+    case ActivityType.UserMFARequested: {
+      return TAGGED_TEMPLATES.userMFARequested(activity);
     }
     case ActivityType.UserCreated: {
       return TAGGED_TEMPLATES.userCreated(activity);
@@ -1861,6 +2442,9 @@ const getDetail = (activity: IActivity, isPremiumTier: boolean) => {
     case ActivityType.ReadHostDiskEncryptionKey: {
       return TAGGED_TEMPLATES.readHostDiskEncryptionKey(activity);
     }
+    case ActivityType.RetrievedHostMyDeviceURL: {
+      return TAGGED_TEMPLATES.retrievedHostMyDeviceURL(activity);
+    }
     case ActivityType.ViewedHostRecoveryLockPassword: {
       return TAGGED_TEMPLATES.viewedHostRecoveryLockPassword(activity);
     }
@@ -1869,6 +2453,26 @@ const getDetail = (activity: IActivity, isPremiumTier: boolean) => {
     }
     case ActivityType.RotatedHostRecoveryLockPassword: {
       return TAGGED_TEMPLATES.rotatedHostRecoveryLockPassword(activity);
+    }
+    case ActivityType.EnabledManagedLocalAccount: {
+      return TAGGED_TEMPLATES.enabledManagedLocalAccount(activity);
+    }
+    case ActivityType.DisabledManagedLocalAccount: {
+      return TAGGED_TEMPLATES.disabledManagedLocalAccount(activity);
+    }
+    case ActivityType.ViewedManagedLocalAccount: {
+      return TAGGED_TEMPLATES.viewedManagedLocalAccount(activity);
+    }
+    case ActivityType.CreatedManagedLocalAccount: {
+      return TAGGED_TEMPLATES.createdManagedLocalAccount(activity);
+    }
+    case ActivityType.RotatedManagedLocalAccountPassword: {
+      return TAGGED_TEMPLATES.rotatedManagedLocalAccountPassword(activity);
+    }
+    case ActivityType.FailedToRotateManagedLocalAccountPassword: {
+      return TAGGED_TEMPLATES.failedToRotateManagedLocalAccountPassword(
+        activity
+      );
     }
     case ActivityType.CreatedAppleOSProfile: {
       return TAGGED_TEMPLATES.createdAppleOSProfile(activity, isPremiumTier);
@@ -1890,6 +2494,9 @@ const getDetail = (activity: IActivity, isPremiumTier: boolean) => {
     }
     case ActivityType.EditedAndroidCertificate: {
       return TAGGED_TEMPLATES.editedAndroidCertificate(activity, isPremiumTier);
+    }
+    case ActivityType.ResentCertificate: {
+      return TAGGED_TEMPLATES.resentCertificate(activity);
     }
     case ActivityType.AddedNdesScepProxy: {
       return TAGGED_TEMPLATES.addedCertificateAuthority("NDES");
@@ -1934,17 +2541,16 @@ const getDetail = (activity: IActivity, isPremiumTier: boolean) => {
     case ActivityType.EditedWindowsProfile: {
       return TAGGED_TEMPLATES.editedWindowsProfile(activity, isPremiumTier);
     }
-    // Note: Both "enabled_disk_encryption" and "enabled_macos_disk_encryption" display the same
-    // message. The latter is deprecated in the API but it is retained here for backwards compatibility.
-    case ActivityType.EnabledDiskEncryption:
+    // Note: This activity is generated for all platforms.
     case ActivityType.EnabledMacDiskEncryption: {
       return TAGGED_TEMPLATES.enabledDiskEncryption(activity);
     }
-    // Note: Both "disabled_disk_encryption" and "disabled_macos_disk_encryption" display the same
-    // message. The latter is deprecated in the API but it is retained here for backwards compatibility.
-    case ActivityType.DisabledDiskEncryption:
+    // Note: This activity is generated for all platforms.
     case ActivityType.DisabledMacDiskEncryption: {
       return TAGGED_TEMPLATES.disabledEncryption(activity);
+    }
+    case ActivityType.EditedDiskEncryptionSettings: {
+      return TAGGED_TEMPLATES.editedDiskEncryptionSettings(activity);
     }
     case ActivityType.EnabledRecoveryLockPasswords: {
       return TAGGED_TEMPLATES.enabledRecoveryLockPasswords(activity);
@@ -1970,6 +2576,12 @@ const getDetail = (activity: IActivity, isPremiumTier: boolean) => {
     case ActivityType.DisabledMacOSSetupEndUserAuth: {
       return TAGGED_TEMPLATES.disabledMacOSSetupEndUserAuth(activity);
     }
+    case ActivityType.EnabledHistoricalDataset: {
+      return TAGGED_TEMPLATES.enabledHistoricalDataset(activity);
+    }
+    case ActivityType.DisabledHistoricalDataset: {
+      return TAGGED_TEMPLATES.disabledHistoricalDataset(activity);
+    }
     case ActivityType.TransferredHosts: {
       return TAGGED_TEMPLATES.transferredHosts(activity);
     }
@@ -1985,11 +2597,29 @@ const getDetail = (activity: IActivity, isPremiumTier: boolean) => {
     case ActivityType.DisabledGitOpsMode: {
       return TAGGED_TEMPLATES.disabledGitOpsMode();
     }
+    case ActivityType.EnabledSSOFleetDesktop: {
+      return TAGGED_TEMPLATES.ssoFleetDesktop("enabled");
+    }
+    case ActivityType.DisabledSSOFleetDesktop: {
+      return TAGGED_TEMPLATES.ssoFleetDesktop("disabled");
+    }
+    case ActivityType.EnabledGitOpsException: {
+      return TAGGED_TEMPLATES.enabledGitOpsException(activity);
+    }
+    case ActivityType.DisabledGitOpsException: {
+      return TAGGED_TEMPLATES.disabledGitOpsException(activity);
+    }
     case ActivityType.EnabledWindowsMdmMigration: {
       return TAGGED_TEMPLATES.enabledWindowsMdmMigration();
     }
     case ActivityType.DisabledWindowsMdmMigration: {
       return TAGGED_TEMPLATES.disabledWindowsMdmMigration();
+    }
+    case ActivityType.EditedWindowsEnrollmentDefaultFleet: {
+      return TAGGED_TEMPLATES.editedWindowsEnrollmentDefaultFleet(activity);
+    }
+    case ActivityType.RanCustomMdmCommand: {
+      return TAGGED_TEMPLATES.ranCustomMdmCommand(activity);
     }
     case ActivityType.RanScript: {
       return TAGGED_TEMPLATES.ranScript(activity);
@@ -2030,6 +2660,9 @@ const getDetail = (activity: IActivity, isPremiumTier: boolean) => {
     case ActivityType.WipedHost: {
       return TAGGED_TEMPLATES.wipedHost(activity);
     }
+    case ActivityType.FailedWipe: {
+      return TAGGED_TEMPLATES.failedWipe(activity);
+    }
     case ActivityType.CreatedDeclarationProfile: {
       return TAGGED_TEMPLATES.createdDeclarationProfile(
         activity,
@@ -2060,8 +2693,17 @@ const getDetail = (activity: IActivity, isPremiumTier: boolean) => {
     case ActivityType.DeletedSoftware: {
       return TAGGED_TEMPLATES.deletedSoftware(activity);
     }
+    case ActivityType.ChangedOrgLogo: {
+      return TAGGED_TEMPLATES.changedOrgLogo(activity);
+    }
+    case ActivityType.DeletedOrgLogo: {
+      return TAGGED_TEMPLATES.deletedOrgLogo(activity);
+    }
     case ActivityType.InstalledSoftware: {
       return TAGGED_TEMPLATES.installedSoftware(activity);
+    }
+    case ActivityType.InstalledAllSelfServiceSoftware: {
+      return TAGGED_TEMPLATES.installedAllSelfServiceSoftware(activity);
     }
     case ActivityType.UninstalledSoftware: {
       return TAGGED_TEMPLATES.uninstalledSoftware(activity);
@@ -2099,6 +2741,9 @@ const getDetail = (activity: IActivity, isPremiumTier: boolean) => {
     case ActivityType.DisabledAndroidMdm: {
       return TAGGED_TEMPLATES.disabledAndroidMdm();
     }
+    case ActivityType.EditedAppleAccountProvisioning: {
+      return TAGGED_TEMPLATES.editedAppleAccountProvisioning();
+    }
     case ActivityType.ConfiguredMSEntraConditionalAccess: {
       return TAGGED_TEMPLATES.configuredMSEntraConditionalAccess();
     }
@@ -2110,6 +2755,15 @@ const getDetail = (activity: IActivity, isPremiumTier: boolean) => {
     }
     case ActivityType.DeletedConditionalAccessOkta: {
       return TAGGED_TEMPLATES.deletedConditionalAccessOkta();
+    }
+    case ActivityType.AddedGoogleWorkspaceIntegration: {
+      return TAGGED_TEMPLATES.googleWorkspaceIntegration("added")(activity);
+    }
+    case ActivityType.EditedGoogleWorkspaceIntegration: {
+      return TAGGED_TEMPLATES.googleWorkspaceIntegration("edited")(activity);
+    }
+    case ActivityType.DeletedGoogleWorkspaceIntegration: {
+      return TAGGED_TEMPLATES.googleWorkspaceIntegration("deleted")(activity);
     }
     case ActivityType.UpdatedConditionalAccessBypass: {
       return TAGGED_TEMPLATES.updatedConditionalAccessBypass();
@@ -2126,12 +2780,18 @@ const getDetail = (activity: IActivity, isPremiumTier: boolean) => {
     case ActivityType.CanceledRunScript: {
       return TAGGED_TEMPLATES.canceledRunScript(activity);
     }
+    case ActivityType.CanceledMdmCommand: {
+      return TAGGED_TEMPLATES.canceledMdmCommand(activity);
+    }
     case ActivityType.CanceledInstallSoftware:
     case ActivityType.CanceledInstallAppStoreApp: {
       return TAGGED_TEMPLATES.canceledInstallSoftware(activity);
     }
     case ActivityType.CanceledUninstallSoftware: {
       return TAGGED_TEMPLATES.canceledUninstallSoftware(activity);
+    }
+    case ActivityType.CanceledSetupExperience: {
+      return TAGGED_TEMPLATES.canceledSetupExperience(activity);
     }
     case ActivityType.CreatedSavedQuery: {
       return TAGGED_TEMPLATES.createdSavedQuery(activity);
@@ -2151,17 +2811,44 @@ const getDetail = (activity: IActivity, isPremiumTier: boolean) => {
     case ActivityType.DeletedPolicy: {
       return TAGGED_TEMPLATES.deletedPolicy(activity);
     }
+    case ActivityType.CreatedLabel: {
+      return TAGGED_TEMPLATES.createdLabel(activity);
+    }
+    case ActivityType.EditedLabel: {
+      return TAGGED_TEMPLATES.editedLabel(activity);
+    }
+    case ActivityType.DeletedLabel: {
+      return TAGGED_TEMPLATES.deletedLabel(activity);
+    }
     case ActivityType.EscrowedDiskEncryptionKey: {
       return TAGGED_TEMPLATES.escrowedDiskEncryptionKey(activity);
     }
     case ActivityType.CreatedCustomVariable: {
       return TAGGED_TEMPLATES.createdCustomVariable(activity);
     }
+    case ActivityType.UpdatedCustomVariable: {
+      return TAGGED_TEMPLATES.updatedCustomVariable(activity);
+    }
     case ActivityType.DeletedCustomVariable: {
       return TAGGED_TEMPLATES.deletedCustomVariable(activity);
     }
+    case ActivityType.CreatedCustomHostVital: {
+      return TAGGED_TEMPLATES.createdCustomHostVital(activity);
+    }
+    case ActivityType.EditedCustomHostVital: {
+      return TAGGED_TEMPLATES.editedCustomHostVital(activity);
+    }
+    case ActivityType.DeletedCustomHostVital: {
+      return TAGGED_TEMPLATES.deletedCustomHostVital(activity);
+    }
     case ActivityType.EditedSetupExperienceSoftware: {
       return TAGGED_TEMPLATES.editedSetupExperienceSoftware(activity);
+    }
+    case ActivityType.CreatedSetupExperienceScript: {
+      return TAGGED_TEMPLATES.createdSetupExperienceScript(activity);
+    }
+    case ActivityType.DeletedSetupExperienceScript: {
+      return TAGGED_TEMPLATES.deletedSetupExperienceScript(activity);
     }
     case ActivityType.EditedHostIdpData: {
       return TAGGED_TEMPLATES.editedHostIdpData(activity);
@@ -2180,6 +2867,30 @@ const getDetail = (activity: IActivity, isPremiumTier: boolean) => {
     }
     case ActivityType.DeletedMicrosoftEntraTenant: {
       return TAGGED_TEMPLATES.deletedMicrosoftEntraTenant(activity);
+    }
+    case ActivityType.AddedMicrosoftEntraClientId: {
+      return TAGGED_TEMPLATES.addedMicrosoftEntraClientId(activity);
+    }
+    case ActivityType.DeletedMicrosoftEntraClientId: {
+      return TAGGED_TEMPLATES.deletedMicrosoftEntraClientId(activity);
+    }
+    case ActivityType.AddedMicrosoftGraphCredential: {
+      return TAGGED_TEMPLATES.addedMicrosoftGraphCredential(activity);
+    }
+    case ActivityType.EditedMicrosoftGraphCredential: {
+      return TAGGED_TEMPLATES.editedMicrosoftGraphCredential(activity);
+    }
+    case ActivityType.DeletedMicrosoftGraphCredential: {
+      return TAGGED_TEMPLATES.deletedMicrosoftGraphCredential(activity);
+    }
+    case ActivityType.ClearedPasscode: {
+      return TAGGED_TEMPLATES.clearedPasscode(activity);
+    }
+    case ActivityType.FailedEnrollmentProfileRenewal: {
+      return TAGGED_TEMPLATES.failedEnrollmentRenewalProfile(activity);
+    }
+    case ActivityType.ReleasedDeviceFromAB: {
+      return TAGGED_TEMPLATES.releasedDeviceFromAB(activity);
     }
     default: {
       return TAGGED_TEMPLATES.defaultActivityTemplate(activity);
@@ -2221,14 +2932,31 @@ const GlobalActivityItem = ({
       case ActivityType.InstalledSoftware:
       case ActivityType.UninstalledSoftware:
       case ActivityType.InstalledAppStoreApp:
-        return activity.details?.self_service ? (
-          <span>An end user</span>
-        ) : (
-          DEFAULT_ACTOR_DISPLAY
-        );
+        // Self-service activities render as a passive-voice sentence in the
+        // template (e.g. "<title> was installed on <host> (self-service).")
+        // without an actor prefix.
+        if (activity.details?.self_service) return null;
+        // Auto-update installs are Fleet-initiated even if the stored actor
+        // says otherwise (e.g. legacy rows written before the fleet_initiated
+        // flag was wired up).
+        if (activity.details?.from_auto_update) return <b>Fleet </b>;
+        // A missing actor here means the initiating admin has been deleted
+        // since the install was queued (the LEFT JOIN on users returns nil).
+        // Trim so whitespace-only names also count as missing. Fall back to
+        // Fleet so the sentence doesn't render as a blank actor.
+        if (!activity.actor_full_name?.trim()) return <b>Fleet </b>;
+        return DEFAULT_ACTOR_DISPLAY;
+      case ActivityType.InstalledAllSelfServiceSoftware:
+        // The template carries the "End user" subject for this roll-up.
+        return null;
+      case ActivityType.UserMFARequested:
+        // The template carries its own "Somebody"/"Somebody using <email>"
+        // subject, so no actor-name prefix should be rendered.
+        return null;
       // these activities have more complicated logic to
       // determine if we display the actor name so we will handle that in the
       // template function
+      case ActivityType.FleetEnrolled:
       case ActivityType.MdmUnenrolled:
       case ActivityType.MdmEnrolled:
       case ActivityType.ResentConfigurationProfile:

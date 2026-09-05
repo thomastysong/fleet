@@ -3,6 +3,7 @@ package androidmgmt
 import (
 	"bytes"
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,7 +16,6 @@ import (
 	"github.com/fleetdm/fleet/v4/server/contexts/ctxerr"
 	"github.com/fleetdm/fleet/v4/server/dev_mode"
 	"github.com/fleetdm/fleet/v4/server/mdm/android"
-	"github.com/go-json-experiment/json"
 	"google.golang.org/api/androidmanagement/v1"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
@@ -222,6 +222,27 @@ func (p *ProxyClient) EnterprisesDevicesDelete(ctx context.Context, deviceName s
 		return fmt.Errorf("deleting device %s: %w", deviceName, err)
 	}
 	return nil
+}
+
+func (p *ProxyClient) EnterprisesDevicesIssueCommand(ctx context.Context, deviceName string, command *androidmanagement.Command) (*androidmanagement.Operation, error) {
+	call := p.mgmt.Enterprises.Devices.IssueCommand(deviceName, command).Context(ctx)
+	call.Header().Set("Authorization", "Bearer "+p.fleetServerSecret)
+	op, err := call.Do()
+	if err != nil {
+		return nil, fmt.Errorf("issuing command to device %s: %w", deviceName, err)
+	}
+	return op, nil
+}
+
+func (p *ProxyClient) EnterprisesDevicesOperationsGet(ctx context.Context, operationName string) (*androidmanagement.Operation, error) {
+	call := p.mgmt.Enterprises.Devices.Operations.Get(operationName).Context(ctx)
+	call.Header().Set("Authorization", "Bearer "+p.fleetServerSecret)
+	op, err := call.Do()
+	if err != nil {
+		// Wrapped with %w so callers can classify the googleapi.Error (not found, quota exceeded).
+		return nil, fmt.Errorf("getting operation %s: %w", operationName, err)
+	}
+	return op, nil
 }
 
 func (p *ProxyClient) EnterprisesDevicesListPartial(ctx context.Context, enterpriseName string, pageToken string) (*androidmanagement.ListDevicesResponse, error) {

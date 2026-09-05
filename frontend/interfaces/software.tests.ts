@@ -20,7 +20,7 @@ describe("formatSoftwareType", () => {
       },
       {
         source: "programs" as const,
-        expected: "Program (Windows)",
+        expected: "Application (Windows)",
         description: "Windows programs",
       },
       {
@@ -57,6 +57,16 @@ describe("formatSoftwareType", () => {
         source: "pkg_packages" as const,
         expected: "Package (pkg)",
         description: "macOS pkg packages",
+      },
+      {
+        source: "go_binaries" as const,
+        expected: "Binary (Go)",
+        description: "Go binaries",
+      },
+      {
+        source: "adobe_plugins" as const,
+        expected: "Plugin (Adobe)",
+        description: "Adobe plugins",
       },
     ];
 
@@ -260,6 +270,8 @@ describe("formatSoftwareType", () => {
       "chocolatey_packages",
       "pkg_packages",
       "vscode_extensions",
+      "go_binaries",
+      "adobe_plugins",
     ] as const;
 
     allSourceTypes.forEach((source) => {

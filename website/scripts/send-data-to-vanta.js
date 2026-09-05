@@ -81,6 +81,12 @@ module.exports = {
         return;
       }
 
+      // If the response from the Fleet instance's /users endpoint did not return an array of users, add an error to the errorReportById object, with this connections ID set as the key, and bail early for this Vanta connection.
+      if(!responseFromUserEndpoint || !_.isArray(responseFromUserEndpoint.users)) {
+        errorReportById[connectionIdAsString] = new Error(`When sending a request to the /users endpoint of a Fleet instance for a VantaConnection (id: ${connectionIdAsString}), the Fleet instance returned an unexpected response that did not contain an array of users.`);
+        return;
+      }
+
       let usersToSyncWithVanta = [];
       // Iterate through the users list, creating user objects to send to Vanta.
       for(let user of responseFromUserEndpoint.users) {
@@ -163,6 +169,10 @@ module.exports = {
       if(vantaConnection.id === 64){
         allHostsOnThisFleetInstance = allHostsOnThisFleetInstance.filter((host)=>{
           return [275].includes(host.team_id);
+        });
+      } else if(vantaConnection.id === 77) {// [?]: https://github.com/fleetdm/confidential/issues/14218
+        allHostsOnThisFleetInstance = allHostsOnThisFleetInstance.filter((host)=>{
+          return [3].includes(host.team_id);
         });
       }
 

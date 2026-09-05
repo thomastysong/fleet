@@ -108,11 +108,11 @@ export const generateTableColumnConfigs = (
           <Button
             className="script-info"
             onClick={onClickScriptName}
-            variant="inverse"
+            variant="link"
           >
             <TooltipTruncatedTextCell
               value={cellProps.row.original.name}
-              classes="w400"
+              className="w400" // Funky workaround for a truncation text cell WITHIN a button
             />
           </Button>
         );
@@ -140,9 +140,7 @@ export const generateTableColumnConfigs = (
             <span className="run-script-action--disabled">
               <TooltipWrapper
                 tipContent={
-                  <div>
-                    Running scripts is disabled in organization settings.
-                  </div>
+                  <>Running scripts is disabled in organization settings.</>
                 }
               >
                 Actions
@@ -166,7 +164,7 @@ export const generateTableColumnConfigs = (
             placeholder="Actions"
             disabled={scriptsDisabled}
             menuAlign="right"
-            variant="small-button"
+            variant="secondary"
           />
         );
       },
