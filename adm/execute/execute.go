@@ -34,11 +34,11 @@ type StepResult struct {
 
 // WaveResult is the outcome of one wave.
 type WaveResult struct {
-	Wave       plan.Wave    `json:"wave"`
-	Applied    int          `json:"applied"`
-	Skipped    int          `json:"skipped"`
-	Failed     int          `json:"failed"`
-	Unverified int          `json:"unverified"`
+	Wave       plan.Wave `json:"wave"`
+	Applied    int       `json:"applied"`
+	Skipped    int       `json:"skipped"`
+	Failed     int       `json:"failed"`
+	Unverified int       `json:"unverified"`
 	// Drifted counts hosts a dry run found out of the desired state.
 	Drifted    int          `json:"drifted,omitempty"`
 	RolledBack bool         `json:"rolled_back"`
@@ -239,7 +239,7 @@ func (e *Executor) Execute(ctx context.Context, p *plan.Plan, opts Options) (*Re
 	}
 	rep.Status = plan.StatusVerified
 	p.Status = plan.StatusVerified
-	rep.Summary = fmt.Sprintf("verified: applied %d, skipped %d, failed %d across %d wave(s)", count(rep.Waves, func(r StepResult) bool { return r.Changed }), count(rep.Waves, func(r StepResult) bool { return r.Skipped }), count(rep.Waves, func(r StepResult) bool { return r.Error != "" }), len(rep.Waves))
+	rep.Summary = fmt.Sprintf("applied %d, skipped %d, failed %d across %d wave(s)", count(rep.Waves, func(r StepResult) bool { return r.Changed }), count(rep.Waves, func(r StepResult) bool { return r.Skipped }), count(rep.Waves, func(r StepResult) bool { return r.Error != "" }), len(rep.Waves))
 	e.record(learn.Outcome{Kind: learn.KindVerified, PlanID: p.ID, IntentID: p.IntentID, Pattern: p.Intent.PatternKey(), Fingerprint: p.Intent.Fingerprint(), Capabilities: p.Capabilities(), Tier: p.Risk.Tier, Score: p.Risk.Score, Hosts: p.Hosts, Actor: opts.Actor, Success: true, Message: rep.Summary, Duration: rep.FinishedAt.Sub(rep.StartedAt)})
 	return rep, nil
 }
